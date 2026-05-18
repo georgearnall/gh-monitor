@@ -10,6 +10,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/georgearnall/gha-monitor/internal/notifs"
 	"github.com/georgearnall/gha-monitor/internal/prs"
 	"github.com/georgearnall/gha-monitor/internal/runs"
 )
@@ -22,11 +23,13 @@ const (
 	ansiGreen  = "\x1b[32m"
 	ansiRed    = "\x1b[31m"
 	ansiYellow = "\x1b[33m"
+	ansiCyan   = "\x1b[36m"
 )
 
 type Snapshot struct {
 	Runs          []runs.Run
 	PRs           []prs.PR
+	Notifs        []notifs.Notification
 	ViewerLogin   string // authenticated user's login, used to keep their own runs longer
 	RepoCount     int
 	RateRemaining int
@@ -44,13 +47,21 @@ func Render(snap Snapshot) {
 
 	rows := visibleRows(snap.Runs, snap.ViewerLogin)
 	active, failed := countByOutcome(rows)
+	notifRows := visibleNotifs(snap.Notifs)
+	unread := unreadCount(notifRows)
 
 	if tty {
 		fmt.Print(ansiClear)
-		setWindowTitle(fmt.Sprintf("gha-monitor · %d active · %d recent failures", active, failed))
+		setWindowTitle(windowTitleString(unread, active, failed))
 	}
 
 	header(snap, tty)
+
+	if len(notifRows) > 0 {
+		fmt.Println()
+		fmt.Println(dim("NOTIFICATIONS", tty))
+		writeNotifsTable(notifRows, tty)
+	}
 
 	if len(snap.PRs) > 0 {
 		fmt.Println()
@@ -58,9 +69,9 @@ func Render(snap Snapshot) {
 		writePRTable(snap.PRs, tty)
 	}
 
-	if len(rows) > 0 || len(snap.PRs) == 0 {
+	if len(rows) > 0 || (len(snap.PRs) == 0 && len(notifRows) == 0) {
 		fmt.Println()
-		if len(snap.PRs) > 0 {
+		if len(snap.PRs) > 0 || len(notifRows) > 0 {
 			fmt.Println(dim("WORKFLOW RUNS", tty))
 		}
 		if len(rows) == 0 {
@@ -70,6 +81,13 @@ func Render(snap Snapshot) {
 		}
 	}
 	footer(snap, tty)
+}
+
+func windowTitleString(unread, active, failed int) string {
+	if unread > 0 {
+		return fmt.Sprintf("gha-monitor · %d unread · %d active · %d recent failures", unread, active, failed)
+	}
+	return fmt.Sprintf("gha-monitor · %d active · %d recent failures", active, failed)
 }
 
 func header(snap Snapshot, tty bool) {
@@ -86,6 +104,9 @@ func header(snap Snapshot, tty bool) {
 func footer(snap Snapshot, tty bool) {
 	parts := []string{polledLabel(snap)}
 	parts = append(parts, fmt.Sprintf("%d repos", snap.RepoCount))
+	if len(snap.Notifs) > 0 {
+		parts = append(parts, fmt.Sprintf("%d notifs", len(snap.Notifs)))
+	}
 	if len(snap.PRs) > 0 {
 		parts = append(parts, fmt.Sprintf("%d PRs", len(snap.PRs)))
 	}
@@ -125,6 +146,101 @@ func relativeAge(t time.Time) string {
 		return fmt.Sprintf("%dh", int(d.Hours()))
 	}
 	return fmt.Sprintf("%dd", int(d.Hours()/24))
+}
+
+// maxVisibleNotifs caps the notifications section length.
+const maxVisibleNotifs = 15
+
+// visibleNotifs slices the notifications list to maxVisibleNotifs. Filtering
+// and sorting already happened upstream in notifs.Poll.
+func visibleNotifs(ns []notifs.Notification) []notifs.Notification {
+	if len(ns) > maxVisibleNotifs {
+		return ns[:maxVisibleNotifs]
+	}
+	return ns
+}
+
+func unreadCount(ns []notifs.Notification) int {
+	n := 0
+	for _, x := range ns {
+		if x.Unread {
+			n++
+		}
+	}
+	return n
+}
+
+func writeNotifsTable(ns []notifs.Notification, tty bool) {
+	rows := make([][]string, 0, len(ns)+1)
+	rows = append(rows, dimRow([]string{"REASON", "REPO", "#", "TITLE", "AGE", "LINK"}, tty))
+	for _, n := range ns {
+		link := n.URL
+		if tty {
+			link = hyperlink(n.URL, "open ↗")
+		}
+		cells := []string{
+			reasonCell(n, tty),
+			n.Repo,
+			fmt.Sprintf("#%d", n.PRNumber),
+			truncate(n.Title, 50),
+			relativeAge(n.UpdatedAt),
+			link,
+		}
+		if !n.Unread && tty {
+			for i, c := range cells {
+				cells[i] = ansiDim + c + ansiReset
+			}
+		}
+		rows = append(rows, cells)
+	}
+	printAligned(rows)
+}
+
+// reasonCell formats the notification reason. Unread items keep their colour;
+// read items return plain text so the caller can wrap the whole row in dim.
+func reasonCell(n notifs.Notification, tty bool) string {
+	if !n.Unread {
+		return reasonGlyph(n.Reason) + " " + reasonLabel(n.Reason)
+	}
+	switch n.Reason {
+	case "mention", "team_mention":
+		return color(ansiCyan, "@", tty) + " mention"
+	case "review_requested":
+		return color(ansiYellow, "◐", tty) + " review"
+	case "comment":
+		return color(ansiDim, "+", tty) + " comment"
+	case "author", "assign":
+		return color(ansiDim, "·", tty) + " own"
+	}
+	return color(ansiDim, "·", tty) + " " + n.Reason
+}
+
+func reasonGlyph(reason string) string {
+	switch reason {
+	case "mention", "team_mention":
+		return "@"
+	case "review_requested":
+		return "◐"
+	case "comment":
+		return "+"
+	case "author", "assign":
+		return "·"
+	}
+	return "·"
+}
+
+func reasonLabel(reason string) string {
+	switch reason {
+	case "mention", "team_mention":
+		return "mention"
+	case "review_requested":
+		return "review"
+	case "comment":
+		return "comment"
+	case "author", "assign":
+		return "own"
+	}
+	return reason
 }
 
 func writePRTable(ps []prs.PR, tty bool) {

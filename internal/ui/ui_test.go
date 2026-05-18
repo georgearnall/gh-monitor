@@ -8,6 +8,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/georgearnall/gha-monitor/internal/notifs"
 	"github.com/georgearnall/gha-monitor/internal/prs"
 	"github.com/georgearnall/gha-monitor/internal/runs"
 )
@@ -289,6 +290,96 @@ func TestVisibleRows_FilterAndCap(t *testing.T) {
 			t.Errorf("got %+v, want only id=1", out)
 		}
 	})
+}
+
+func TestReasonCell_PlainWhenNotTTY_Unread(t *testing.T) {
+	cases := []struct {
+		reason string
+		want   string
+	}{
+		{"mention", "@ mention"},
+		{"team_mention", "@ mention"},
+		{"review_requested", "◐ review"},
+		{"comment", "+ comment"},
+		{"author", "· own"},
+		{"assign", "· own"},
+		{"subscribed", "· subscribed"},
+	}
+	for _, c := range cases {
+		got := reasonCell(notifs.Notification{Reason: c.reason, Unread: true}, false)
+		if got != c.want {
+			t.Errorf("reasonCell(%q, unread=true, tty=false) = %q, want %q", c.reason, got, c.want)
+		}
+	}
+}
+
+func TestReasonCell_ReadVariant(t *testing.T) {
+	// Read notifications return plain (no colour) so the caller can dim the
+	// whole row consistently.
+	got := reasonCell(notifs.Notification{Reason: "mention", Unread: false}, true)
+	if got != "@ mention" {
+		t.Errorf("read mention reasonCell = %q, want %q", got, "@ mention")
+	}
+}
+
+func TestUnreadCount(t *testing.T) {
+	ns := []notifs.Notification{
+		{Unread: true}, {Unread: false}, {Unread: true}, {Unread: true},
+	}
+	if got := unreadCount(ns); got != 3 {
+		t.Errorf("unreadCount = %d, want 3", got)
+	}
+	if got := unreadCount(nil); got != 0 {
+		t.Errorf("unreadCount(nil) = %d, want 0", got)
+	}
+}
+
+func TestVisibleNotifs_CapsAtMax(t *testing.T) {
+	var ns []notifs.Notification
+	for i := 0; i < maxVisibleNotifs+5; i++ {
+		ns = append(ns, notifs.Notification{ID: "x"})
+	}
+	if got := visibleNotifs(ns); len(got) != maxVisibleNotifs {
+		t.Errorf("got %d, want %d", len(got), maxVisibleNotifs)
+	}
+}
+
+func TestWindowTitleString(t *testing.T) {
+	cases := []struct {
+		unread, active, failed int
+		want                   string
+	}{
+		{0, 0, 0, "gha-monitor · 0 active · 0 recent failures"},
+		{0, 2, 1, "gha-monitor · 2 active · 1 recent failures"},
+		{3, 2, 1, "gha-monitor · 3 unread · 2 active · 1 recent failures"},
+	}
+	for _, c := range cases {
+		got := windowTitleString(c.unread, c.active, c.failed)
+		if got != c.want {
+			t.Errorf("windowTitleString(%d,%d,%d) = %q, want %q", c.unread, c.active, c.failed, got, c.want)
+		}
+	}
+}
+
+func TestWriteNotifsTable_AlignsWithDimmedRows(t *testing.T) {
+	now := time.Now()
+	ns := []notifs.Notification{
+		{ID: "1", Repo: "acme/billing", PRNumber: 88, Title: "Add VAT", Reason: "review_requested", URL: "https://github.com/acme/billing/pull/88", UpdatedAt: now.Add(-5 * time.Minute), Unread: true},
+		{ID: "2", Repo: "acme/legacy", PRNumber: 35, Title: "Tidy", Reason: "mention", URL: "https://github.com/acme/legacy/pull/35", UpdatedAt: now.Add(-2 * time.Hour), Unread: false},
+	}
+	out := captureStdout(t, func() { writeNotifsTable(ns, true) })
+	lines := strings.Split(strings.TrimRight(out, "\n"), "\n")
+	if len(lines) != 3 {
+		t.Fatalf("got %d lines, want 3:\n%s", len(lines), out)
+	}
+	// Both header REPO and both data REPO cells should align at the same visible column.
+	headerCol := runeColOf(ansiRe.ReplaceAllString(lines[0], ""), "REPO")
+	for i, repo := range []string{"acme/billing", "acme/legacy"} {
+		col := runeColOf(ansiRe.ReplaceAllString(lines[i+1], ""), repo)
+		if col != headerCol {
+			t.Errorf("row %d: %q at col %d, header REPO at col %d", i+1, repo, col, headerCol)
+		}
+	}
 }
 
 // captureStdout temporarily redirects os.Stdout to a pipe and returns whatever
