@@ -8,8 +8,10 @@ import (
 
 	"github.com/cli/go-gh/v2/pkg/api"
 	"github.com/georgearnall/gha-monitor/internal/discovery"
+	"github.com/georgearnall/gha-monitor/internal/notify"
 	"github.com/georgearnall/gha-monitor/internal/runs"
 	"github.com/georgearnall/gha-monitor/internal/state"
+	"github.com/georgearnall/gha-monitor/internal/ui"
 )
 
 func main() {
@@ -80,20 +82,18 @@ func runWatch(client *api.RESTClient, maxRepos int, interval, repoRefresh time.D
 			}
 		}
 
-		runs, err := runs.Poll(client, repos)
+		polled, err := runs.Poll(client, repos)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "poll: %v\n", err)
 		}
 
-		seen := make(map[int64]bool, len(runs))
-		active := 0
-		for _, r := range runs {
+		seen := make(map[int64]bool, len(polled))
+		for _, r := range polled {
 			seen[r.ID] = true
-			if r.IsActive() {
-				active++
-			}
 			if st.Observe(r) == state.TransitionFailure {
-				fmt.Printf("[FAILED] %s · %s on %s\n  %s\n", r.Repo, r.WorkflowName, r.Branch, r.URL)
+				if err := notify.Failure(r.Repo, r.WorkflowName, r.Branch, r.URL); err != nil {
+					fmt.Fprintf(os.Stderr, "notify: %v\n", err)
+				}
 			}
 		}
 		st.Prune(seen, 7*24*time.Hour)
@@ -101,8 +101,12 @@ func runWatch(client *api.RESTClient, maxRepos int, interval, repoRefresh time.D
 			fmt.Fprintf(os.Stderr, "save state: %v\n", err)
 		}
 
-		fmt.Printf("polled %s · %d repos · %d active runs\n",
-			time.Now().Format("15:04:05"), len(repos), active)
+		ui.Render(ui.Snapshot{
+			Runs:       polled,
+			RepoCount:  len(repos),
+			PolledAt:   time.Now(),
+			NextPollIn: interval,
+		})
 
 		time.Sleep(interval)
 	}
