@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -105,6 +106,68 @@ func (c *Client) Get(path string, v any) error {
 		return nil
 	}
 	return json.Unmarshal(body, v)
+}
+
+// GraphQL posts an authenticated GraphQL query to /graphql and decodes the
+// `data` portion of the response into v. Returns an error if the response
+// contains GraphQL `errors[]` or is a rate-limit response.
+func (c *Client) GraphQL(query string, vars map[string]any, v any) error {
+	body, err := json.Marshal(map[string]any{
+		"query":     query,
+		"variables": vars,
+	})
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequest(http.MethodPost, githubAPIBase+"graphql", bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	c.recordRateLimit(resp)
+
+	if resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusTooManyRequests {
+		raw, _ := io.ReadAll(resp.Body)
+		return &RateLimitedError{
+			Status:     resp.StatusCode,
+			RetryAfter: parseRetryAfter(resp.Header.Get("Retry-After")),
+			Body:       string(raw),
+		}
+	}
+	if resp.StatusCode >= 400 {
+		raw, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("graphql HTTP %d: %s", resp.StatusCode, raw)
+	}
+
+	var envelope struct {
+		Data   json.RawMessage `json:"data"`
+		Errors []struct {
+			Message string `json:"message"`
+		} `json:"errors"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&envelope); err != nil {
+		return err
+	}
+	if len(envelope.Errors) > 0 {
+		msgs := make([]string, len(envelope.Errors))
+		for i, e := range envelope.Errors {
+			msgs[i] = e.Message
+		}
+		return fmt.Errorf("graphql errors: %s", strings.Join(msgs, "; "))
+	}
+	if v == nil {
+		return nil
+	}
+	return json.Unmarshal(envelope.Data, v)
 }
 
 func (c *Client) RateLimit() RateLimit {

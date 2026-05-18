@@ -13,9 +13,11 @@ import (
 	"github.com/georgearnall/gha-monitor/internal/discovery"
 	"github.com/georgearnall/gha-monitor/internal/ghclient"
 	"github.com/georgearnall/gha-monitor/internal/notify"
+	"github.com/georgearnall/gha-monitor/internal/prs"
 	"github.com/georgearnall/gha-monitor/internal/runs"
 	"github.com/georgearnall/gha-monitor/internal/state"
 	"github.com/georgearnall/gha-monitor/internal/ui"
+	"golang.org/x/sync/errgroup"
 )
 
 type stringSet map[string]bool
@@ -57,8 +59,10 @@ type watchConfig struct {
 type pollResult struct {
 	Repos     []discovery.Repo
 	Runs      []runs.Run
+	PRs       []prs.PR
 	RateLimit ghclient.RateLimit
 	PollErr   error
+	PRErr     error
 	DiscErr   error
 }
 
@@ -174,6 +178,9 @@ func runOnce(ctx context.Context, client *ghclient.Client, cfg watchConfig, st *
 	if res.PollErr != nil {
 		fmt.Fprintf(os.Stderr, "poll: %v\n", res.PollErr)
 	}
+	if res.PRErr != nil {
+		fmt.Fprintf(os.Stderr, "pr poll: %v\n", res.PRErr)
+	}
 	applyResult(st, &cfg, res)
 	renderFromState(st, cfg, false)
 	if err := st.Save(); err != nil {
@@ -181,7 +188,8 @@ func runOnce(ctx context.Context, client *ghclient.Client, cfg watchConfig, st *
 	}
 }
 
-// doRefresh runs one synchronous discover + poll pass.
+// doRefresh runs one synchronous discover + poll pass. Workflow-run polling
+// and PR check polling fan out concurrently.
 func doRefresh(ctx context.Context, client *ghclient.Client, cfg *watchConfig) pollResult {
 	res := pollResult{}
 	repos, err := discovery.Discover(client, cfg.maxRepos)
@@ -191,9 +199,22 @@ func doRefresh(ctx context.Context, client *ghclient.Client, cfg *watchConfig) p
 	}
 	repos = filterExcluded(repos, cfg.excluded)
 	res.Repos = repos
-	polled, pollErr := runs.Poll(client, repos)
-	res.Runs = polled
-	res.PollErr = pollErr
+
+	g, _ := errgroup.WithContext(ctx)
+	g.Go(func() error {
+		polled, pollErr := runs.Poll(client, repos)
+		res.Runs = polled
+		res.PollErr = pollErr
+		return nil
+	})
+	g.Go(func() error {
+		pulled, prErr := prs.Poll(client)
+		res.PRs = pulled
+		res.PRErr = prErr
+		return nil
+	})
+	_ = g.Wait()
+
 	res.RateLimit = client.RateLimit()
 	return res
 }
@@ -216,11 +237,11 @@ func scheduleNext(ctx context.Context, client *ghclient.Client, cfg *watchConfig
 // applyResult updates state.Runs, fires notifications, and updates the cache
 // snapshot fields used for fast startup next time.
 func applyResult(st *state.State, cfg *watchConfig, res pollResult) {
-	if res.DiscErr != nil || res.PollErr != nil {
+	if res.DiscErr != nil || res.PollErr != nil || res.PRErr != nil {
 		// Still update RateLimit so the footer reflects reality.
 		st.LastRateLimit = res.RateLimit
 	}
-	if res.Runs == nil && res.Repos == nil {
+	if res.Runs == nil && res.Repos == nil && res.PRs == nil {
 		return
 	}
 	seen := make(map[int64]bool, len(res.Runs))
@@ -239,6 +260,7 @@ func applyResult(st *state.State, cfg *watchConfig, res pollResult) {
 	}
 	st.Prune(seen, 7*24*time.Hour)
 	st.LastView = res.Runs
+	st.LastPRs = res.PRs
 	st.Repos = res.Repos
 	st.LastPoll = time.Now()
 	st.LastRateLimit = res.RateLimit
