@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"os/exec"
 	"os/signal"
 	"strings"
 	"syscall"
@@ -212,12 +213,14 @@ func runWatch(client *ghclient.Client, cfg watchConfig) {
 					nextTimer.Stop()
 				}
 				enqueue(trigger)
-			case 'j':
+			case keyDown:
 				focusedID = moveFocus(st.LastNotifs, focusedID, +1)
 				renderFromState(st, cfg, refreshing, focusedID)
-			case 'k':
+			case keyUp:
 				focusedID = moveFocus(st.LastNotifs, focusedID, -1)
 				renderFromState(st, cfg, refreshing, focusedID)
+			case '\r', '\n':
+				openFocused(st, focusedID)
 			case 'm':
 				markFocusedRead(client, st, &cfg, focusedID)
 			case 'M':
@@ -229,6 +232,27 @@ func runWatch(client *ghclient.Client, cfg watchConfig) {
 		case <-ctx.Done():
 			return
 		}
+	}
+}
+
+// openFocused launches the URL of the focused notification in the user's
+// default browser. Non-blocking: doesn't wait for the browser to exit.
+func openFocused(st *state.State, focusedID string) {
+	if focusedID == "" {
+		return
+	}
+	var url string
+	for _, n := range st.LastNotifs {
+		if n.ID == focusedID {
+			url = n.URL
+			break
+		}
+	}
+	if url == "" {
+		return
+	}
+	if err := exec.Command("open", url).Start(); err != nil {
+		fmt.Fprintf(os.Stderr, "open: %v\n", err)
 	}
 }
 
@@ -365,19 +389,71 @@ func producerLoop(
 	}
 }
 
-// readKeys forwards stdin bytes to the keys channel. Arrow-key escape
-// sequences (ESC [ A/B/C/D) arrive as three separate bytes; none of our
-// keybindings collide with those, so they're harmlessly ignored downstream.
+// Synthetic rune values for non-character keys. Chosen from the Unicode
+// private-use area so they can flow through a chan rune alongside ASCII.
+const (
+	keyUp    rune = 0xE001
+	keyDown  rune = 0xE002
+	keyRight rune = 0xE003
+	keyLeft  rune = 0xE004
+)
+
+// readKeys forwards stdin keystrokes to the keys channel. Plain ASCII bytes
+// are forwarded as-is. CSI escape sequences (ESC [ A/B/C/D) are parsed into
+// the synthetic keyUp/Down/Right/Left runes so the consumer can switch on
+// them like any other key. Unknown CSI sequences are dropped silently.
 func readKeys(ctx context.Context, keys chan<- rune) {
 	r := bufio.NewReader(os.Stdin)
+	forward := func(k rune) bool {
+		select {
+		case keys <- k:
+			return true
+		case <-ctx.Done():
+			return false
+		}
+	}
 	for {
 		c, err := r.ReadByte()
 		if err != nil {
 			return
 		}
-		select {
-		case keys <- rune(c):
-		case <-ctx.Done():
+		if c != 0x1B {
+			if !forward(rune(c)) {
+				return
+			}
+			continue
+		}
+		// ESC: try to consume a CSI sequence.
+		next, err := r.ReadByte()
+		if err != nil {
+			return
+		}
+		if next != '[' {
+			// Lone ESC or an unrelated escape; forward the second byte as a
+			// regular keypress so the user's follow-up still registers.
+			if !forward(rune(next)) {
+				return
+			}
+			continue
+		}
+		third, err := r.ReadByte()
+		if err != nil {
+			return
+		}
+		var arrow rune
+		switch third {
+		case 'A':
+			arrow = keyUp
+		case 'B':
+			arrow = keyDown
+		case 'C':
+			arrow = keyRight
+		case 'D':
+			arrow = keyLeft
+		default:
+			continue
+		}
+		if !forward(arrow) {
 			return
 		}
 	}

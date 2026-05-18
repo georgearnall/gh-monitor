@@ -122,7 +122,7 @@ func footer(snap Snapshot, tty bool) {
 	fmt.Println()
 	fmt.Println(dim(join(parts, " · "), tty))
 	if tty {
-		fmt.Println(dim("[j/k] move  [m] mark read  [M] mark all  [r] refresh  [q] quit", tty))
+		fmt.Println(dim("[↑↓] move  [↵] open  [m] mark read  [M] mark all  [r] refresh  [q] quit", tty))
 	}
 }
 
