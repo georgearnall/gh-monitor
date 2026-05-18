@@ -8,6 +8,7 @@ import (
 
 	"github.com/georgearnall/gha-monitor/internal/discovery"
 	"github.com/georgearnall/gha-monitor/internal/ghclient"
+	"github.com/georgearnall/gha-monitor/internal/notifs"
 )
 
 func TestStringSet(t *testing.T) {
@@ -88,6 +89,55 @@ func TestWatchConfig_NextInterval(t *testing.T) {
 				t.Errorf("got %v, want %v", got, c.want)
 			}
 		})
+	}
+}
+
+func TestPickFocus(t *testing.T) {
+	ns := []notifs.Notification{
+		{ID: "1", Unread: false},
+		{ID: "2", Unread: true},
+		{ID: "3", Unread: true},
+	}
+
+	if got := pickFocus(ns, ""); got != "2" {
+		t.Errorf("empty current should pick first unread; got %q want %q", got, "2")
+	}
+	if got := pickFocus(ns, "3"); got != "3" {
+		t.Errorf("existing current should be preserved; got %q want %q", got, "3")
+	}
+	if got := pickFocus(ns, "missing"); got != "2" {
+		t.Errorf("missing current falls back to first unread; got %q", got)
+	}
+	if got := pickFocus(nil, ""); got != "" {
+		t.Errorf("empty list returns empty, got %q", got)
+	}
+
+	allRead := []notifs.Notification{{ID: "a", Unread: false}, {ID: "b", Unread: false}}
+	if got := pickFocus(allRead, ""); got != "a" {
+		t.Errorf("all-read list falls back to first item, got %q", got)
+	}
+}
+
+func TestMoveFocus(t *testing.T) {
+	ns := []notifs.Notification{{ID: "1"}, {ID: "2"}, {ID: "3"}}
+
+	if got := moveFocus(ns, "1", +1); got != "2" {
+		t.Errorf("down from 1 = %q, want 2", got)
+	}
+	if got := moveFocus(ns, "3", -1); got != "2" {
+		t.Errorf("up from 3 = %q, want 2", got)
+	}
+	if got := moveFocus(ns, "1", -1); got != "1" {
+		t.Errorf("clamp at top: got %q want 1", got)
+	}
+	if got := moveFocus(ns, "3", +1); got != "3" {
+		t.Errorf("clamp at bottom: got %q want 3", got)
+	}
+	if got := moveFocus(ns, "missing", +1); got != "1" {
+		t.Errorf("missing current resets to first; got %q", got)
+	}
+	if got := moveFocus(nil, "x", +1); got != "" {
+		t.Errorf("empty list returns empty, got %q", got)
 	}
 }
 

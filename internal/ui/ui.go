@@ -27,17 +27,18 @@ const (
 )
 
 type Snapshot struct {
-	Runs          []runs.Run
-	PRs           []prs.PR
-	Notifs        []notifs.Notification
-	ViewerLogin   string // authenticated user's login, used to keep their own runs longer
-	RepoCount     int
-	RateRemaining int
-	RateLimit     int
-	PolledAt      time.Time
-	NextPollIn    time.Duration
-	Stale         bool // rendering from disk cache, not fresh
-	Refreshing    bool // a background refresh is in flight
+	Runs            []runs.Run
+	PRs             []prs.PR
+	Notifs          []notifs.Notification
+	FocusedNotifID  string // ID of the notification row to highlight, or "" for none
+	ViewerLogin     string // authenticated user's login, used to keep their own runs longer
+	RepoCount       int
+	RateRemaining   int
+	RateLimit       int
+	PolledAt        time.Time
+	NextPollIn      time.Duration
+	Stale           bool // rendering from disk cache, not fresh
+	Refreshing      bool // a background refresh is in flight
 }
 
 // Render redraws the status table. Safe to call when stdout is not a tty;
@@ -60,7 +61,7 @@ func Render(snap Snapshot) {
 	if len(notifRows) > 0 {
 		fmt.Println()
 		fmt.Println(dim("NOTIFICATIONS", tty))
-		writeNotifsTable(notifRows, tty)
+		writeNotifsTable(notifRows, snap.FocusedNotifID, tty)
 	}
 
 	if len(snap.PRs) > 0 {
@@ -121,7 +122,7 @@ func footer(snap Snapshot, tty bool) {
 	fmt.Println()
 	fmt.Println(dim(join(parts, " · "), tty))
 	if tty {
-		fmt.Println(dim("[r] refresh  [m] mark all read  [q] quit", tty))
+		fmt.Println(dim("[j/k] move  [m] mark read  [M] mark all  [r] refresh  [q] quit", tty))
 	}
 }
 
@@ -170,15 +171,20 @@ func unreadCount(ns []notifs.Notification) int {
 	return n
 }
 
-func writeNotifsTable(ns []notifs.Notification, tty bool) {
+func writeNotifsTable(ns []notifs.Notification, focusedID string, tty bool) {
 	rows := make([][]string, 0, len(ns)+1)
-	rows = append(rows, dimRow([]string{"REASON", "REPO", "#", "TITLE", "AGE", "LINK"}, tty))
+	rows = append(rows, dimRow([]string{"  ", "REASON", "REPO", "#", "TITLE", "AGE", "LINK"}, tty))
 	for _, n := range ns {
 		link := n.URL
 		if tty {
 			link = hyperlink(n.URL, "open ↗")
 		}
+		cursor := "  "
+		if n.ID == focusedID {
+			cursor = color(ansiYellow, "▶", tty) + " "
+		}
 		cells := []string{
+			cursor,
 			reasonCell(n, tty),
 			n.Repo,
 			fmt.Sprintf("#%d", n.PRNumber),
@@ -187,8 +193,10 @@ func writeNotifsTable(ns []notifs.Notification, tty bool) {
 			link,
 		}
 		if !n.Unread && tty {
-			for i, c := range cells {
-				cells[i] = ansiDim + c + ansiReset
+			// Dim everything except the cursor column so the focused row
+			// still stands out even when it's a read item.
+			for i := 1; i < len(cells); i++ {
+				cells[i] = ansiDim + cells[i] + ansiReset
 			}
 		}
 		rows = append(rows, cells)

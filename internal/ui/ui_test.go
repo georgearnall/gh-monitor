@@ -367,7 +367,7 @@ func TestWriteNotifsTable_AlignsWithDimmedRows(t *testing.T) {
 		{ID: "1", Repo: "acme/billing", PRNumber: 88, Title: "Add VAT", Reason: "review_requested", URL: "https://github.com/acme/billing/pull/88", UpdatedAt: now.Add(-5 * time.Minute), Unread: true},
 		{ID: "2", Repo: "acme/legacy", PRNumber: 35, Title: "Tidy", Reason: "mention", URL: "https://github.com/acme/legacy/pull/35", UpdatedAt: now.Add(-2 * time.Hour), Unread: false},
 	}
-	out := captureStdout(t, func() { writeNotifsTable(ns, true) })
+	out := captureStdout(t, func() { writeNotifsTable(ns, "", true) })
 	lines := strings.Split(strings.TrimRight(out, "\n"), "\n")
 	if len(lines) != 3 {
 		t.Fatalf("got %d lines, want 3:\n%s", len(lines), out)
@@ -379,6 +379,31 @@ func TestWriteNotifsTable_AlignsWithDimmedRows(t *testing.T) {
 		if col != headerCol {
 			t.Errorf("row %d: %q at col %d, header REPO at col %d", i+1, repo, col, headerCol)
 		}
+	}
+}
+
+func TestWriteNotifsTable_FocusCursor(t *testing.T) {
+	now := time.Now()
+	ns := []notifs.Notification{
+		{ID: "1", Repo: "acme/a", PRNumber: 1, Title: "one", Reason: "mention", URL: "https://github.com/acme/a/pull/1", UpdatedAt: now, Unread: true},
+		{ID: "2", Repo: "acme/b", PRNumber: 2, Title: "two", Reason: "mention", URL: "https://github.com/acme/b/pull/2", UpdatedAt: now, Unread: true},
+	}
+	out := captureStdout(t, func() { writeNotifsTable(ns, "2", true) })
+	stripped := ansiRe.ReplaceAllString(out, "")
+	if !strings.Contains(stripped, "▶") {
+		t.Fatalf("expected cursor glyph in output:\n%s", stripped)
+	}
+	// Cursor must be on the focused row, not the other one.
+	for _, line := range strings.Split(strings.TrimRight(stripped, "\n"), "\n") {
+		if strings.Contains(line, "▶") && !strings.Contains(line, "acme/b") {
+			t.Errorf("cursor on wrong row: %q", line)
+		}
+	}
+
+	// And no cursor when focusedID is empty.
+	out = captureStdout(t, func() { writeNotifsTable(ns, "", true) })
+	if strings.Contains(ansiRe.ReplaceAllString(out, ""), "▶") {
+		t.Errorf("expected no cursor when focusedID empty:\n%s", out)
 	}
 }
 

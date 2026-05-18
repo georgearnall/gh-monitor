@@ -153,8 +153,10 @@ func runWatch(client *ghclient.Client, cfg watchConfig) {
 		}
 	}()
 
+	focusedID := pickFocus(st.LastNotifs, "")
+
 	// First paint: render whatever's in the cache. <100ms because no network.
-	renderFromState(st, cfg, true /*refreshing*/)
+	renderFromState(st, cfg, true /*refreshing*/, focusedID)
 
 	trigger := make(chan struct{}, 1)
 	started := make(chan struct{}, 1)
@@ -186,7 +188,8 @@ func runWatch(client *ghclient.Client, cfg watchConfig) {
 			refreshing = false
 			applyResult(st, &cfg, res)
 			st.EtagCache = client.Etags()
-			renderFromState(st, cfg, false)
+			focusedID = pickFocus(st.LastNotifs, focusedID)
+			renderFromState(st, cfg, false, focusedID)
 			if err := st.Save(); err != nil {
 				fmt.Fprintf(os.Stderr, "save state: %v\n", err)
 			}
@@ -209,8 +212,16 @@ func runWatch(client *ghclient.Client, cfg watchConfig) {
 					nextTimer.Stop()
 				}
 				enqueue(trigger)
-			case 'm', 'M':
-				markVisibleRead(client, st, &cfg)
+			case 'j':
+				focusedID = moveFocus(st.LastNotifs, focusedID, +1)
+				renderFromState(st, cfg, refreshing, focusedID)
+			case 'k':
+				focusedID = moveFocus(st.LastNotifs, focusedID, -1)
+				renderFromState(st, cfg, refreshing, focusedID)
+			case 'm':
+				markFocusedRead(client, st, &cfg, focusedID)
+			case 'M':
+				markAllVisibleRead(client, st, &cfg, focusedID)
 			case 'q', 'Q':
 				return
 			}
@@ -221,12 +232,35 @@ func runWatch(client *ghclient.Client, cfg watchConfig) {
 	}
 }
 
-// markVisibleRead optimistically flips every unread notification in the
-// cached snapshot to read, repaints immediately so the UI dims them,
-// then fires the PATCH calls in the background. GitHub will reflect the
-// change on its next /notifications response (subject to its 60s server
-// cache); the next refresh confirms.
-func markVisibleRead(client *ghclient.Client, st *state.State, cfg *watchConfig) {
+// markFocusedRead marks the single focused notification read. No-op if the
+// focused row is already read or no row is focused.
+func markFocusedRead(client *ghclient.Client, st *state.State, cfg *watchConfig, focusedID string) {
+	if focusedID == "" {
+		return
+	}
+	var matched string
+	for i := range st.LastNotifs {
+		if st.LastNotifs[i].ID == focusedID && st.LastNotifs[i].Unread {
+			st.LastNotifs[i].Unread = false
+			matched = focusedID
+			break
+		}
+	}
+	if matched == "" {
+		return
+	}
+	renderFromState(st, *cfg, false, focusedID)
+	go func() {
+		if err := notifs.MarkAllRead(client, []string{matched}); err != nil {
+			fmt.Fprintf(os.Stderr, "mark read: %v\n", err)
+		}
+	}()
+}
+
+// markAllVisibleRead optimistically flips every unread notification in the
+// cached snapshot to read, repaints immediately so the UI dims them, then
+// fires PATCH calls in the background.
+func markAllVisibleRead(client *ghclient.Client, st *state.State, cfg *watchConfig, focusedID string) {
 	ids := make([]string, 0, len(st.LastNotifs))
 	for i := range st.LastNotifs {
 		if st.LastNotifs[i].Unread {
@@ -237,12 +271,60 @@ func markVisibleRead(client *ghclient.Client, st *state.State, cfg *watchConfig)
 	if len(ids) == 0 {
 		return
 	}
-	renderFromState(st, *cfg, false)
+	renderFromState(st, *cfg, false, focusedID)
 	go func() {
 		if err := notifs.MarkAllRead(client, ids); err != nil {
 			fmt.Fprintf(os.Stderr, "mark read: %v\n", err)
 		}
 	}()
+}
+
+// pickFocus returns currentID if it still appears in ns, otherwise falls
+// back to the first unread notification, otherwise the first overall.
+// Returns "" only when ns is empty.
+func pickFocus(ns []notifs.Notification, currentID string) string {
+	if currentID != "" {
+		for _, n := range ns {
+			if n.ID == currentID {
+				return currentID
+			}
+		}
+	}
+	for _, n := range ns {
+		if n.Unread {
+			return n.ID
+		}
+	}
+	if len(ns) > 0 {
+		return ns[0].ID
+	}
+	return ""
+}
+
+// moveFocus advances focus by delta rows (positive = down, negative = up),
+// clamped to the bounds of ns. Returns "" if ns is empty.
+func moveFocus(ns []notifs.Notification, currentID string, delta int) string {
+	if len(ns) == 0 {
+		return ""
+	}
+	idx := -1
+	for i, n := range ns {
+		if n.ID == currentID {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		return ns[0].ID
+	}
+	next := idx + delta
+	if next < 0 {
+		next = 0
+	}
+	if next >= len(ns) {
+		next = len(ns) - 1
+	}
+	return ns[next].ID
 }
 
 // enqueue sends to a single-slot channel without blocking when full.
@@ -317,7 +399,7 @@ func runOnce(ctx context.Context, client *ghclient.Client, cfg watchConfig, st *
 	}
 	applyResult(st, &cfg, res)
 	st.EtagCache = client.Etags()
-	renderFromState(st, cfg, false)
+	renderFromState(st, cfg, false, "")
 	if err := st.Save(); err != nil {
 		fmt.Fprintf(os.Stderr, "save state: %v\n", err)
 	}
@@ -414,24 +496,25 @@ func applyResult(st *state.State, cfg *watchConfig, res pollResult) {
 	}
 }
 
-func renderFromState(st *state.State, cfg watchConfig, refreshing bool) {
+func renderFromState(st *state.State, cfg watchConfig, refreshing bool, focusedID string) {
 	stale := refreshing && !st.LastPoll.IsZero()
 	var next time.Duration
 	if !refreshing {
 		next = cfg.nextInterval(activeCount(st.LastView), st.LastRateLimit, nil)
 	}
 	ui.Render(ui.Snapshot{
-		Runs:          st.LastView,
-		PRs:           st.LastPRs,
-		Notifs:        st.LastNotifs,
-		ViewerLogin:   st.ViewerLogin,
-		RepoCount:     len(st.Repos),
-		RateRemaining: st.LastRateLimit.Remaining,
-		RateLimit:     st.LastRateLimit.Limit,
-		PolledAt:      st.LastPoll,
-		NextPollIn:    next,
-		Stale:         stale,
-		Refreshing:    refreshing,
+		Runs:           st.LastView,
+		PRs:            st.LastPRs,
+		Notifs:         st.LastNotifs,
+		FocusedNotifID: focusedID,
+		ViewerLogin:    st.ViewerLogin,
+		RepoCount:      len(st.Repos),
+		RateRemaining:  st.LastRateLimit.Remaining,
+		RateLimit:      st.LastRateLimit.Limit,
+		PolledAt:       st.LastPoll,
+		NextPollIn:     next,
+		Stale:          stale,
+		Refreshing:     refreshing,
 	})
 }
 
