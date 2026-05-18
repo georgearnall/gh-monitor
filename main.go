@@ -88,16 +88,17 @@ func main() {
 	fs.Var(&cfg.excluded, "exclude", "owner/repo to exclude from monitoring (repeatable)")
 	fs.BoolVar(&cfg.noNotify, "no-notify", false, "suppress desktop notifications")
 	fs.BoolVar(&cfg.sound, "sound", false, "also play an audible alert on failure")
-	fs.Usage = func() {
-		fmt.Fprintf(os.Stderr, "Usage: gha-monitor [flags] [list-repos|watch]\n\nFlags:\n")
-		fs.PrintDefaults()
-	}
+	fs.Usage = func() { fmt.Fprint(os.Stderr, helpText) }
 
 	args := os.Args[1:]
 	cmd := ""
 	if len(args) > 0 && !startsWithDash(args[0]) {
 		cmd = args[0]
 		args = args[1:]
+	}
+	if cmd == "help" || cmd == "--help" {
+		fmt.Print(helpText)
+		return
 	}
 	if err := fs.Parse(args); err != nil {
 		os.Exit(2)
@@ -114,10 +115,75 @@ func main() {
 	case "list-repos":
 		runListRepos(client, cfg)
 	default:
-		fmt.Fprintf(os.Stderr, "unknown command: %q\n", cmd)
+		fmt.Fprintf(os.Stderr, "unknown command: %q\n\n", cmd)
+		fmt.Fprint(os.Stderr, helpText)
 		os.Exit(2)
 	}
 }
+
+const helpText = `gh-monitor - watch GitHub Actions runs, PR checks, and notifications
+
+USAGE
+  gh-monitor [flags]              Start the live watch TUI (default)
+  gh-monitor watch [flags]        Same as above, explicit
+  gh-monitor list-repos [flags]   Print the discovered repo set and exit
+  gh-monitor help                 Show this help
+
+FLAGS
+  --max-repos N         Cap the monitored repo set (default 20)
+  --interval D          Poll interval while runs are active (default 20s)
+  --idle-interval D     Poll interval when nothing is running (default 1m)
+  --repo-refresh D      How often to re-run discovery (default 5m)
+  --once                Single poll cycle then exit (no TUI, script-friendly)
+  --exclude owner/repo  Skip a noisy repo. Repeatable.
+  --no-notify           Suppress desktop notifications on workflow failure
+  --sound               Also play a system sound on failure
+
+KEYBINDINGS (watch mode)
+  ↑ / ↓                 Move cursor through the NOTIFICATIONS panel
+  ↵  (enter)            Open focused notification in browser + mark it read
+  m                     Mark focused notification as read
+  M                     Mark every visible unread notification as read
+  r  /  R  /  space     Refresh now (don't wait for the next interval)
+  q  /  Q  /  Ctrl-C    Quit cleanly, restore terminal, save state
+
+PANELS
+  NOTIFICATIONS  Inbound mentions, review requests, replies on threads
+                 you're in, and activity on PRs you authored or were
+                 assigned to. Unread first then most-recent. Read items
+                 stay dimmed for 7 days then drop off.
+  PULL REQUESTS  Your open non-draft PRs across all of GitHub, with check
+                 rollup, review decision, and comment count. Failing
+                 first, then pending, then most-recent.
+  WORKFLOW RUNS  Up to 10 rows. Active runs always shown (any actor);
+                 completed runs only if you triggered them in the last
+                 24h. Renovate / Dependabot / Copilot runs are filtered.
+
+DISCOVERY
+  The monitored repo set is the union of three queries, deduped and
+  sorted by most recent activity:
+    1. /user/repos?affiliation=owner,collaborator
+    2. /search/issues?q=author:@me+is:pr+is:open
+    3. /users/<you>/events  (catches team-membership repos)
+
+STATE
+  Persisted to $XDG_CONFIG_HOME/gh-monitor/state.json (or
+  ~/.config/gh-monitor/state.json). Holds the last rendered tables,
+  an ETag cache for cheap 304 polling, and a run-ID dedup map so
+  failure notifications fire once per run across restarts. Safe to
+  delete at any time; repopulated on next launch.
+
+RATE LIMITS
+  Conditional GETs use If-None-Match; 304 responses do not count
+  against the 5000/hr REST budget. Concurrent in-flight requests are
+  bounded to 8. The poll interval doubles when remaining budget drops
+  below 500. 403 / 429 responses honour Retry-After.
+
+AUTHENTICATION
+  Reuses your gh CLI auth (run 'gh auth login' if you haven't). The
+  token needs the notifications scope to populate the NOTIFICATIONS
+  panel; everything else uses default scopes.
+`
 
 func runListRepos(client *ghclient.Client, cfg watchConfig) {
 	repos, err := discovery.Discover(client, cfg.maxRepos)
