@@ -1,12 +1,15 @@
 package notifs
 
 import (
+	"context"
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/georgearnall/gha-monitor/internal/ghclient"
+	"golang.org/x/sync/errgroup"
 )
 
 // Notification is one GitHub notification, narrowed to PR threads we want to
@@ -98,6 +101,36 @@ func Poll(client *ghclient.Client) ([]Notification, error) {
 		return out[i].UpdatedAt.After(out[j].UpdatedAt)
 	})
 	return out, nil
+}
+
+// MarkAllRead fires PATCH /notifications/threads/{id} for each given thread
+// ID, in parallel, bounded to 8 concurrent requests. Returns the first error
+// encountered; remaining requests still complete.
+func MarkAllRead(client *ghclient.Client, ids []string) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	g, _ := errgroup.WithContext(context.Background())
+	g.SetLimit(8)
+	var (
+		mu       sync.Mutex
+		firstErr error
+	)
+	for _, id := range ids {
+		id := id
+		g.Go(func() error {
+			if err := client.Patch("notifications/threads/"+id, nil); err != nil {
+				mu.Lock()
+				if firstErr == nil {
+					firstErr = err
+				}
+				mu.Unlock()
+			}
+			return nil
+		})
+	}
+	_ = g.Wait()
+	return firstErr
 }
 
 // buildHTMLURL produces a clickable github.com URL. When the reason is a new

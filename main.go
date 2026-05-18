@@ -209,6 +209,8 @@ func runWatch(client *ghclient.Client, cfg watchConfig) {
 					nextTimer.Stop()
 				}
 				enqueue(trigger)
+			case 'm', 'M':
+				markVisibleRead(client, st, &cfg)
 			case 'q', 'Q':
 				return
 			}
@@ -217,6 +219,30 @@ func runWatch(client *ghclient.Client, cfg watchConfig) {
 			return
 		}
 	}
+}
+
+// markVisibleRead optimistically flips every unread notification in the
+// cached snapshot to read, repaints immediately so the UI dims them,
+// then fires the PATCH calls in the background. GitHub will reflect the
+// change on its next /notifications response (subject to its 60s server
+// cache); the next refresh confirms.
+func markVisibleRead(client *ghclient.Client, st *state.State, cfg *watchConfig) {
+	ids := make([]string, 0, len(st.LastNotifs))
+	for i := range st.LastNotifs {
+		if st.LastNotifs[i].Unread {
+			ids = append(ids, st.LastNotifs[i].ID)
+			st.LastNotifs[i].Unread = false
+		}
+	}
+	if len(ids) == 0 {
+		return
+	}
+	renderFromState(st, *cfg, false)
+	go func() {
+		if err := notifs.MarkAllRead(client, ids); err != nil {
+			fmt.Fprintf(os.Stderr, "mark read: %v\n", err)
+		}
+	}()
 }
 
 // enqueue sends to a single-slot channel without blocking when full.

@@ -118,6 +118,52 @@ func (c *Client) Get(path string, v any) error {
 	return json.Unmarshal(body, v)
 }
 
+// Patch performs an authenticated PATCH. body may be nil for an empty body.
+// Returns *RateLimitedError on 403/429. Used for endpoints like
+// PATCH /notifications/threads/{id} where the request side-effect is the
+// point and no response body decoding is needed.
+func (c *Client) Patch(path string, body any) error {
+	var rdr io.Reader
+	if body != nil {
+		buf, err := json.Marshal(body)
+		if err != nil {
+			return err
+		}
+		rdr = bytes.NewReader(buf)
+	}
+	req, err := http.NewRequest(http.MethodPatch, c.baseURL+path, rdr)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	c.recordRateLimit(resp)
+
+	if resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusTooManyRequests {
+		raw, _ := io.ReadAll(resp.Body)
+		return &RateLimitedError{
+			Status:     resp.StatusCode,
+			RetryAfter: parseRetryAfter(resp.Header.Get("Retry-After")),
+			Body:       string(raw),
+		}
+	}
+	if resp.StatusCode >= 400 {
+		raw, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("PATCH %s: HTTP %d: %s", path, resp.StatusCode, raw)
+	}
+	return nil
+}
+
 // GraphQL posts an authenticated GraphQL query to /graphql and decodes the
 // `data` portion of the response into v. Returns an error if the response
 // contains GraphQL `errors[]` or is a rate-limit response.

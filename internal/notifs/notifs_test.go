@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -181,6 +183,71 @@ func TestPoll_EmptyResponse(t *testing.T) {
 	}
 	if len(got) != 0 {
 		t.Errorf("expected zero notifications on empty response, got %+v", got)
+	}
+}
+
+func TestMarkAllRead_FansOutToEachID(t *testing.T) {
+	var (
+		mu  sync.Mutex
+		hit []string
+	)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPatch {
+			t.Errorf("want PATCH, got %s", r.Method)
+		}
+		if !strings.HasPrefix(r.URL.Path, "/notifications/threads/") {
+			t.Errorf("unexpected path: %s", r.URL.Path)
+		}
+		mu.Lock()
+		hit = append(hit, strings.TrimPrefix(r.URL.Path, "/notifications/threads/"))
+		mu.Unlock()
+		w.WriteHeader(http.StatusResetContent)
+	}))
+	defer srv.Close()
+
+	c := ghclient.NewForTest(srv.Client(), srv.URL+"/")
+	if err := MarkAllRead(c, []string{"1", "2", "3"}); err != nil {
+		t.Fatalf("MarkAllRead: %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(hit) != 3 {
+		t.Errorf("got %d PATCHes, want 3: %v", len(hit), hit)
+	}
+	seen := map[string]bool{}
+	for _, id := range hit {
+		seen[id] = true
+	}
+	for _, want := range []string{"1", "2", "3"} {
+		if !seen[want] {
+			t.Errorf("missing PATCH for id %q", want)
+		}
+	}
+}
+
+func TestMarkAllRead_EmptyIDs_NoRequests(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("expected no requests, got %s %s", r.Method, r.URL.Path)
+	}))
+	defer srv.Close()
+
+	c := ghclient.NewForTest(srv.Client(), srv.URL+"/")
+	if err := MarkAllRead(c, nil); err != nil {
+		t.Errorf("MarkAllRead(nil): %v", err)
+	}
+}
+
+func TestMarkAllRead_ReturnsFirstError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	c := ghclient.NewForTest(srv.Client(), srv.URL+"/")
+	err := MarkAllRead(c, []string{"1", "2"})
+	if err == nil {
+		t.Errorf("expected error on 500, got nil")
 	}
 }
 
