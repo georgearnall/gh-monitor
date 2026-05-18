@@ -5,8 +5,8 @@ import (
 	"math/rand/v2"
 	"time"
 
-	"github.com/cli/go-gh/v2/pkg/api"
 	"github.com/georgearnall/gha-monitor/internal/discovery"
+	"github.com/georgearnall/gha-monitor/internal/ghclient"
 )
 
 type Run struct {
@@ -54,7 +54,7 @@ type apiResp struct {
 
 // Poll fetches the most recent workflow runs for each repo, serialised with
 // random jitter to avoid tripping GitHub's secondary rate limits.
-func Poll(client *api.RESTClient, repos []discovery.Repo) ([]Run, error) {
+func Poll(client *ghclient.Client, repos []discovery.Repo) ([]Run, error) {
 	var all []Run
 	for i, r := range repos {
 		if i > 0 {

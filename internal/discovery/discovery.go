@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/cli/go-gh/v2/pkg/api"
+	"github.com/georgearnall/gha-monitor/internal/ghclient"
 )
 
 type Repo struct {
@@ -21,7 +21,7 @@ type Repo struct {
 // Discover returns up to maxRepos active repositories for the authenticated
 // user, deduped from /user/repos (recently pushed-to) and /search/issues
 // (repos with open PRs by the user). Sorted by activity descending.
-func Discover(client *api.RESTClient, maxRepos int) ([]Repo, error) {
+func Discover(client *ghclient.Client, maxRepos int) ([]Repo, error) {
 	pushed, err := fetchUserRepos(client)
 	if err != nil {
 		return nil, fmt.Errorf("user repos: %w", err)
@@ -53,7 +53,7 @@ type userReposItem struct {
 	HTMLURL  string    `json:"html_url"`
 }
 
-func fetchUserRepos(client *api.RESTClient) ([]Repo, error) {
+func fetchUserRepos(client *ghclient.Client) ([]Repo, error) {
 	var items []userReposItem
 	path := "user/repos?sort=pushed&affiliation=owner,collaborator&per_page=30"
 	if err := client.Get(path, &items); err != nil {
@@ -79,7 +79,7 @@ type searchIssuesResp struct {
 	} `json:"items"`
 }
 
-func fetchOpenPRRepos(client *api.RESTClient) ([]Repo, error) {
+func fetchOpenPRRepos(client *ghclient.Client) ([]Repo, error) {
 	q := url.QueryEscape("author:@me is:pr is:open")
 	path := "search/issues?q=" + q + "&per_page=30"
 	var resp searchIssuesResp
