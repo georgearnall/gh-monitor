@@ -24,7 +24,7 @@ type Repo struct {
 // user, deduped from /user/repos (recently pushed-to) and /search/issues
 // (repos with open PRs by the user). Sorted by activity descending.
 func Discover(client *ghclient.Client, maxRepos int) ([]Repo, error) {
-	var pushed, pr []Repo
+	var pushed, pr, activity []Repo
 
 	g, _ := errgroup.WithContext(context.Background())
 	g.Go(func() error {
@@ -43,11 +43,19 @@ func Discover(client *ghclient.Client, maxRepos int) ([]Repo, error) {
 		pr = out
 		return nil
 	})
+	g.Go(func() error {
+		out, err := fetchActivityRepos(client)
+		if err != nil {
+			return fmt.Errorf("activity repos: %w", err)
+		}
+		activity = out
+		return nil
+	})
 	if err := g.Wait(); err != nil {
 		return nil, err
 	}
 
-	merged := mergeRepos(pushed, pr)
+	merged := mergeRepos(mergeRepos(pushed, pr), activity)
 	sort.Slice(merged, func(i, j int) bool {
 		return merged[i].Activity.After(merged[j].Activity)
 	})
@@ -123,6 +131,59 @@ func fetchOpenPRRepos(client *ghclient.Client) ([]Repo, error) {
 			Name:     parts[1],
 			Activity: ts,
 			HTMLURL:  "https://github.com/" + full,
+		})
+	}
+	return out, nil
+}
+
+// fetchActivityRepos picks up repos the user has recently pushed to, opened or
+// merged PRs in, or released. Catches the case where access is granted via team
+// membership (so /user/repos with affiliation=owner,collaborator misses them)
+// but the user actually contributes — e.g. deployment repos triggered via
+// workflow_dispatch.
+func fetchActivityRepos(client *ghclient.Client) ([]Repo, error) {
+	var u struct {
+		Login string `json:"login"`
+	}
+	if err := client.Get("user", &u); err != nil {
+		return nil, err
+	}
+
+	var events []struct {
+		Type string `json:"type"`
+		Repo struct {
+			Name string `json:"name"`
+		} `json:"repo"`
+		CreatedAt time.Time `json:"created_at"`
+	}
+	if err := client.Get("users/"+u.Login+"/events?per_page=100", &events); err != nil {
+		return nil, err
+	}
+
+	latest := make(map[string]time.Time, len(events))
+	for _, e := range events {
+		switch e.Type {
+		case "PushEvent", "PullRequestEvent", "ReleaseEvent", "CreateEvent":
+		default:
+			continue
+		}
+		if cur, ok := latest[e.Repo.Name]; !ok || e.CreatedAt.After(cur) {
+			latest[e.Repo.Name] = e.CreatedAt
+		}
+	}
+
+	out := make([]Repo, 0, len(latest))
+	for name, ts := range latest {
+		parts := strings.SplitN(name, "/", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		out = append(out, Repo{
+			FullName: name,
+			Owner:    parts[0],
+			Name:     parts[1],
+			Activity: ts,
+			HTMLURL:  "https://github.com/" + name,
 		})
 	}
 	return out, nil
