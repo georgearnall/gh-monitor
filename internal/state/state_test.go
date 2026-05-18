@@ -9,6 +9,7 @@ import (
 
 	"github.com/georgearnall/gha-monitor/internal/discovery"
 	"github.com/georgearnall/gha-monitor/internal/ghclient"
+	"github.com/georgearnall/gha-monitor/internal/notifs"
 	"github.com/georgearnall/gha-monitor/internal/prs"
 	"github.com/georgearnall/gha-monitor/internal/runs"
 )
@@ -62,6 +63,10 @@ func TestSaveLoad_Roundtrip(t *testing.T) {
 	}
 	original.Repos = []discovery.Repo{{FullName: "x/y", Owner: "x", Name: "y", Activity: now, HTMLURL: "https://github.com/x/y"}}
 	original.LastPRs = []prs.PR{{Repo: "x/y", Number: 1, Title: "test", URL: "https://github.com/x/y/pull/1", State: "SUCCESS", Passing: 3, Total: 3, UpdatedAt: now}}
+	original.LastNotifs = []notifs.Notification{
+		{ID: "n1", Repo: "x/y", PRNumber: 1, Title: "Need review", Reason: "review_requested", URL: "https://github.com/x/y/pull/1", UpdatedAt: now, Unread: true},
+		{ID: "n2", Repo: "x/y", PRNumber: 2, Title: "Reply", Reason: "comment", URL: "https://github.com/x/y/pull/2#issuecomment-9", UpdatedAt: now, Unread: false},
+	}
 	original.LastPoll = now
 	original.LastRateLimit = ghclient.RateLimit{Limit: 5000, Remaining: 4823, ResetAt: now.Add(time.Hour)}
 	original.EtagCache = map[string]ghclient.EtagEntry{
@@ -88,6 +93,9 @@ func TestSaveLoad_Roundtrip(t *testing.T) {
 	}
 	if !reflect.DeepEqual(reloaded.LastPRs, original.LastPRs) {
 		t.Errorf("LastPRs differ:\n  got %+v\n  want %+v", reloaded.LastPRs, original.LastPRs)
+	}
+	if !reflect.DeepEqual(reloaded.LastNotifs, original.LastNotifs) {
+		t.Errorf("LastNotifs differ:\n  got %+v\n  want %+v", reloaded.LastNotifs, original.LastNotifs)
 	}
 	if !reloaded.LastPoll.Equal(original.LastPoll) {
 		t.Errorf("LastPoll differs: got %v, want %v", reloaded.LastPoll, original.LastPoll)

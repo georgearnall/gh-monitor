@@ -13,6 +13,7 @@ import (
 
 	"github.com/georgearnall/gha-monitor/internal/discovery"
 	"github.com/georgearnall/gha-monitor/internal/ghclient"
+	"github.com/georgearnall/gha-monitor/internal/notifs"
 	"github.com/georgearnall/gha-monitor/internal/notify"
 	"github.com/georgearnall/gha-monitor/internal/prs"
 	"github.com/georgearnall/gha-monitor/internal/runs"
@@ -61,10 +62,12 @@ type pollResult struct {
 	Repos       []discovery.Repo
 	Runs        []runs.Run
 	PRs         []prs.PR
+	Notifs      []notifs.Notification
 	ViewerLogin string
 	RateLimit   ghclient.RateLimit
 	PollErr     error
 	PRErr       error
+	NotifErr    error
 	DiscErr     error
 }
 
@@ -283,6 +286,9 @@ func runOnce(ctx context.Context, client *ghclient.Client, cfg watchConfig, st *
 	if res.PRErr != nil {
 		fmt.Fprintf(os.Stderr, "pr poll: %v\n", res.PRErr)
 	}
+	if res.NotifErr != nil {
+		fmt.Fprintf(os.Stderr, "notif poll: %v\n", res.NotifErr)
+	}
 	applyResult(st, &cfg, res)
 	st.EtagCache = client.Etags()
 	renderFromState(st, cfg, false)
@@ -316,6 +322,12 @@ func doRefresh(ctx context.Context, client *ghclient.Client, cfg *watchConfig) p
 		res.PRErr = prErr
 		return nil
 	})
+	g.Go(func() error {
+		ns, notifErr := notifs.Poll(client)
+		res.Notifs = ns
+		res.NotifErr = notifErr
+		return nil
+	})
 	_ = g.Wait()
 
 	if login, err := client.Viewer(); err == nil {
@@ -328,11 +340,11 @@ func doRefresh(ctx context.Context, client *ghclient.Client, cfg *watchConfig) p
 // applyResult updates state.Runs, fires notifications, and updates the cache
 // snapshot fields used for fast startup next time.
 func applyResult(st *state.State, cfg *watchConfig, res pollResult) {
-	if res.DiscErr != nil || res.PollErr != nil || res.PRErr != nil {
+	if res.DiscErr != nil || res.PollErr != nil || res.PRErr != nil || res.NotifErr != nil {
 		// Still update RateLimit so the footer reflects reality.
 		st.LastRateLimit = res.RateLimit
 	}
-	if res.Runs == nil && res.Repos == nil && res.PRs == nil {
+	if res.Runs == nil && res.Repos == nil && res.PRs == nil && res.Notifs == nil {
 		return
 	}
 	seen := make(map[int64]bool, len(res.Runs))
@@ -352,6 +364,9 @@ func applyResult(st *state.State, cfg *watchConfig, res pollResult) {
 	st.Prune(seen, 7*24*time.Hour)
 	st.LastView = res.Runs
 	st.LastPRs = res.PRs
+	if res.Notifs != nil {
+		st.LastNotifs = res.Notifs
+	}
 	st.Repos = res.Repos
 	st.LastPoll = time.Now()
 	st.LastRateLimit = res.RateLimit

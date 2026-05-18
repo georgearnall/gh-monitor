@@ -10,6 +10,7 @@ import (
 
 	"github.com/georgearnall/gha-monitor/internal/discovery"
 	"github.com/georgearnall/gha-monitor/internal/ghclient"
+	"github.com/georgearnall/gha-monitor/internal/notifs"
 	"github.com/georgearnall/gha-monitor/internal/prs"
 	"github.com/georgearnall/gha-monitor/internal/runs"
 )
@@ -32,14 +33,15 @@ type RunRecord struct {
 }
 
 type State struct {
-	Runs          map[int64]RunRecord            `json:"runs"`
-	LastView      []runs.Run                     `json:"last_view,omitempty"`
-	LastPRs       []prs.PR                       `json:"last_prs,omitempty"`
-	Repos         []discovery.Repo               `json:"repos,omitempty"`
-	LastPoll      time.Time                      `json:"last_poll,omitempty"`
-	LastRateLimit ghclient.RateLimit             `json:"last_rate_limit,omitempty"`
-	ViewerLogin   string                         `json:"viewer_login,omitempty"`
-	EtagCache     map[string]ghclient.EtagEntry  `json:"etag_cache,omitempty"`
+	Runs          map[int64]RunRecord           `json:"runs"`
+	LastView      []runs.Run                    `json:"last_view,omitempty"`
+	LastPRs       []prs.PR                      `json:"last_prs,omitempty"`
+	LastNotifs    []notifs.Notification         `json:"last_notifs,omitempty"`
+	Repos         []discovery.Repo              `json:"repos,omitempty"`
+	LastPoll      time.Time                     `json:"last_poll,omitempty"`
+	LastRateLimit ghclient.RateLimit            `json:"last_rate_limit,omitempty"`
+	ViewerLogin   string                        `json:"viewer_login,omitempty"`
+	EtagCache     map[string]ghclient.EtagEntry `json:"etag_cache,omitempty"`
 	path          string
 }
 
