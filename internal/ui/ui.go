@@ -7,6 +7,7 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"github.com/georgearnall/gha-monitor/internal/prs"
 	"github.com/georgearnall/gha-monitor/internal/runs"
 )
 
@@ -22,6 +23,7 @@ const (
 
 type Snapshot struct {
 	Runs          []runs.Run
+	PRs           []prs.PR
 	RepoCount     int
 	RateRemaining int
 	RateLimit     int
@@ -45,10 +47,23 @@ func Render(snap Snapshot) {
 	}
 
 	header(snap, tty)
-	if len(rows) == 0 {
-		fmt.Println(dim("no active runs or recent failures", tty))
-	} else {
-		writeTable(rows, tty)
+
+	if len(snap.PRs) > 0 {
+		fmt.Println()
+		fmt.Println(dim("PULL REQUESTS", tty))
+		writePRTable(snap.PRs, tty)
+	}
+
+	if len(rows) > 0 || len(snap.PRs) == 0 {
+		fmt.Println()
+		if len(snap.PRs) > 0 {
+			fmt.Println(dim("WORKFLOW RUNS", tty))
+		}
+		if len(rows) == 0 {
+			fmt.Println(dim("no active runs or recent failures", tty))
+		} else {
+			writeTable(rows, tty)
+		}
 	}
 	footer(snap, tty)
 }
@@ -67,6 +82,9 @@ func header(snap Snapshot, tty bool) {
 func footer(snap Snapshot, tty bool) {
 	parts := []string{polledLabel(snap)}
 	parts = append(parts, fmt.Sprintf("%d repos", snap.RepoCount))
+	if len(snap.PRs) > 0 {
+		parts = append(parts, fmt.Sprintf("%d PRs", len(snap.PRs)))
+	}
 	if snap.RateLimit > 0 {
 		parts = append(parts, fmt.Sprintf("rate limit %d/%d", snap.RateRemaining, snap.RateLimit))
 	}
@@ -100,6 +118,41 @@ func relativeAge(t time.Time) string {
 		return fmt.Sprintf("%dh", int(d.Hours()))
 	}
 	return fmt.Sprintf("%dd", int(d.Hours()/24))
+}
+
+func writePRTable(ps []prs.PR, tty bool) {
+	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(tw, dim("STATUS\tREPO\t#\tTITLE\tBRANCH\tAGE\tLINK", tty))
+	for _, p := range ps {
+		link := p.URL
+		if tty {
+			link = hyperlink(p.URL, "open ↗")
+		}
+		fmt.Fprintf(tw, "%s\t%s\t#%d\t%s\t%s\t%s\t%s\n",
+			prStatusCell(p, tty),
+			p.Repo,
+			p.Number,
+			truncate(p.Title, 40),
+			truncate(p.HeadBranch, 30),
+			relativeAge(p.UpdatedAt),
+			link,
+		)
+	}
+	tw.Flush()
+}
+
+func prStatusCell(p prs.PR, tty bool) string {
+	switch {
+	case p.IsFailing():
+		return color(ansiRed, "✗", tty) + fmt.Sprintf(" %d/%d fail", p.Failing, p.Total)
+	case p.IsPending():
+		return color(ansiYellow, "◐", tty) + fmt.Sprintf(" %d/%d wait", p.Passing+p.Failing, p.Total)
+	case p.IsPassing():
+		return color(ansiGreen, "✓", tty) + fmt.Sprintf(" %d/%d pass", p.Passing, p.Total)
+	case p.Total == 0:
+		return color(ansiDim, "·", tty) + " none"
+	}
+	return color(ansiDim, "·", tty) + " " + p.State
 }
 
 func writeTable(rows []runs.Run, tty bool) {

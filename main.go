@@ -274,6 +274,7 @@ func renderFromState(st *state.State, cfg watchConfig, refreshing bool) {
 	}
 	ui.Render(ui.Snapshot{
 		Runs:          st.LastView,
+		PRs:           st.LastPRs,
 		RepoCount:     len(st.Repos),
 		RateRemaining: st.LastRateLimit.Remaining,
 		RateLimit:     st.LastRateLimit.Limit,
