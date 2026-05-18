@@ -262,6 +262,23 @@ func TestVisibleRows_FilterAndCap(t *testing.T) {
 		}
 	})
 
+	t.Run("bot runs are filtered even when active or my-completed", func(t *testing.T) {
+		rs := []runs.Run{
+			// active but on a renovate branch -> drop
+			{ID: 1, Status: "in_progress", Branch: "renovate/phpunit", ActorLogin: "someone-else", UpdatedAt: now},
+			// completed by me, but copilot review -> drop
+			{ID: 2, Status: "completed", Conclusion: "failure", WorkflowName: "Running Copilot Code Review", ActorLogin: "me", UpdatedAt: now.Add(-10 * time.Minute)},
+			// dependabot actor -> drop
+			{ID: 3, Status: "in_progress", ActorLogin: "dependabot[bot]", UpdatedAt: now},
+			// genuine active run from someone else -> keep
+			{ID: 4, Status: "in_progress", ActorLogin: "alice", Branch: "feature/x", WorkflowName: "CI", UpdatedAt: now},
+		}
+		out := visibleRows(rs, viewer)
+		if len(out) != 1 || out[0].ID != 4 {
+			t.Errorf("got %+v, want only id=4", out)
+		}
+	})
+
 	t.Run("no viewer login means only active runs survive", func(t *testing.T) {
 		rs := []runs.Run{
 			mk(1, "in_progress", "", "me", -1*time.Minute),

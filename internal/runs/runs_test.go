@@ -43,6 +43,33 @@ func TestRun_IsFailure(t *testing.T) {
 	}
 }
 
+func TestRun_IsBot(t *testing.T) {
+	cases := []struct {
+		name string
+		r    Run
+		want bool
+	}{
+		{"plain user run", Run{ActorLogin: "alice", Branch: "feature/x", WorkflowName: "CI"}, false},
+		{"renovate bot actor", Run{ActorLogin: "renovate[bot]"}, true},
+		{"dependabot bot actor", Run{ActorLogin: "dependabot[bot]"}, true},
+		{"copilot bot actor", Run{ActorLogin: "Copilot[bot]"}, true},
+		{"copilot reviewer actor", Run{ActorLogin: "copilot-pull-request-reviewer[bot]"}, true},
+		{"renovate branch prefix", Run{Branch: "renovate/phpunit-13"}, true},
+		{"dependabot branch prefix", Run{Branch: "dependabot/npm_and_yarn/react-19"}, true},
+		{"copilot in workflow name", Run{WorkflowName: "Running Copilot Code Review"}, true},
+		{"copilot mixed case", Run{WorkflowName: "copilot review"}, true},
+		{"user branch starting with 'r' is not renovate", Run{Branch: "release/v1.2"}, false},
+		{"workflow named 'Deploy' is not bot", Run{WorkflowName: "Deploy"}, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := c.r.IsBot(); got != c.want {
+				t.Errorf("IsBot() = %v, want %v (%+v)", got, c.want, c.r)
+			}
+		})
+	}
+}
+
 func TestPoll_FansOutToEachRepo(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {

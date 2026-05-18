@@ -269,6 +269,9 @@ const maxVisibleRuns = 10
 func visibleRows(rs []runs.Run, viewerLogin string) []runs.Run {
 	var out []runs.Run
 	for _, r := range rs {
+		if r.IsBot() {
+			continue
+		}
 		switch {
 		case r.IsActive():
 			out = append(out, r)

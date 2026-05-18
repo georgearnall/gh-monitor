@@ -3,6 +3,7 @@ package runs
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -37,6 +38,24 @@ func (r Run) IsActive() bool {
 func (r Run) IsFailure() bool {
 	switch r.Conclusion {
 	case "failure", "timed_out", "startup_failure":
+		return true
+	}
+	return false
+}
+
+// IsBot reports whether the run was triggered by — or runs on behalf of — a
+// known automated agent: Renovate, Dependabot, or a Copilot code-review
+// workflow. Detection covers all three of: actor login, head branch prefix,
+// and workflow name.
+func (r Run) IsBot() bool {
+	switch strings.ToLower(r.ActorLogin) {
+	case "renovate[bot]", "dependabot[bot]", "copilot[bot]", "copilot-pull-request-reviewer[bot]":
+		return true
+	}
+	if strings.HasPrefix(r.Branch, "renovate/") || strings.HasPrefix(r.Branch, "dependabot/") {
+		return true
+	}
+	if strings.Contains(strings.ToLower(r.WorkflowName), "copilot") {
 		return true
 	}
 	return false
