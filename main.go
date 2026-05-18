@@ -301,16 +301,20 @@ func runOnce(ctx context.Context, client *ghclient.Client, cfg watchConfig, st *
 // and PR check polling fan out concurrently.
 func doRefresh(ctx context.Context, client *ghclient.Client, cfg *watchConfig) pollResult {
 	res := pollResult{}
-	repos, err := discovery.Discover(client, cfg.maxRepos)
-	if err != nil {
-		res.DiscErr = err
-		return res
+	repos, discErr := discovery.Discover(client, cfg.maxRepos)
+	if discErr != nil {
+		res.DiscErr = discErr
+		// Fall through. PR and notification polls are independent of the
+		// repo list, so a discovery hiccup should not blank those panels.
 	}
 	repos = filterExcluded(repos, cfg.excluded)
 	res.Repos = repos
 
 	g, _ := errgroup.WithContext(ctx)
 	g.Go(func() error {
+		if discErr != nil {
+			return nil
+		}
 		polled, pollErr := runs.Poll(client, repos)
 		res.Runs = polled
 		res.PollErr = pollErr
@@ -362,12 +366,21 @@ func applyResult(st *state.State, cfg *watchConfig, res pollResult) {
 		}
 	}
 	st.Prune(seen, 7*24*time.Hour)
-	st.LastView = res.Runs
-	st.LastPRs = res.PRs
-	if res.Notifs != nil {
+	// Only overwrite each cached panel when its source poll actually succeeded.
+	// A transient failure in one branch should leave the other panels alone
+	// (and keep the stale data visible) rather than blanking everything.
+	if res.DiscErr == nil && res.PollErr == nil {
+		st.LastView = res.Runs
+	}
+	if res.PRErr == nil && res.PRs != nil {
+		st.LastPRs = res.PRs
+	}
+	if res.NotifErr == nil && res.Notifs != nil {
 		st.LastNotifs = res.Notifs
 	}
-	st.Repos = res.Repos
+	if res.DiscErr == nil && res.Repos != nil {
+		st.Repos = res.Repos
+	}
 	st.LastPoll = time.Now()
 	st.LastRateLimit = res.RateLimit
 	if res.ViewerLogin != "" {
