@@ -3,9 +3,11 @@ package ui
 import (
 	"fmt"
 	"os"
+	"regexp"
 	"sort"
-	"text/tabwriter"
+	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/georgearnall/gha-monitor/internal/prs"
 	"github.com/georgearnall/gha-monitor/internal/runs"
@@ -121,24 +123,24 @@ func relativeAge(t time.Time) string {
 }
 
 func writePRTable(ps []prs.PR, tty bool) {
-	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, dim("STATUS\tREPO\t#\tTITLE\tBRANCH\tAGE\tLINK", tty))
+	rows := make([][]string, 0, len(ps)+1)
+	rows = append(rows, dimRow([]string{"STATUS", "REPO", "#", "TITLE", "BRANCH", "AGE", "LINK"}, tty))
 	for _, p := range ps {
 		link := p.URL
 		if tty {
 			link = hyperlink(p.URL, "open ↗")
 		}
-		fmt.Fprintf(tw, "%s\t%s\t#%d\t%s\t%s\t%s\t%s\n",
+		rows = append(rows, []string{
 			prStatusCell(p, tty),
 			p.Repo,
-			p.Number,
+			fmt.Sprintf("#%d", p.Number),
 			truncate(p.Title, 40),
 			truncate(p.HeadBranch, 30),
 			relativeAge(p.UpdatedAt),
 			link,
-		)
+		})
 	}
-	tw.Flush()
+	printAligned(rows)
 }
 
 func prStatusCell(p prs.PR, tty bool) string {
@@ -156,25 +158,72 @@ func prStatusCell(p prs.PR, tty bool) string {
 }
 
 func writeTable(rows []runs.Run, tty bool) {
-	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, dim("STATUS\tREPO\tWORKFLOW\tBRANCH\tAGE\tLINK", tty))
+	out := make([][]string, 0, len(rows)+1)
+	out = append(out, dimRow([]string{"STATUS", "REPO", "WORKFLOW", "BRANCH", "AGE", "LINK"}, tty))
 	for _, r := range rows {
-		link := "open"
+		link := r.URL
 		if tty {
 			link = hyperlink(r.URL, "open ↗")
-		} else {
-			link = r.URL
 		}
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n",
+		out = append(out, []string{
 			statusCell(r, tty),
 			r.Repo,
 			truncate(r.WorkflowName, 30),
 			truncate(r.Branch, 30),
 			ageString(r),
 			link,
-		)
+		})
 	}
-	tw.Flush()
+	printAligned(out)
+}
+
+// printAligned prints rows with columns padded to their widest VISIBLE cell.
+// ANSI escapes (colors, OSC 8 hyperlinks) are stripped before width measurement
+// so they don't inflate column widths past what the terminal actually shows.
+func printAligned(rows [][]string) {
+	if len(rows) == 0 {
+		return
+	}
+	cols := len(rows[0])
+	widths := make([]int, cols)
+	for _, row := range rows {
+		for i := 0; i < cols && i < len(row); i++ {
+			w := visibleWidth(row[i])
+			if w > widths[i] {
+				widths[i] = w
+			}
+		}
+	}
+	for _, row := range rows {
+		for i := 0; i < cols && i < len(row); i++ {
+			cell := row[i]
+			fmt.Print(cell)
+			if i < cols-1 {
+				pad := widths[i] - visibleWidth(cell) + 2
+				if pad > 0 {
+					fmt.Print(strings.Repeat(" ", pad))
+				}
+			}
+		}
+		fmt.Println()
+	}
+}
+
+var ansiRe = regexp.MustCompile("\x1b\\[[0-9;]*[a-zA-Z]|\x1b\\][^\x07\x1b]*(?:\x07|\x1b\\\\)")
+
+func visibleWidth(s string) int {
+	return utf8.RuneCountInString(ansiRe.ReplaceAllString(s, ""))
+}
+
+func dimRow(cells []string, tty bool) []string {
+	if !tty {
+		return cells
+	}
+	out := make([]string, len(cells))
+	for i, c := range cells {
+		out[i] = ansiDim + c + ansiReset
+	}
+	return out
 }
 
 func visibleRows(rs []runs.Run) []runs.Run {
