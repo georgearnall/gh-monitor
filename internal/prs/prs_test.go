@@ -1,6 +1,15 @@
 package prs
 
-import "testing"
+import (
+	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+
+	"github.com/georgearnall/gha-monitor/internal/ghclient"
+)
 
 func TestPR_IsPredicates(t *testing.T) {
 	cases := []struct {
@@ -84,5 +93,128 @@ func TestBucket_UnknownTypename(t *testing.T) {
 	bucket(contextNode{Typename: "SomeNewType", State: "SUCCESS"}, &pr)
 	if pr.Passing+pr.Failing+pr.Pending != 0 {
 		t.Errorf("unknown typename should be no-op, got %+v", pr)
+	}
+}
+
+func TestPoll_FiltersDraftsAndBucketsChecks(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/graphql" {
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+			return
+		}
+		body, _ := io.ReadAll(r.Body)
+		if !strings.Contains(string(body), "viewer") || !strings.Contains(string(body), "statusCheckRollup") {
+			t.Errorf("query body missing expected fragments: %s", body)
+		}
+		fmt.Fprint(w, `{"data":{"viewer":{"pullRequests":{"nodes":[
+			{
+				"number": 100, "title":"Draft PR","url":"https://github.com/x/y/pull/100",
+				"isDraft": true, "updatedAt":"2026-05-18T10:00:00Z", "headRefName":"draft",
+				"reviewDecision": null, "reviews": {"totalCount":0}, "comments": {"totalCount":0},
+				"repository": {"nameWithOwner":"x/y"},
+				"commits": {"nodes":[]}
+			},
+			{
+				"number": 1, "title":"All green","url":"https://github.com/x/y/pull/1",
+				"isDraft": false, "updatedAt":"2026-05-18T12:00:00Z", "headRefName":"feat-green",
+				"reviewDecision": "APPROVED", "reviews": {"totalCount":2}, "comments": {"totalCount":3},
+				"repository": {"nameWithOwner":"x/y"},
+				"commits": {"nodes":[{"commit":{"statusCheckRollup":{
+					"state":"SUCCESS",
+					"contexts":{"totalCount":2,"nodes":[
+						{"__typename":"CheckRun","conclusion":"SUCCESS","status":"COMPLETED"},
+						{"__typename":"StatusContext","state":"SUCCESS"}
+					]}
+				}}}]}
+			},
+			{
+				"number": 2, "title":"Has failing","url":"https://github.com/x/y/pull/2",
+				"isDraft": false, "updatedAt":"2026-05-18T11:00:00Z", "headRefName":"feat-broken",
+				"reviewDecision": "CHANGES_REQUESTED", "reviews": {"totalCount":1}, "comments": {"totalCount":0},
+				"repository": {"nameWithOwner":"x/y"},
+				"commits": {"nodes":[{"commit":{"statusCheckRollup":{
+					"state":"FAILURE",
+					"contexts":{"totalCount":2,"nodes":[
+						{"__typename":"CheckRun","conclusion":"FAILURE","status":"COMPLETED"},
+						{"__typename":"CheckRun","conclusion":"SUCCESS","status":"COMPLETED"}
+					]}
+				}}}]}
+			},
+			{
+				"number": 3, "title":"Pending","url":"https://github.com/x/y/pull/3",
+				"isDraft": false, "updatedAt":"2026-05-18T13:00:00Z", "headRefName":"feat-running",
+				"reviewDecision": "REVIEW_REQUIRED", "reviews": {"totalCount":0}, "comments": {"totalCount":0},
+				"repository": {"nameWithOwner":"x/y"},
+				"commits": {"nodes":[{"commit":{"statusCheckRollup":{
+					"state":"PENDING",
+					"contexts":{"totalCount":1,"nodes":[
+						{"__typename":"CheckRun","status":"IN_PROGRESS"}
+					]}
+				}}}]}
+			},
+			{
+				"number": 4, "title":"No checks","url":"https://github.com/x/y/pull/4",
+				"isDraft": false, "updatedAt":"2026-05-18T09:00:00Z", "headRefName":"feat-nochecks",
+				"reviewDecision": null, "reviews": {"totalCount":0}, "comments": {"totalCount":1},
+				"repository": {"nameWithOwner":"x/y"},
+				"commits": {"nodes":[{"commit":{"statusCheckRollup":null}}]}
+			}
+		]}}}}`)
+	}))
+	defer srv.Close()
+
+	c := ghclient.NewForTest(srv.Client(), srv.URL+"/")
+	got, err := Poll(c)
+	if err != nil {
+		t.Fatalf("Poll: %v", err)
+	}
+
+	// Draft is filtered.
+	if len(got) != 4 {
+		t.Fatalf("got %d PRs, want 4 (draft should be filtered): %+v", len(got), got)
+	}
+
+	// Sort order: failing first, then pending, then by updated_at desc.
+	if got[0].Number != 2 {
+		t.Errorf("first should be failing #2, got #%d", got[0].Number)
+	}
+	if got[1].Number != 3 {
+		t.Errorf("second should be pending #3, got #%d", got[1].Number)
+	}
+
+	byNum := map[int]PR{}
+	for _, p := range got {
+		byNum[p.Number] = p
+	}
+
+	// #1: all-pass with approval + comments
+	if p := byNum[1]; p.State != "SUCCESS" || p.Passing != 2 || p.Failing != 0 || p.Pending != 0 ||
+		p.ReviewDecision != "APPROVED" || p.ReviewCount != 2 || p.CommentCount != 3 {
+		t.Errorf("PR#1: %+v", p)
+	}
+	// #2: failure with changes requested
+	if p := byNum[2]; p.State != "FAILURE" || p.Failing != 1 || p.Passing != 1 ||
+		p.ReviewDecision != "CHANGES_REQUESTED" {
+		t.Errorf("PR#2: %+v", p)
+	}
+	// #3: pending IN_PROGRESS check counted in Pending
+	if p := byNum[3]; p.State != "PENDING" || p.Pending != 1 {
+		t.Errorf("PR#3: %+v", p)
+	}
+	// #4: no rollup object — all zeros, State empty
+	if p := byNum[4]; p.State != "" || p.Total != 0 || p.CommentCount != 1 {
+		t.Errorf("PR#4: %+v", p)
+	}
+}
+
+func TestPoll_GraphQLError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"errors":[{"message":"viewer not authorized"}]}`)
+	}))
+	defer srv.Close()
+
+	c := ghclient.NewForTest(srv.Client(), srv.URL+"/")
+	if _, err := Poll(c); err == nil {
+		t.Error("expected error from graphql errors[], got nil")
 	}
 }

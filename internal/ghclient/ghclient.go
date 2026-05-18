@@ -29,7 +29,8 @@ type RateLimit struct {
 // does not count against the primary REST budget), and surfacing a typed
 // RateLimitedError when GitHub returns 403/429.
 type Client struct {
-	http *http.Client
+	http    *http.Client
+	baseURL string
 
 	mu    sync.Mutex
 	last  RateLimit
@@ -46,7 +47,13 @@ func New() (*Client, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Client{http: hc, etags: map[string]etagEntry{}}, nil
+	return &Client{http: hc, baseURL: githubAPIBase, etags: map[string]etagEntry{}}, nil
+}
+
+// NewForTest constructs a Client pointed at a custom baseURL — used by tests
+// to wire the client to an httptest.NewServer. The baseURL must end in "/".
+func NewForTest(hc *http.Client, baseURL string) *Client {
+	return &Client{http: hc, baseURL: baseURL, etags: map[string]etagEntry{}}
 }
 
 // Get performs an authenticated GET, transparently using a cached body when
@@ -54,7 +61,7 @@ func New() (*Client, error) {
 //
 // Returns *RateLimitedError on 403/429.
 func (c *Client) Get(path string, v any) error {
-	req, err := http.NewRequest(http.MethodGet, githubAPIBase+path, nil)
+	req, err := http.NewRequest(http.MethodGet, c.baseURL+path, nil)
 	if err != nil {
 		return err
 	}
@@ -119,7 +126,7 @@ func (c *Client) GraphQL(query string, vars map[string]any, v any) error {
 	if err != nil {
 		return err
 	}
-	req, err := http.NewRequest(http.MethodPost, githubAPIBase+"graphql", bytes.NewReader(body))
+	req, err := http.NewRequest(http.MethodPost, c.baseURL+"graphql", bytes.NewReader(body))
 	if err != nil {
 		return err
 	}
