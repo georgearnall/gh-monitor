@@ -27,6 +27,7 @@ const (
 type Snapshot struct {
 	Runs          []runs.Run
 	PRs           []prs.PR
+	ViewerLogin   string // authenticated user's login, used to keep their own runs longer
 	RepoCount     int
 	RateRemaining int
 	RateLimit     int
@@ -41,7 +42,7 @@ type Snapshot struct {
 func Render(snap Snapshot) {
 	tty := isTTY(os.Stdout)
 
-	rows := visibleRows(snap.Runs)
+	rows := visibleRows(snap.Runs, snap.ViewerLogin)
 	active, failed := countByOutcome(rows)
 
 	if tty {
@@ -253,10 +254,25 @@ func dimRow(cells []string, tty bool) []string {
 	return out
 }
 
-func visibleRows(rs []runs.Run) []runs.Run {
+// maxVisibleRuns caps the workflow-runs section length so a busy account
+// doesn't blow out the table.
+const maxVisibleRuns = 10
+
+// visibleRows filters runs for the workflow table:
+//   - All currently-active runs are kept (any actor).
+//   - Completed runs are kept only if triggered by the viewer themselves
+//     AND within the last 24 hours.
+//   - Anything else drops as soon as it finishes.
+//
+// Result is sorted active-first, then by UpdatedAt desc, then truncated to
+// maxVisibleRuns.
+func visibleRows(rs []runs.Run, viewerLogin string) []runs.Run {
 	var out []runs.Run
 	for _, r := range rs {
-		if r.IsActive() || (r.IsFailure() && time.Since(r.UpdatedAt) < time.Hour) {
+		switch {
+		case r.IsActive():
+			out = append(out, r)
+		case viewerLogin != "" && r.ActorLogin == viewerLogin && time.Since(r.UpdatedAt) < 24*time.Hour:
 			out = append(out, r)
 		}
 	}
@@ -267,6 +283,9 @@ func visibleRows(rs []runs.Run) []runs.Run {
 		}
 		return out[i].UpdatedAt.After(out[j].UpdatedAt)
 	})
+	if len(out) > maxVisibleRuns {
+		out = out[:maxVisibleRuns]
+	}
 	return out
 }
 

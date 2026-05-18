@@ -58,13 +58,14 @@ type watchConfig struct {
 }
 
 type pollResult struct {
-	Repos     []discovery.Repo
-	Runs      []runs.Run
-	PRs       []prs.PR
-	RateLimit ghclient.RateLimit
-	PollErr   error
-	PRErr     error
-	DiscErr   error
+	Repos       []discovery.Repo
+	Runs        []runs.Run
+	PRs         []prs.PR
+	ViewerLogin string
+	RateLimit   ghclient.RateLimit
+	PollErr     error
+	PRErr       error
+	DiscErr     error
 }
 
 func main() {
@@ -314,6 +315,9 @@ func doRefresh(ctx context.Context, client *ghclient.Client, cfg *watchConfig) p
 	})
 	_ = g.Wait()
 
+	if login, err := client.Viewer(); err == nil {
+		res.ViewerLogin = login
+	}
 	res.RateLimit = client.RateLimit()
 	return res
 }
@@ -348,6 +352,9 @@ func applyResult(st *state.State, cfg *watchConfig, res pollResult) {
 	st.Repos = res.Repos
 	st.LastPoll = time.Now()
 	st.LastRateLimit = res.RateLimit
+	if res.ViewerLogin != "" {
+		st.ViewerLogin = res.ViewerLogin
+	}
 }
 
 func renderFromState(st *state.State, cfg watchConfig, refreshing bool) {
@@ -359,6 +366,7 @@ func renderFromState(st *state.State, cfg watchConfig, refreshing bool) {
 	ui.Render(ui.Snapshot{
 		Runs:          st.LastView,
 		PRs:           st.LastPRs,
+		ViewerLogin:   st.ViewerLogin,
 		RepoCount:     len(st.Repos),
 		RateRemaining: st.LastRateLimit.Remaining,
 		RateLimit:     st.LastRateLimit.Limit,

@@ -178,6 +178,102 @@ func runeColOf(s, substr string) int {
 	return utf8.RuneCountInString(s[:idx])
 }
 
+func TestVisibleRows_FilterAndCap(t *testing.T) {
+	now := time.Now()
+	mk := func(id int64, status, conclusion, actor string, updatedOffset time.Duration) runs.Run {
+		return runs.Run{
+			ID:         id,
+			Status:     status,
+			Conclusion: conclusion,
+			ActorLogin: actor,
+			UpdatedAt:  now.Add(updatedOffset),
+			CreatedAt:  now.Add(updatedOffset),
+		}
+	}
+
+	viewer := "me"
+
+	t.Run("active runs always kept regardless of actor", func(t *testing.T) {
+		rs := []runs.Run{
+			mk(1, "in_progress", "", "someone-else", -1*time.Minute),
+			mk(2, "queued", "", "me", -1*time.Minute),
+		}
+		out := visibleRows(rs, viewer)
+		if len(out) != 2 {
+			t.Errorf("got %d, want 2: %+v", len(out), out)
+		}
+	})
+
+	t.Run("completed by other actor is dropped", func(t *testing.T) {
+		rs := []runs.Run{
+			mk(1, "completed", "failure", "someone-else", -5*time.Minute),
+			mk(2, "completed", "success", "someone-else", -5*time.Minute),
+		}
+		out := visibleRows(rs, viewer)
+		if len(out) != 0 {
+			t.Errorf("got %d, want 0: %+v", len(out), out)
+		}
+	})
+
+	t.Run("completed by me kept for up to 24h", func(t *testing.T) {
+		rs := []runs.Run{
+			mk(1, "completed", "success", "me", -10*time.Minute),  // recent — keep
+			mk(2, "completed", "failure", "me", -23*time.Hour),     // within 24h — keep
+			mk(3, "completed", "success", "me", -25*time.Hour),     // outside 24h — drop
+		}
+		out := visibleRows(rs, viewer)
+		if len(out) != 2 {
+			t.Errorf("got %d, want 2: %+v", len(out), out)
+		}
+		for _, r := range out {
+			if r.ID == 3 {
+				t.Errorf(">24h run leaked through")
+			}
+		}
+	})
+
+	t.Run("active sorted first, then by UpdatedAt desc", func(t *testing.T) {
+		rs := []runs.Run{
+			mk(1, "completed", "success", "me", -1*time.Minute),
+			mk(2, "in_progress", "", "someone-else", -5*time.Hour),
+			mk(3, "completed", "failure", "me", -30*time.Minute),
+		}
+		out := visibleRows(rs, viewer)
+		if len(out) != 3 {
+			t.Fatalf("got %d, want 3", len(out))
+		}
+		if out[0].ID != 2 {
+			t.Errorf("active should be first, got id=%d", out[0].ID)
+		}
+		if out[1].ID != 1 || out[2].ID != 3 {
+			t.Errorf("completed should sort by UpdatedAt desc, got [%d, %d, %d]", out[0].ID, out[1].ID, out[2].ID)
+		}
+	})
+
+	t.Run("caps at maxVisibleRuns", func(t *testing.T) {
+		var rs []runs.Run
+		// 15 active runs — all kept by filter, but truncated to 10.
+		for i := 0; i < 15; i++ {
+			rs = append(rs, mk(int64(i), "in_progress", "", "someone-else", time.Duration(-i)*time.Minute))
+		}
+		out := visibleRows(rs, viewer)
+		if len(out) != maxVisibleRuns {
+			t.Errorf("got %d, want %d", len(out), maxVisibleRuns)
+		}
+	})
+
+	t.Run("no viewer login means only active runs survive", func(t *testing.T) {
+		rs := []runs.Run{
+			mk(1, "in_progress", "", "me", -1*time.Minute),
+			mk(2, "completed", "success", "me", -5*time.Minute),
+		}
+		out := visibleRows(rs, "")
+		if len(out) != 1 || out[0].ID != 1 {
+			t.Errorf("got %+v, want only id=1", out)
+		}
+	})
+}
+
 // captureStdout temporarily redirects os.Stdout to a pipe and returns whatever
 // fn wrote to it.
 func captureStdout(t *testing.T, fn func()) string {

@@ -38,6 +38,7 @@ type State struct {
 	Repos         []discovery.Repo    `json:"repos,omitempty"`
 	LastPoll      time.Time           `json:"last_poll,omitempty"`
 	LastRateLimit ghclient.RateLimit  `json:"last_rate_limit,omitempty"`
+	ViewerLogin   string              `json:"viewer_login,omitempty"`
 	path          string
 }
 

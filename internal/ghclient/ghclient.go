@@ -32,9 +32,10 @@ type Client struct {
 	http    *http.Client
 	baseURL string
 
-	mu    sync.Mutex
-	last  RateLimit
-	etags map[string]etagEntry
+	mu          sync.Mutex
+	last        RateLimit
+	etags       map[string]etagEntry
+	viewerLogin string
 }
 
 type etagEntry struct {
@@ -175,6 +176,26 @@ func (c *Client) GraphQL(query string, vars map[string]any, v any) error {
 		return nil
 	}
 	return json.Unmarshal(envelope.Data, v)
+}
+
+// Viewer returns the authenticated user's login. Cached after the first call.
+func (c *Client) Viewer() (string, error) {
+	c.mu.Lock()
+	cached := c.viewerLogin
+	c.mu.Unlock()
+	if cached != "" {
+		return cached, nil
+	}
+	var u struct {
+		Login string `json:"login"`
+	}
+	if err := c.Get("user", &u); err != nil {
+		return "", err
+	}
+	c.mu.Lock()
+	c.viewerLogin = u.Login
+	c.mu.Unlock()
+	return u.Login, nil
 }
 
 func (c *Client) RateLimit() RateLimit {

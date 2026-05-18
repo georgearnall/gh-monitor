@@ -252,6 +252,32 @@ func TestParseRetryAfter(t *testing.T) {
 	}
 }
 
+func TestViewer_FetchesAndCaches(t *testing.T) {
+	var calls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if r.URL.Path != "/user" {
+			t.Errorf("unexpected path %q", r.URL.Path)
+		}
+		fmt.Fprint(w, `{"login":"georgearnall"}`)
+	}))
+	defer srv.Close()
+
+	c := newTestClient(srv)
+	for i := 0; i < 3; i++ {
+		login, err := c.Viewer()
+		if err != nil {
+			t.Fatalf("Viewer call %d: %v", i, err)
+		}
+		if login != "georgearnall" {
+			t.Errorf("login = %q, want georgearnall", login)
+		}
+	}
+	if calls != 1 {
+		t.Errorf("expected /user to be hit once (cached), got %d", calls)
+	}
+}
+
 func TestAsRateLimited_NotRateLimited(t *testing.T) {
 	plain := errors.New("nope")
 	if _, ok := AsRateLimited(plain); ok {

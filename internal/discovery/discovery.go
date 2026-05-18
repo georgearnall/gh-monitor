@@ -142,10 +142,8 @@ func fetchOpenPRRepos(client *ghclient.Client) ([]Repo, error) {
 // but the user actually contributes — e.g. deployment repos triggered via
 // workflow_dispatch.
 func fetchActivityRepos(client *ghclient.Client) ([]Repo, error) {
-	var u struct {
-		Login string `json:"login"`
-	}
-	if err := client.Get("user", &u); err != nil {
+	login, err := client.Viewer()
+	if err != nil {
 		return nil, err
 	}
 
@@ -156,7 +154,7 @@ func fetchActivityRepos(client *ghclient.Client) ([]Repo, error) {
 		} `json:"repo"`
 		CreatedAt time.Time `json:"created_at"`
 	}
-	if err := client.Get("users/"+u.Login+"/events?per_page=100", &events); err != nil {
+	if err := client.Get("users/"+login+"/events?per_page=100", &events); err != nil {
 		return nil, err
 	}
 

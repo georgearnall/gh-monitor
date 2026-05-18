@@ -48,12 +48,12 @@ func TestPoll_FansOutToEachRepo(t *testing.T) {
 		switch {
 		case strings.HasPrefix(r.URL.Path, "/repos/x/a/actions/runs"):
 			fmt.Fprint(w, `{"workflow_runs":[
-				{"id":1,"name":"CI","head_branch":"main","status":"in_progress","conclusion":"","html_url":"https://github.com/x/a/runs/1","created_at":"2026-05-18T10:00:00Z","updated_at":"2026-05-18T10:01:00Z"}
+				{"id":1,"name":"CI","head_branch":"main","status":"in_progress","conclusion":"","html_url":"https://github.com/x/a/runs/1","actor":{"login":"alice"},"created_at":"2026-05-18T10:00:00Z","updated_at":"2026-05-18T10:01:00Z"}
 			]}`)
 		case strings.HasPrefix(r.URL.Path, "/repos/x/b/actions/runs"):
 			fmt.Fprint(w, `{"workflow_runs":[
-				{"id":2,"name":"Deploy","head_branch":"main","status":"completed","conclusion":"failure","html_url":"https://github.com/x/b/runs/2","created_at":"2026-05-18T09:00:00Z","updated_at":"2026-05-18T09:30:00Z"},
-				{"id":3,"name":"Tests","head_branch":"feature","status":"completed","conclusion":"success","html_url":"https://github.com/x/b/runs/3","created_at":"2026-05-18T08:00:00Z","updated_at":"2026-05-18T08:15:00Z"}
+				{"id":2,"name":"Deploy","head_branch":"main","status":"completed","conclusion":"failure","html_url":"https://github.com/x/b/runs/2","actor":{"login":"bob"},"created_at":"2026-05-18T09:00:00Z","updated_at":"2026-05-18T09:30:00Z"},
+				{"id":3,"name":"Tests","head_branch":"feature","status":"completed","conclusion":"success","html_url":"https://github.com/x/b/runs/3","actor":{"login":"alice"},"created_at":"2026-05-18T08:00:00Z","updated_at":"2026-05-18T08:15:00Z"}
 			]}`)
 		default:
 			t.Errorf("unexpected request: %s", r.URL.Path)
@@ -79,13 +79,13 @@ func TestPoll_FansOutToEachRepo(t *testing.T) {
 	for _, r := range got {
 		byID[r.ID] = r
 	}
-	if r := byID[1]; r.Repo != "x/a" || !r.IsActive() {
+	if r := byID[1]; r.Repo != "x/a" || !r.IsActive() || r.ActorLogin != "alice" {
 		t.Errorf("run 1: %+v", r)
 	}
-	if r := byID[2]; r.Repo != "x/b" || !r.IsFailure() {
+	if r := byID[2]; r.Repo != "x/b" || !r.IsFailure() || r.ActorLogin != "bob" {
 		t.Errorf("run 2: %+v", r)
 	}
-	if r := byID[3]; r.Repo != "x/b" || r.Conclusion != "success" {
+	if r := byID[3]; r.Repo != "x/b" || r.Conclusion != "success" || r.ActorLogin != "alice" {
 		t.Errorf("run 3: %+v", r)
 	}
 }

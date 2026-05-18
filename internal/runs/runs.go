@@ -19,6 +19,7 @@ type Run struct {
 	Status       string    `json:"status"`
 	Conclusion   string    `json:"conclusion"`
 	URL          string    `json:"url"`
+	ActorLogin   string    `json:"actor_login"`
 	CreatedAt    time.Time `json:"created_at"`
 	UpdatedAt    time.Time `json:"updated_at"`
 }
@@ -49,8 +50,11 @@ type apiResp struct {
 		Status     string    `json:"status"`
 		Conclusion string    `json:"conclusion"`
 		HTMLURL    string    `json:"html_url"`
-		CreatedAt  time.Time `json:"created_at"`
-		UpdatedAt  time.Time `json:"updated_at"`
+		Actor      struct {
+			Login string `json:"login"`
+		} `json:"actor"`
+		CreatedAt time.Time `json:"created_at"`
+		UpdatedAt time.Time `json:"updated_at"`
 	} `json:"workflow_runs"`
 }
 
@@ -94,6 +98,7 @@ func Poll(client *ghclient.Client, repos []discovery.Repo) ([]Run, error) {
 					Status:       wr.Status,
 					Conclusion:   wr.Conclusion,
 					URL:          wr.HTMLURL,
+					ActorLogin:   wr.Actor.Login,
 					CreatedAt:    wr.CreatedAt,
 					UpdatedAt:    wr.UpdatedAt,
 				})
