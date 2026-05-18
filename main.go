@@ -4,16 +4,21 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"time"
 
 	"github.com/cli/go-gh/v2/pkg/api"
 	"github.com/georgearnall/gha-monitor/internal/discovery"
+	"github.com/georgearnall/gha-monitor/internal/runs"
+	"github.com/georgearnall/gha-monitor/internal/state"
 )
 
 func main() {
 	fs := flag.NewFlagSet("gha-monitor", flag.ExitOnError)
 	maxRepos := fs.Int("max-repos", 20, "maximum number of repos to monitor")
+	interval := fs.Duration("interval", 30*time.Second, "poll interval")
+	repoRefresh := fs.Duration("repo-refresh", 5*time.Minute, "repo list refresh interval")
 	fs.Usage = func() {
-		fmt.Fprintf(os.Stderr, "Usage: gha-monitor [flags] [list-repos]\n\nFlags:\n")
+		fmt.Fprintf(os.Stderr, "Usage: gha-monitor [flags] [list-repos|watch]\n\nFlags:\n")
 		fs.PrintDefaults()
 	}
 
@@ -34,7 +39,7 @@ func main() {
 
 	switch cmd {
 	case "", "watch":
-		runWatch(client, *maxRepos)
+		runWatch(client, *maxRepos, *interval, *repoRefresh)
 	case "list-repos":
 		runListRepos(client, *maxRepos)
 	default:
@@ -53,15 +58,54 @@ func runListRepos(client *api.RESTClient, maxRepos int) {
 	}
 }
 
-func runWatch(client *api.RESTClient, maxRepos int) {
-	var user struct {
-		Login string `json:"login"`
+func runWatch(client *api.RESTClient, maxRepos int, interval, repoRefresh time.Duration) {
+	st, err := state.Load()
+	if err != nil {
+		fail("load state: %v", err)
 	}
-	if err := client.Get("user", &user); err != nil {
-		fail("GET /user: %v", err)
+
+	var (
+		repos       []discovery.Repo
+		lastRefresh time.Time
+	)
+
+	for {
+		if time.Since(lastRefresh) > repoRefresh || repos == nil {
+			discovered, err := discovery.Discover(client, maxRepos)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "discover: %v\n", err)
+			} else {
+				repos = discovered
+				lastRefresh = time.Now()
+			}
+		}
+
+		runs, err := runs.Poll(client, repos)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "poll: %v\n", err)
+		}
+
+		seen := make(map[int64]bool, len(runs))
+		active := 0
+		for _, r := range runs {
+			seen[r.ID] = true
+			if r.IsActive() {
+				active++
+			}
+			if st.Observe(r) == state.TransitionFailure {
+				fmt.Printf("[FAILED] %s · %s on %s\n  %s\n", r.Repo, r.WorkflowName, r.Branch, r.URL)
+			}
+		}
+		st.Prune(seen, 7*24*time.Hour)
+		if err := st.Save(); err != nil {
+			fmt.Fprintf(os.Stderr, "save state: %v\n", err)
+		}
+
+		fmt.Printf("polled %s · %d repos · %d active runs\n",
+			time.Now().Format("15:04:05"), len(repos), active)
+
+		time.Sleep(interval)
 	}
-	fmt.Printf("logged in as %s (max %d repos)\n", user.Login, maxRepos)
-	fmt.Println("watch loop not implemented yet — run `gha-monitor list-repos` to see discovered set")
 }
 
 func startsWithDash(s string) bool {
