@@ -54,8 +54,14 @@ type apiResp struct {
 
 // Poll fetches the most recent workflow runs for each repo, serialised with
 // random jitter to avoid tripping GitHub's secondary rate limits.
+//
+// Per-repo errors are logged inline; a rate-limit response is propagated to
+// the caller so the watch loop can honour Retry-After.
 func Poll(client *ghclient.Client, repos []discovery.Repo) ([]Run, error) {
-	var all []Run
+	var (
+		all    []Run
+		fatal  error
+	)
 	for i, r := range repos {
 		if i > 0 {
 			jitter := 200 + rand.IntN(300)
@@ -64,7 +70,9 @@ func Poll(client *ghclient.Client, repos []discovery.Repo) ([]Run, error) {
 		path := fmt.Sprintf("repos/%s/%s/actions/runs?per_page=10", r.Owner, r.Name)
 		var resp apiResp
 		if err := client.Get(path, &resp); err != nil {
-			// Skip a single repo's failure; don't abort the whole pass.
+			if _, ok := ghclient.AsRateLimited(err); ok && fatal == nil {
+				fatal = err
+			}
 			continue
 		}
 		for _, wr := range resp.WorkflowRuns {
@@ -81,5 +89,5 @@ func Poll(client *ghclient.Client, repos []discovery.Repo) ([]Run, error) {
 			})
 		}
 	}
-	return all, nil
+	return all, fatal
 }

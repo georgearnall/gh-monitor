@@ -1,6 +1,7 @@
 package ghclient
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,6 +14,8 @@ import (
 	"github.com/cli/go-gh/v2/pkg/api"
 )
 
+const githubAPIBase = "https://api.github.com/"
+
 // RateLimit holds the most recently observed REST rate-limit state.
 type RateLimit struct {
 	Limit     int
@@ -20,37 +23,64 @@ type RateLimit struct {
 	ResetAt   time.Time
 }
 
-// Client wraps a go-gh REST client, capturing rate-limit headers from every
-// response and surfacing a typed RateLimitedError when GitHub returns 403/429.
+// Client wraps a go-gh authenticated http.Client, capturing rate-limit headers
+// from every response, caching ETags so unchanged resources return 304 (which
+// does not count against the primary REST budget), and surfacing a typed
+// RateLimitedError when GitHub returns 403/429.
 type Client struct {
-	rest *api.RESTClient
+	http *http.Client
 
-	mu   sync.Mutex
-	last RateLimit
+	mu    sync.Mutex
+	last  RateLimit
+	etags map[string]etagEntry
+}
+
+type etagEntry struct {
+	ETag string
+	Body []byte
 }
 
 func New() (*Client, error) {
-	r, err := api.DefaultRESTClient()
+	hc, err := api.DefaultHTTPClient()
 	if err != nil {
 		return nil, err
 	}
-	return &Client{rest: r}, nil
+	return &Client{http: hc, etags: map[string]etagEntry{}}, nil
 }
 
-// Get performs an authenticated GET and decodes the JSON body into v.
-// Returns *RateLimitedError on 403/429 with Retry-After hint.
+// Get performs an authenticated GET, transparently using a cached body when
+// the server returns 304 Not Modified. Decodes the JSON response into v.
+//
+// Returns *RateLimitedError on 403/429.
 func (c *Client) Get(path string, v any) error {
-	resp, err := c.rest.Request(http.MethodGet, path, nil)
+	req, err := http.NewRequest(http.MethodGet, githubAPIBase+path, nil)
 	if err != nil {
-		// go-gh returns a parsed error containing the response status for
-		// non-2xx; surface it directly so callers can match on it.
+		return err
+	}
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+
+	cached, hasCache := c.lookupEtag(path)
+	if hasCache {
+		req.Header.Set("If-None-Match", cached.ETag)
+	}
+
+	resp, err := c.http.Do(req)
+	if err != nil {
 		return err
 	}
 	defer resp.Body.Close()
 
 	c.recordRateLimit(resp)
 
-	if resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusTooManyRequests {
+	switch {
+	case resp.StatusCode == http.StatusNotModified && hasCache:
+		if v == nil {
+			return nil
+		}
+		return json.NewDecoder(bytes.NewReader(cached.Body)).Decode(v)
+
+	case resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusTooManyRequests:
 		retry := parseRetryAfter(resp.Header.Get("Retry-After"))
 		body, _ := io.ReadAll(resp.Body)
 		return &RateLimitedError{
@@ -58,21 +88,42 @@ func (c *Client) Get(path string, v any) error {
 			RetryAfter: retry,
 			Body:       string(body),
 		}
-	}
-	if resp.StatusCode >= 400 {
+
+	case resp.StatusCode >= 400:
 		body, _ := io.ReadAll(resp.Body)
 		return fmt.Errorf("HTTP %d %s: %s", resp.StatusCode, path, body)
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return err
+	}
+	if etag := resp.Header.Get("ETag"); etag != "" {
+		c.storeEtag(path, etagEntry{ETag: etag, Body: body})
 	}
 	if v == nil {
 		return nil
 	}
-	return json.NewDecoder(resp.Body).Decode(v)
+	return json.Unmarshal(body, v)
 }
 
 func (c *Client) RateLimit() RateLimit {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.last
+}
+
+func (c *Client) lookupEtag(path string) (etagEntry, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	e, ok := c.etags[path]
+	return e, ok
+}
+
+func (c *Client) storeEtag(path string, e etagEntry) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.etags[path] = e
 }
 
 func (c *Client) recordRateLimit(resp *http.Response) {
