@@ -174,6 +174,15 @@ func setWindowTitle(s string) {
 	fmt.Fprintf(os.Stderr, "\x1b]2;%s\x07", s)
 }
 
+// ClearWindowTitle restores the terminal title to an empty string. Call on
+// exit so the window doesn't keep showing a stale status.
+func ClearWindowTitle() {
+	if !isTTY(os.Stderr) {
+		return
+	}
+	fmt.Fprint(os.Stderr, "\x1b]2;\x07")
+}
+
 func color(code, s string, tty bool) string {
 	if !tty {
 		return s

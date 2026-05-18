@@ -1,9 +1,13 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"os"
+	"os/signal"
+	"strings"
+	"syscall"
 	"time"
 
 	"github.com/georgearnall/gha-monitor/internal/discovery"
@@ -14,14 +18,40 @@ import (
 	"github.com/georgearnall/gha-monitor/internal/ui"
 )
 
+type stringSet map[string]bool
+
+func (s *stringSet) String() string {
+	if s == nil || *s == nil {
+		return ""
+	}
+	keys := make([]string, 0, len(*s))
+	for k := range *s {
+		keys = append(keys, k)
+	}
+	return strings.Join(keys, ",")
+}
+
+func (s *stringSet) Set(v string) error {
+	if *s == nil {
+		*s = stringSet{}
+	}
+	(*s)[v] = true
+	return nil
+}
+
 type watchConfig struct {
 	maxRepos    int
 	repoRefresh time.Duration
 
-	baseInterval   time.Duration // when no active runs
-	activeInterval time.Duration // when ≥1 active run
-	lowQuotaFloor  time.Duration // when remaining < lowQuotaThreshold
+	baseInterval   time.Duration
+	activeInterval time.Duration
+	lowQuotaFloor  time.Duration
 	lowQuotaLimit  int
+
+	once     bool
+	excluded stringSet
+	noNotify bool
+	sound    bool
 }
 
 func main() {
@@ -36,6 +66,10 @@ func main() {
 	fs.DurationVar(&cfg.activeInterval, "interval", cfg.activeInterval, "poll interval while runs are active")
 	fs.DurationVar(&cfg.baseInterval, "idle-interval", cfg.baseInterval, "poll interval while no runs are active")
 	fs.DurationVar(&cfg.repoRefresh, "repo-refresh", 5*time.Minute, "repo list refresh interval")
+	fs.BoolVar(&cfg.once, "once", false, "run a single poll cycle and exit")
+	fs.Var(&cfg.excluded, "exclude", "owner/repo to exclude from monitoring (repeatable)")
+	fs.BoolVar(&cfg.noNotify, "no-notify", false, "suppress desktop notifications")
+	fs.BoolVar(&cfg.sound, "sound", false, "also play an audible alert on failure")
 	fs.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Usage: gha-monitor [flags] [list-repos|watch]\n\nFlags:\n")
 		fs.PrintDefaults()
@@ -60,28 +94,38 @@ func main() {
 	case "", "watch":
 		runWatch(client, cfg)
 	case "list-repos":
-		runListRepos(client, cfg.maxRepos)
+		runListRepos(client, cfg)
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command: %q\n", cmd)
 		os.Exit(2)
 	}
 }
 
-func runListRepos(client *ghclient.Client, maxRepos int) {
-	repos, err := discovery.Discover(client, maxRepos)
+func runListRepos(client *ghclient.Client, cfg watchConfig) {
+	repos, err := discovery.Discover(client, cfg.maxRepos)
 	if err != nil {
 		fail("discover: %v", err)
 	}
+	repos = filterExcluded(repos, cfg.excluded)
 	for _, r := range repos {
 		fmt.Printf("%-50s %s\n", r.FullName, r.Activity.Format("2006-01-02 15:04"))
 	}
 }
 
 func runWatch(client *ghclient.Client, cfg watchConfig) {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
 	st, err := state.Load()
 	if err != nil {
 		fail("load state: %v", err)
 	}
+	defer func() {
+		if err := st.Save(); err != nil {
+			fmt.Fprintf(os.Stderr, "save state on exit: %v\n", err)
+		}
+		ui.ClearWindowTitle()
+	}()
 
 	var (
 		repos       []discovery.Repo
@@ -94,11 +138,13 @@ func runWatch(client *ghclient.Client, cfg watchConfig) {
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "discover: %v\n", err)
 				if rl, ok := ghclient.AsRateLimited(err); ok {
-					sleepWithFloor(rl.RetryAfter)
+					if !sleepCtx(ctx, max(rl.RetryAfter, 10*time.Second)) {
+						return
+					}
 					continue
 				}
 			} else {
-				repos = discovered
+				repos = filterExcluded(discovered, cfg.excluded)
 				lastRefresh = time.Now()
 			}
 		}
@@ -116,8 +162,13 @@ func runWatch(client *ghclient.Client, cfg watchConfig) {
 				active++
 			}
 			if st.Observe(r) == state.TransitionFailure {
-				if err := notify.Failure(r.Repo, r.WorkflowName, r.Branch, r.URL); err != nil {
-					fmt.Fprintf(os.Stderr, "notify: %v\n", err)
+				if !cfg.noNotify {
+					if err := notify.Failure(r.Repo, r.WorkflowName, r.Branch, r.URL); err != nil {
+						fmt.Fprintf(os.Stderr, "notify: %v\n", err)
+					}
+				}
+				if cfg.sound {
+					notify.PlayAlert()
 				}
 			}
 		}
@@ -138,7 +189,12 @@ func runWatch(client *ghclient.Client, cfg watchConfig) {
 			NextPollIn:    next,
 		})
 
-		time.Sleep(next)
+		if cfg.once {
+			return
+		}
+		if !sleepCtx(ctx, next) {
+			return
+		}
 	}
 }
 
@@ -158,11 +214,30 @@ func (c watchConfig) nextInterval(active int, rl ghclient.RateLimit, pollErr err
 	return d
 }
 
-func sleepWithFloor(d time.Duration) {
-	if d < 10*time.Second {
-		d = 10 * time.Second
+func filterExcluded(repos []discovery.Repo, excl stringSet) []discovery.Repo {
+	if len(excl) == 0 {
+		return repos
 	}
-	time.Sleep(d)
+	out := repos[:0]
+	for _, r := range repos {
+		if excl[r.FullName] {
+			continue
+		}
+		out = append(out, r)
+	}
+	return out
+}
+
+// sleepCtx sleeps for d, returning false if the context was cancelled first.
+func sleepCtx(ctx context.Context, d time.Duration) bool {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-t.C:
+		return true
+	case <-ctx.Done():
+		return false
+	}
 }
 
 func startsWithDash(s string) bool {

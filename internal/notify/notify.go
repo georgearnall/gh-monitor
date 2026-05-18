@@ -61,6 +61,12 @@ func sendOsascript(title, body, url string) error {
 	return exec.Command("osascript", "-e", script).Run()
 }
 
+// PlayAlert plays a short system sound. Best-effort, errors are ignored.
+func PlayAlert() {
+	const sound = "/System/Library/Sounds/Sosumi.aiff"
+	_ = exec.Command("afplay", sound).Start()
+}
+
 // appleString returns an AppleScript-safe double-quoted string literal.
 func appleString(s string) string {
 	s = strings.ReplaceAll(s, "\\", "\\\\")
