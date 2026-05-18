@@ -106,6 +106,74 @@ func TestGet_EtagCachedOn304(t *testing.T) {
 	}
 }
 
+// GitHub returns ETag: W/"" for /notifications regardless of content,
+// which would cause every If-None-Match: W/"" to match itself and produce
+// a 304 even after the underlying notifications changed. Make sure we do
+// NOT cache degenerate ETags, so each call hits the server fresh.
+func TestGet_DegenerateETag_NotCached(t *testing.T) {
+	var (
+		calls          int
+		sawIfNoneMatch bool
+	)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if r.Header.Get("If-None-Match") != "" {
+			sawIfNoneMatch = true
+		}
+		w.Header().Set("ETag", `W/""`)
+		if calls == 1 {
+			fmt.Fprint(w, `{"value":1}`)
+			return
+		}
+		fmt.Fprint(w, `{"value":2}`)
+	}))
+	defer srv.Close()
+
+	c := newTestClient(srv)
+
+	var first struct {
+		Value int `json:"value"`
+	}
+	if err := c.Get("thing", &first); err != nil {
+		t.Fatalf("first Get: %v", err)
+	}
+	if first.Value != 1 {
+		t.Errorf("first.Value = %d, want 1", first.Value)
+	}
+
+	var second struct {
+		Value int `json:"value"`
+	}
+	if err := c.Get("thing", &second); err != nil {
+		t.Fatalf("second Get: %v", err)
+	}
+	if second.Value != 2 {
+		t.Errorf("degenerate ETag should NOT be cached; second.Value = %d, want 2", second.Value)
+	}
+	if sawIfNoneMatch {
+		t.Errorf("second call should not have sent If-None-Match")
+	}
+}
+
+func TestSetEtags_DropsDegenerate(t *testing.T) {
+	c := NewForTest(nil, "http://unused/")
+	c.SetEtags(map[string]EtagEntry{
+		"good":         {ETag: `"abc"`, Body: []byte(`{"x":1}`)},
+		"degenerate":   {ETag: `W/""`, Body: []byte(`{"x":2}`)},
+		"empty-strong": {ETag: `""`, Body: []byte(`{"x":3}`)},
+		"empty-string": {ETag: "", Body: []byte(`{"x":4}`)},
+	})
+	got := c.Etags()
+	if _, ok := got["good"]; !ok {
+		t.Errorf("expected useful ETag to be kept")
+	}
+	for _, k := range []string{"degenerate", "empty-strong", "empty-string"} {
+		if _, ok := got[k]; ok {
+			t.Errorf("expected %q to be dropped from cache", k)
+		}
+	}
+}
+
 func TestGet_RateLimitedError_403(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Retry-After", "60")

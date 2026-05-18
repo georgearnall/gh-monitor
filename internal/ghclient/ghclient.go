@@ -109,13 +109,33 @@ func (c *Client) Get(path string, v any) error {
 	if err != nil {
 		return err
 	}
-	if etag := resp.Header.Get("ETag"); etag != "" {
+	etag := resp.Header.Get("ETag")
+	if isUsefulETag(etag) {
 		c.storeEtag(path, EtagEntry{ETag: etag, Body: body})
+	} else {
+		// Server returned a degenerate ETag (e.g. GitHub's notifications
+		// endpoint returns W/"" as a sentinel). Caching it is worse than
+		// useless: the server would 304 on every subsequent If-None-Match
+		// even after content changes. Drop any existing cache entry so a
+		// stale body from a previous run can't be replayed.
+		c.deleteEtag(path)
 	}
 	if v == nil {
 		return nil
 	}
 	return json.Unmarshal(body, v)
+}
+
+// isUsefulETag reports whether an ETag value is non-empty and not a
+// degenerate weak/strong empty placeholder. GitHub's /notifications endpoint
+// returns `W/""` for every response regardless of content, which would cause
+// every If-None-Match to match itself; we must not cache those.
+func isUsefulETag(etag string) bool {
+	if etag == "" {
+		return false
+	}
+	trimmed := strings.TrimPrefix(etag, "W/")
+	return trimmed != "" && trimmed != `""`
 }
 
 // Patch performs an authenticated PATCH. body may be nil for an empty body.
@@ -239,7 +259,9 @@ func (c *Client) Etags() map[string]EtagEntry {
 }
 
 // SetEtags seeds the ETag cache, typically from a previously-persisted
-// state file. Nil or empty map is a no-op.
+// state file. Nil or empty map is a no-op. Entries with degenerate ETags
+// are dropped so a stale body from a previous binary version cannot be
+// replayed against an endpoint whose ETag is a sentinel value.
 func (c *Client) SetEtags(m map[string]EtagEntry) {
 	if len(m) == 0 {
 		return
@@ -247,6 +269,9 @@ func (c *Client) SetEtags(m map[string]EtagEntry) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	for k, v := range m {
+		if !isUsefulETag(v.ETag) {
+			continue
+		}
 		c.etags[k] = v
 	}
 }
@@ -288,6 +313,12 @@ func (c *Client) storeEtag(path string, e EtagEntry) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.etags[path] = e
+}
+
+func (c *Client) deleteEtag(path string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	delete(c.etags, path)
 }
 
 func (c *Client) recordRateLimit(resp *http.Response) {
