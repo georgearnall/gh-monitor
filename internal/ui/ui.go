@@ -3,6 +3,7 @@ package ui
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"regexp"
 	"sort"
 	"strings"
@@ -336,21 +337,39 @@ func ClearWindowTitle() {
 }
 
 // EnterAltScreen swaps the terminal to its alternate screen buffer so periodic
-// redraws don't blow away the user's existing scrollback. Like vim / less /
-// htop. No-op when stdout is not a tty.
+// redraws don't blow away the user's existing scrollback. Also disables stdin
+// echo (so scroll-wheel / arrow keys don't spam ^[[A^[[B into the view) and
+// hides the cursor. Mirrors vim / less / htop behaviour. No-op when stdout
+// is not a tty.
 func EnterAltScreen() {
 	if !isTTY(os.Stdout) {
 		return
 	}
-	fmt.Fprint(os.Stdout, "\x1b[?1049h\x1b[H")
+	fmt.Fprint(os.Stdout, "\x1b[?1049h\x1b[H\x1b[?25l")
+	setEcho(false)
 }
 
-// ExitAltScreen restores the terminal to its primary screen buffer.
+// ExitAltScreen restores the primary screen buffer, re-enables stdin echo,
+// and restores the cursor.
 func ExitAltScreen() {
 	if !isTTY(os.Stdout) {
 		return
 	}
-	fmt.Fprint(os.Stdout, "\x1b[?1049l")
+	setEcho(true)
+	fmt.Fprint(os.Stdout, "\x1b[?25h\x1b[?1049l")
+}
+
+func setEcho(on bool) {
+	if !isTTY(os.Stdin) {
+		return
+	}
+	arg := "-echo"
+	if on {
+		arg = "echo"
+	}
+	cmd := exec.Command("stty", arg)
+	cmd.Stdin = os.Stdin
+	_ = cmd.Run()
 }
 
 func color(code, s string, tty bool) string {
