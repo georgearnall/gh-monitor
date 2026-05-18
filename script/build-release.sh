@@ -11,9 +11,5 @@ mkdir -p dist
 for p in "${platforms[@]}"; do
   goos="${p%-*}"
   goarch="${p#*-}"
-  ext=""
-  if [ "$goos" = "windows" ]; then
-    ext=".exe"
-  fi
-  GOOS="$goos" GOARCH="$goarch" CGO_ENABLED="${CGO_ENABLED:-0}" go build -trimpath -ldflags="-s -w" -o "dist/${p}${ext}"
+  GOOS="$goos" GOARCH="$goarch" CGO_ENABLED="${CGO_ENABLED:-0}" go build -trimpath -ldflags="-s -w" -o "dist/${p}"
 done
