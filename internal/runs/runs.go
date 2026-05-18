@@ -1,24 +1,26 @@
 package runs
 
 import (
+	"context"
 	"fmt"
-	"math/rand/v2"
+	"sync"
 	"time"
 
 	"github.com/georgearnall/gha-monitor/internal/discovery"
 	"github.com/georgearnall/gha-monitor/internal/ghclient"
+	"golang.org/x/sync/errgroup"
 )
 
 type Run struct {
-	ID           int64
-	Repo         string
-	WorkflowName string
-	Branch       string
-	Status       string
-	Conclusion   string
-	URL          string
-	CreatedAt    time.Time
-	UpdatedAt    time.Time
+	ID           int64     `json:"id"`
+	Repo         string    `json:"repo"`
+	WorkflowName string    `json:"workflow_name"`
+	Branch       string    `json:"branch"`
+	Status       string    `json:"status"`
+	Conclusion   string    `json:"conclusion"`
+	URL          string    `json:"url"`
+	CreatedAt    time.Time `json:"created_at"`
+	UpdatedAt    time.Time `json:"updated_at"`
 }
 
 // IsActive reports whether the run is still in-flight (not yet conclusive).
@@ -52,42 +54,57 @@ type apiResp struct {
 	} `json:"workflow_runs"`
 }
 
-// Poll fetches the most recent workflow runs for each repo, serialised with
-// random jitter to avoid tripping GitHub's secondary rate limits.
-//
-// Per-repo errors are logged inline; a rate-limit response is propagated to
-// the caller so the watch loop can honour Retry-After.
+const pollConcurrency = 8
+
+// Poll fetches the most recent workflow runs for each repo in parallel,
+// bounded to pollConcurrency simultaneous requests. The first rate-limit
+// response is surfaced so the watch loop can honour Retry-After.
 func Poll(client *ghclient.Client, repos []discovery.Repo) ([]Run, error) {
 	var (
-		all    []Run
-		fatal  error
+		mu    sync.Mutex
+		all   []Run
+		fatal error
 	)
-	for i, r := range repos {
-		if i > 0 {
-			jitter := 200 + rand.IntN(300)
-			time.Sleep(time.Duration(jitter) * time.Millisecond)
-		}
-		path := fmt.Sprintf("repos/%s/%s/actions/runs?per_page=10", r.Owner, r.Name)
-		var resp apiResp
-		if err := client.Get(path, &resp); err != nil {
-			if _, ok := ghclient.AsRateLimited(err); ok && fatal == nil {
-				fatal = err
+
+	g, _ := errgroup.WithContext(context.Background())
+	g.SetLimit(pollConcurrency)
+
+	for _, r := range repos {
+		r := r
+		g.Go(func() error {
+			path := fmt.Sprintf("repos/%s/%s/actions/runs?per_page=10", r.Owner, r.Name)
+			var resp apiResp
+			if err := client.Get(path, &resp); err != nil {
+				if _, ok := ghclient.AsRateLimited(err); ok {
+					mu.Lock()
+					if fatal == nil {
+						fatal = err
+					}
+					mu.Unlock()
+				}
+				return nil
 			}
-			continue
-		}
-		for _, wr := range resp.WorkflowRuns {
-			all = append(all, Run{
-				ID:           wr.ID,
-				Repo:         r.FullName,
-				WorkflowName: wr.Name,
-				Branch:       wr.HeadBranch,
-				Status:       wr.Status,
-				Conclusion:   wr.Conclusion,
-				URL:          wr.HTMLURL,
-				CreatedAt:    wr.CreatedAt,
-				UpdatedAt:    wr.UpdatedAt,
-			})
-		}
+			batch := make([]Run, 0, len(resp.WorkflowRuns))
+			for _, wr := range resp.WorkflowRuns {
+				batch = append(batch, Run{
+					ID:           wr.ID,
+					Repo:         r.FullName,
+					WorkflowName: wr.Name,
+					Branch:       wr.HeadBranch,
+					Status:       wr.Status,
+					Conclusion:   wr.Conclusion,
+					URL:          wr.HTMLURL,
+					CreatedAt:    wr.CreatedAt,
+					UpdatedAt:    wr.UpdatedAt,
+				})
+			}
+			mu.Lock()
+			all = append(all, batch...)
+			mu.Unlock()
+			return nil
+		})
 	}
+
+	_ = g.Wait()
 	return all, fatal
 }

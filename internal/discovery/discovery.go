@@ -1,6 +1,7 @@
 package discovery
 
 import (
+	"context"
 	"fmt"
 	"net/url"
 	"sort"
@@ -8,6 +9,7 @@ import (
 	"time"
 
 	"github.com/georgearnall/gha-monitor/internal/ghclient"
+	"golang.org/x/sync/errgroup"
 )
 
 type Repo struct {
@@ -22,14 +24,27 @@ type Repo struct {
 // user, deduped from /user/repos (recently pushed-to) and /search/issues
 // (repos with open PRs by the user). Sorted by activity descending.
 func Discover(client *ghclient.Client, maxRepos int) ([]Repo, error) {
-	pushed, err := fetchUserRepos(client)
-	if err != nil {
-		return nil, fmt.Errorf("user repos: %w", err)
-	}
+	var pushed, pr []Repo
 
-	pr, err := fetchOpenPRRepos(client)
-	if err != nil {
-		return nil, fmt.Errorf("open-PR repos: %w", err)
+	g, _ := errgroup.WithContext(context.Background())
+	g.Go(func() error {
+		out, err := fetchUserRepos(client)
+		if err != nil {
+			return fmt.Errorf("user repos: %w", err)
+		}
+		pushed = out
+		return nil
+	})
+	g.Go(func() error {
+		out, err := fetchOpenPRRepos(client)
+		if err != nil {
+			return fmt.Errorf("open-PR repos: %w", err)
+		}
+		pr = out
+		return nil
+	})
+	if err := g.Wait(); err != nil {
+		return nil, err
 	}
 
 	merged := mergeRepos(pushed, pr)
