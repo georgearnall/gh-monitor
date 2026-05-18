@@ -54,6 +54,14 @@ type watchConfig struct {
 	sound    bool
 }
 
+type pollResult struct {
+	Repos     []discovery.Repo
+	Runs      []runs.Run
+	RateLimit ghclient.RateLimit
+	PollErr   error
+	DiscErr   error
+}
+
 func main() {
 	fs := flag.NewFlagSet("gha-monitor", flag.ExitOnError)
 	cfg := watchConfig{
@@ -120,82 +128,148 @@ func runWatch(client *ghclient.Client, cfg watchConfig) {
 	if err != nil {
 		fail("load state: %v", err)
 	}
+
+	if cfg.once {
+		runOnce(ctx, client, cfg, st)
+		return
+	}
+
+	ui.EnterAltScreen()
+	defer ui.ExitAltScreen()
+	defer ui.ClearWindowTitle()
 	defer func() {
 		if err := st.Save(); err != nil {
 			fmt.Fprintf(os.Stderr, "save state on exit: %v\n", err)
 		}
-		ui.ClearWindowTitle()
 	}()
 
-	var (
-		repos       []discovery.Repo
-		lastRefresh time.Time
-	)
+	// First paint: render whatever's in the cache. <100ms because no network.
+	renderFromState(st, cfg, true /*refreshing*/)
+
+	results := make(chan pollResult, 1)
+	go fireRefresh(ctx, client, &cfg, results)
 
 	for {
-		if time.Since(lastRefresh) > cfg.repoRefresh || repos == nil {
-			discovered, err := discovery.Discover(client, cfg.maxRepos)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "discover: %v\n", err)
-				if rl, ok := ghclient.AsRateLimited(err); ok {
-					if !sleepCtx(ctx, max(rl.RetryAfter, 10*time.Second)) {
-						return
-					}
-					continue
-				}
-			} else {
-				repos = filterExcluded(discovered, cfg.excluded)
-				lastRefresh = time.Now()
+		select {
+		case res := <-results:
+			applyResult(st, &cfg, res)
+			renderFromState(st, cfg, false)
+			if err := st.Save(); err != nil {
+				fmt.Fprintf(os.Stderr, "save state: %v\n", err)
 			}
-		}
+			next := cfg.nextInterval(activeCount(res.Runs), res.RateLimit, res.PollErr)
+			go scheduleNext(ctx, client, &cfg, results, next)
 
-		polled, pollErr := runs.Poll(client, repos)
-		if pollErr != nil {
-			fmt.Fprintf(os.Stderr, "poll: %v\n", pollErr)
-		}
-
-		active := 0
-		seen := make(map[int64]bool, len(polled))
-		for _, r := range polled {
-			seen[r.ID] = true
-			if r.IsActive() {
-				active++
-			}
-			if st.Observe(r) == state.TransitionFailure {
-				if !cfg.noNotify {
-					if err := notify.Failure(r.Repo, r.WorkflowName, r.Branch, r.URL); err != nil {
-						fmt.Fprintf(os.Stderr, "notify: %v\n", err)
-					}
-				}
-				if cfg.sound {
-					notify.PlayAlert()
-				}
-			}
-		}
-		st.Prune(seen, 7*24*time.Hour)
-		if err := st.Save(); err != nil {
-			fmt.Fprintf(os.Stderr, "save state: %v\n", err)
-		}
-
-		rl := client.RateLimit()
-		next := cfg.nextInterval(active, rl, pollErr)
-
-		ui.Render(ui.Snapshot{
-			Runs:          polled,
-			RepoCount:     len(repos),
-			RateRemaining: rl.Remaining,
-			RateLimit:     rl.Limit,
-			PolledAt:      time.Now(),
-			NextPollIn:    next,
-		})
-
-		if cfg.once {
-			return
-		}
-		if !sleepCtx(ctx, next) {
+		case <-ctx.Done():
 			return
 		}
 	}
+}
+
+func runOnce(ctx context.Context, client *ghclient.Client, cfg watchConfig, st *state.State) {
+	res := doRefresh(ctx, client, &cfg)
+	if res.DiscErr != nil {
+		fmt.Fprintf(os.Stderr, "discover: %v\n", res.DiscErr)
+	}
+	if res.PollErr != nil {
+		fmt.Fprintf(os.Stderr, "poll: %v\n", res.PollErr)
+	}
+	applyResult(st, &cfg, res)
+	renderFromState(st, cfg, false)
+	if err := st.Save(); err != nil {
+		fmt.Fprintf(os.Stderr, "save state: %v\n", err)
+	}
+}
+
+// doRefresh runs one synchronous discover + poll pass.
+func doRefresh(ctx context.Context, client *ghclient.Client, cfg *watchConfig) pollResult {
+	res := pollResult{}
+	repos, err := discovery.Discover(client, cfg.maxRepos)
+	if err != nil {
+		res.DiscErr = err
+		return res
+	}
+	repos = filterExcluded(repos, cfg.excluded)
+	res.Repos = repos
+	polled, pollErr := runs.Poll(client, repos)
+	res.Runs = polled
+	res.PollErr = pollErr
+	res.RateLimit = client.RateLimit()
+	return res
+}
+
+func fireRefresh(ctx context.Context, client *ghclient.Client, cfg *watchConfig, out chan<- pollResult) {
+	res := doRefresh(ctx, client, cfg)
+	select {
+	case out <- res:
+	case <-ctx.Done():
+	}
+}
+
+func scheduleNext(ctx context.Context, client *ghclient.Client, cfg *watchConfig, out chan<- pollResult, delay time.Duration) {
+	if !sleepCtx(ctx, delay) {
+		return
+	}
+	fireRefresh(ctx, client, cfg, out)
+}
+
+// applyResult updates state.Runs, fires notifications, and updates the cache
+// snapshot fields used for fast startup next time.
+func applyResult(st *state.State, cfg *watchConfig, res pollResult) {
+	if res.DiscErr != nil || res.PollErr != nil {
+		// Still update RateLimit so the footer reflects reality.
+		st.LastRateLimit = res.RateLimit
+	}
+	if res.Runs == nil && res.Repos == nil {
+		return
+	}
+	seen := make(map[int64]bool, len(res.Runs))
+	for _, r := range res.Runs {
+		seen[r.ID] = true
+		if st.Observe(r) == state.TransitionFailure {
+			if !cfg.noNotify {
+				if err := notify.Failure(r.Repo, r.WorkflowName, r.Branch, r.URL); err != nil {
+					fmt.Fprintf(os.Stderr, "notify: %v\n", err)
+				}
+			}
+			if cfg.sound {
+				notify.PlayAlert()
+			}
+		}
+	}
+	st.Prune(seen, 7*24*time.Hour)
+	st.LastView = res.Runs
+	st.Repos = res.Repos
+	st.LastPoll = time.Now()
+	st.LastRateLimit = res.RateLimit
+}
+
+func renderFromState(st *state.State, cfg watchConfig, refreshing bool) {
+	stale := refreshing && !st.LastPoll.IsZero()
+	var next time.Duration
+	if !refreshing {
+		next = cfg.nextInterval(activeCount(st.LastView), st.LastRateLimit, nil)
+	}
+	ui.Render(ui.Snapshot{
+		Runs:          st.LastView,
+		RepoCount:     len(st.Repos),
+		RateRemaining: st.LastRateLimit.Remaining,
+		RateLimit:     st.LastRateLimit.Limit,
+		PolledAt:      st.LastPoll,
+		NextPollIn:    next,
+		Stale:         stale,
+		Refreshing:    refreshing,
+	})
+}
+
+func activeCount(rs []runs.Run) int {
+	n := 0
+	for _, r := range rs {
+		if r.IsActive() {
+			n++
+		}
+	}
+	return n
 }
 
 func (c watchConfig) nextInterval(active int, rl ghclient.RateLimit, pollErr error) time.Duration {
@@ -228,7 +302,6 @@ func filterExcluded(repos []discovery.Repo, excl stringSet) []discovery.Repo {
 	return out
 }
 
-// sleepCtx sleeps for d, returning false if the context was cancelled first.
 func sleepCtx(ctx context.Context, d time.Duration) bool {
 	t := time.NewTimer(d)
 	defer t.Stop()

@@ -13,11 +13,11 @@ import (
 )
 
 type Repo struct {
-	FullName string
-	Owner    string
-	Name     string
-	Activity time.Time
-	HTMLURL  string
+	FullName string    `json:"full_name"`
+	Owner    string    `json:"owner"`
+	Name     string    `json:"name"`
+	Activity time.Time `json:"activity"`
+	HTMLURL  string    `json:"html_url"`
 }
 
 // Discover returns up to maxRepos active repositories for the authenticated

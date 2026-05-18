@@ -18,9 +18,9 @@ const githubAPIBase = "https://api.github.com/"
 
 // RateLimit holds the most recently observed REST rate-limit state.
 type RateLimit struct {
-	Limit     int
-	Remaining int
-	ResetAt   time.Time
+	Limit     int       `json:"limit"`
+	Remaining int       `json:"remaining"`
+	ResetAt   time.Time `json:"reset_at"`
 }
 
 // Client wraps a go-gh authenticated http.Client, capturing rate-limit headers

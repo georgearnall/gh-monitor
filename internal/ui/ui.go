@@ -27,6 +27,8 @@ type Snapshot struct {
 	RateLimit     int
 	PolledAt      time.Time
 	NextPollIn    time.Duration
+	Stale         bool // rendering from disk cache, not fresh
+	Refreshing    bool // a background refresh is in flight
 }
 
 // Render redraws the status table. Safe to call when stdout is not a tty;
@@ -56,23 +58,48 @@ func header(snap Snapshot, tty bool) {
 	if tty {
 		title = ansiBold + title + ansiReset
 	}
+	if snap.Refreshing {
+		title += dim(" · refreshing", tty)
+	}
 	fmt.Println(title)
 }
 
 func footer(snap Snapshot, tty bool) {
-	parts := []string{
-		"polled " + snap.PolledAt.Format("15:04:05"),
-		fmt.Sprintf("%d repos", snap.RepoCount),
-	}
+	parts := []string{polledLabel(snap)}
+	parts = append(parts, fmt.Sprintf("%d repos", snap.RepoCount))
 	if snap.RateLimit > 0 {
 		parts = append(parts, fmt.Sprintf("rate limit %d/%d", snap.RateRemaining, snap.RateLimit))
 	}
-	if snap.NextPollIn > 0 {
+	if snap.Refreshing {
+		parts = append(parts, "refreshing…")
+	} else if snap.NextPollIn > 0 {
 		parts = append(parts, fmt.Sprintf("next poll in %s", snap.NextPollIn.Round(time.Second)))
 	}
-	line := join(parts, " · ")
 	fmt.Println()
-	fmt.Println(dim(line, tty))
+	fmt.Println(dim(join(parts, " · "), tty))
+}
+
+func polledLabel(snap Snapshot) string {
+	if snap.PolledAt.IsZero() {
+		return "polled never"
+	}
+	if snap.Stale {
+		return "polled " + relativeAge(snap.PolledAt) + " ago"
+	}
+	return "polled " + snap.PolledAt.Format("15:04:05")
+}
+
+func relativeAge(t time.Time) string {
+	d := time.Since(t)
+	switch {
+	case d < time.Minute:
+		return fmt.Sprintf("%ds", int(d.Seconds()))
+	case d < time.Hour:
+		return fmt.Sprintf("%dm", int(d.Minutes()))
+	case d < 24*time.Hour:
+		return fmt.Sprintf("%dh", int(d.Hours()))
+	}
+	return fmt.Sprintf("%dd", int(d.Hours()/24))
 }
 
 func writeTable(rows []runs.Run, tty bool) {
@@ -181,6 +208,24 @@ func ClearWindowTitle() {
 		return
 	}
 	fmt.Fprint(os.Stderr, "\x1b]2;\x07")
+}
+
+// EnterAltScreen swaps the terminal to its alternate screen buffer so periodic
+// redraws don't blow away the user's existing scrollback. Like vim / less /
+// htop. No-op when stdout is not a tty.
+func EnterAltScreen() {
+	if !isTTY(os.Stdout) {
+		return
+	}
+	fmt.Fprint(os.Stdout, "\x1b[?1049h\x1b[H")
+}
+
+// ExitAltScreen restores the terminal to its primary screen buffer.
+func ExitAltScreen() {
+	if !isTTY(os.Stdout) {
+		return
+	}
+	fmt.Fprint(os.Stdout, "\x1b[?1049l")
 }
 
 func color(code, s string, tty bool) string {
