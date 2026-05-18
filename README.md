@@ -4,17 +4,17 @@ A long-running terminal companion that watches your GitHub Actions runs and
 open pull-request check statuses across every repo you actively contribute to.
 
 ```
-gha-monitor
+gh-monitor
 
 PULL REQUESTS
-CHECKS      REVIEW          REPO                                          #     TITLE                                     BRANCH                    AGE   LINK
-✗ 1/1 fail  · needs review  trainline-private/VatCalculationService       #88   Ensure tests cover corporate onboarding…  test-corporateonboarding  157d  open ↗
-✓ 6/6 pass  ✓ approved      trainline-private/spacelift-registry          #234  Rename order-partnership-transaction-or…  rename-opto               2h    open ↗
-· none      ✓ approved      trainline-private/Trainline.PlanExecution     #35   [ECOM-9026] Convert Sql statements to u…  ECOM-9026-upsert          528d  open ↗
+CHECKS      REVIEW          REPO                  #     TITLE                                     BRANCH                AGE   LINK
+✗ 1/1 fail  · needs review  acme/billing-api      #88   Add VAT calculation for corporate signups  feature/vat-corp     2h    open ↗
+✓ 6/6 pass  ✓ approved      acme/checkout-service #234  Rename transaction orchestration module    refactor/tx-orch     30m   open ↗
+· none      ✓ approved      acme/legacy-jobs      #35   Convert SQL statements to upserts          chore/sql-upsert     5d    open ↗
 
 WORKFLOW RUNS
-STATUS         REPO                                       WORKFLOW   BRANCH      AGE  LINK
-● in_progress  trainline-private/OrderProcessingService   Build      main        2m   open ↗
+STATUS         REPO                    WORKFLOW   BRANCH      AGE  LINK
+● in_progress  acme/payments-service   Build      main        2m   open ↗
 
 polled 11:44:53 · 20 repos · 3 PRs · rate limit 4823/5000 · next poll in 30s
 [r] refresh  [q] quit
