@@ -98,6 +98,9 @@ func footer(snap Snapshot, tty bool) {
 	}
 	fmt.Println()
 	fmt.Println(dim(join(parts, " · "), tty))
+	if tty {
+		fmt.Println(dim("[r] refresh  [q] quit", tty))
+	}
 }
 
 func polledLabel(snap Snapshot) string {
@@ -336,40 +339,80 @@ func ClearWindowTitle() {
 	fmt.Fprint(os.Stderr, "\x1b]2;\x07")
 }
 
-// EnterAltScreen swaps the terminal to its alternate screen buffer so periodic
-// redraws don't blow away the user's existing scrollback. Also disables stdin
-// echo (so scroll-wheel / arrow keys don't spam ^[[A^[[B into the view) and
-// hides the cursor. Mirrors vim / less / htop behaviour. No-op when stdout
-// is not a tty.
-func EnterAltScreen() {
+// EnterAltScreen swaps the terminal to its alternate screen buffer, puts stdin
+// in cbreak mode (-echo -icanon) so keypresses arrive byte-by-byte without
+// being echoed, and hides the cursor. Returns an opaque token to pass to
+// ExitAltScreen to restore the previous terminal state exactly.
+func EnterAltScreen() (saved string) {
 	if !isTTY(os.Stdout) {
-		return
+		return ""
 	}
+	saved = sttySaveState()
+	sttyApply("-echo", "-icanon")
 	fmt.Fprint(os.Stdout, "\x1b[?1049h\x1b[H\x1b[?25l")
-	setEcho(false)
+	return saved
 }
 
-// ExitAltScreen restores the primary screen buffer, re-enables stdin echo,
-// and restores the cursor.
-func ExitAltScreen() {
+// ExitAltScreen restores the primary screen buffer, restores the cursor, and
+// restores the terminal mode captured by EnterAltScreen.
+func ExitAltScreen(saved string) {
 	if !isTTY(os.Stdout) {
 		return
 	}
-	setEcho(true)
 	fmt.Fprint(os.Stdout, "\x1b[?25h\x1b[?1049l")
+	sttyRestore(saved)
 }
 
-func setEcho(on bool) {
+func sttySaveState() string {
+	if !isTTY(os.Stdin) {
+		return ""
+	}
+	cmd := exec.Command("stty", "-g")
+	cmd.Stdin = os.Stdin
+	out, err := cmd.Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
+}
+
+func sttyRestore(saved string) {
+	if saved == "" || !isTTY(os.Stdin) {
+		return
+	}
+	cmd := exec.Command("stty", saved)
+	cmd.Stdin = os.Stdin
+	_ = cmd.Run()
+}
+
+func sttyApply(args ...string) {
 	if !isTTY(os.Stdin) {
 		return
 	}
-	arg := "-echo"
-	if on {
-		arg = "echo"
-	}
-	cmd := exec.Command("stty", arg)
+	cmd := exec.Command("stty", args...)
 	cmd.Stdin = os.Stdin
 	_ = cmd.Run()
+}
+
+// SpinnerFrame returns the spinner glyph for the given frame index.
+func SpinnerFrame(frame int) string {
+	const frames = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+	runes := []rune(frames)
+	return string(runes[frame%len(runes)])
+}
+
+// RenderSpinner overwrites the header line in place with an animated
+// spinner. Cheap (one terminal write, no full redraw) so it's safe to call
+// at ~8fps. No-op on non-tty.
+func RenderSpinner(frame int) {
+	if !isTTY(os.Stdout) {
+		return
+	}
+	fmt.Fprintf(os.Stdout,
+		"\x1b[1;1H\x1b[K%sgha-monitor%s%s · %s refreshing%s",
+		ansiBold, ansiReset,
+		ansiDim, SpinnerFrame(frame), ansiReset,
+	)
 }
 
 func color(code, s string, tty bool) string {

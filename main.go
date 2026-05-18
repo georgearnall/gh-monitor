@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"flag"
 	"fmt"
@@ -138,8 +139,8 @@ func runWatch(client *ghclient.Client, cfg watchConfig) {
 		return
 	}
 
-	ui.EnterAltScreen()
-	defer ui.ExitAltScreen()
+	savedTerm := ui.EnterAltScreen()
+	defer ui.ExitAltScreen(savedTerm)
 	defer ui.ClearWindowTitle()
 	defer func() {
 		if err := st.Save(); err != nil {
@@ -150,20 +151,118 @@ func runWatch(client *ghclient.Client, cfg watchConfig) {
 	// First paint: render whatever's in the cache. <100ms because no network.
 	renderFromState(st, cfg, true /*refreshing*/)
 
+	trigger := make(chan struct{}, 1)
+	started := make(chan struct{}, 1)
 	results := make(chan pollResult, 1)
-	go fireRefresh(ctx, client, &cfg, results)
+	keys := make(chan rune, 8)
+
+	go readKeys(ctx, keys)
+	go producerLoop(ctx, client, &cfg, trigger, started, results)
+
+	enqueue(trigger) // initial refresh
+
+	spinnerTick := time.NewTicker(120 * time.Millisecond)
+	defer spinnerTick.Stop()
+
+	var (
+		refreshing   bool
+		spinnerFrame int
+		nextTimer    *time.Timer
+	)
 
 	for {
 		select {
+		case <-started:
+			refreshing = true
+			spinnerFrame = 0
+			ui.RenderSpinner(spinnerFrame)
+
 		case res := <-results:
+			refreshing = false
 			applyResult(st, &cfg, res)
 			renderFromState(st, cfg, false)
 			if err := st.Save(); err != nil {
 				fmt.Fprintf(os.Stderr, "save state: %v\n", err)
 			}
 			next := cfg.nextInterval(activeCount(res.Runs), res.RateLimit, res.PollErr)
-			go scheduleNext(ctx, client, &cfg, results, next)
+			if nextTimer != nil {
+				nextTimer.Stop()
+			}
+			nextTimer = time.AfterFunc(next, func() { enqueue(trigger) })
 
+		case <-spinnerTick.C:
+			if refreshing {
+				spinnerFrame++
+				ui.RenderSpinner(spinnerFrame)
+			}
+
+		case k := <-keys:
+			switch k {
+			case 'r', 'R', ' ':
+				if nextTimer != nil {
+					nextTimer.Stop()
+				}
+				enqueue(trigger)
+			case 'q', 'Q':
+				return
+			}
+
+		case <-ctx.Done():
+			return
+		}
+	}
+}
+
+// enqueue sends to a single-slot channel without blocking when full.
+func enqueue(ch chan<- struct{}) {
+	select {
+	case ch <- struct{}{}:
+	default:
+	}
+}
+
+// producerLoop owns the refresh pipeline. One refresh runs at a time: each
+// `trigger` consumed yields one `started` signal, then one `pollResult`.
+// Coalescing happens at the trigger channel (single-slot buffer).
+func producerLoop(
+	ctx context.Context,
+	client *ghclient.Client,
+	cfg *watchConfig,
+	trigger <-chan struct{},
+	started chan<- struct{},
+	results chan<- pollResult,
+) {
+	for {
+		select {
+		case <-trigger:
+		case <-ctx.Done():
+			return
+		}
+		select {
+		case started <- struct{}{}:
+		default:
+		}
+		res := doRefresh(ctx, client, cfg)
+		select {
+		case results <- res:
+		case <-ctx.Done():
+			return
+		}
+	}
+}
+
+// readKeys forwards stdin bytes to the keys channel. Arrow-key escape
+// sequences (ESC [ A/B/C/D) arrive as three separate bytes; none of our
+// keybindings collide with those, so they're harmlessly ignored downstream.
+func readKeys(ctx context.Context, keys chan<- rune) {
+	r := bufio.NewReader(os.Stdin)
+	for {
+		c, err := r.ReadByte()
+		if err != nil {
+			return
+		}
+		select {
+		case keys <- rune(c):
 		case <-ctx.Done():
 			return
 		}
@@ -217,21 +316,6 @@ func doRefresh(ctx context.Context, client *ghclient.Client, cfg *watchConfig) p
 
 	res.RateLimit = client.RateLimit()
 	return res
-}
-
-func fireRefresh(ctx context.Context, client *ghclient.Client, cfg *watchConfig, out chan<- pollResult) {
-	res := doRefresh(ctx, client, cfg)
-	select {
-	case out <- res:
-	case <-ctx.Done():
-	}
-}
-
-func scheduleNext(ctx context.Context, client *ghclient.Client, cfg *watchConfig, out chan<- pollResult, delay time.Duration) {
-	if !sleepCtx(ctx, delay) {
-		return
-	}
-	fireRefresh(ctx, client, cfg, out)
 }
 
 // applyResult updates state.Runs, fires notifications, and updates the cache
@@ -325,16 +409,6 @@ func filterExcluded(repos []discovery.Repo, excl stringSet) []discovery.Repo {
 	return out
 }
 
-func sleepCtx(ctx context.Context, d time.Duration) bool {
-	t := time.NewTimer(d)
-	defer t.Stop()
-	select {
-	case <-t.C:
-		return true
-	case <-ctx.Done():
-		return false
-	}
-}
 
 func startsWithDash(s string) bool {
 	return len(s) > 0 && s[0] == '-'
