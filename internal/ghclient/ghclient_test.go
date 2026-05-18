@@ -252,6 +252,70 @@ func TestParseRetryAfter(t *testing.T) {
 	}
 }
 
+func TestEtags_RoundTrip(t *testing.T) {
+	c := NewForTest(http.DefaultClient, "http://unused/")
+	if got := c.Etags(); len(got) != 0 {
+		t.Errorf("expected empty initial cache, got %d entries", len(got))
+	}
+
+	c.SetEtags(map[string]EtagEntry{
+		"repos/x/y": {ETag: `"abc"`, Body: []byte(`{"name":"y"}`)},
+		"repos/a/b": {ETag: `"def"`, Body: []byte(`{"name":"b"}`)},
+	})
+	got := c.Etags()
+	if len(got) != 2 {
+		t.Fatalf("after SetEtags, len=%d want 2: %+v", len(got), got)
+	}
+	if got["repos/x/y"].ETag != `"abc"` {
+		t.Errorf("Etag for repos/x/y = %q", got["repos/x/y"].ETag)
+	}
+
+	// Defensive copy: mutating the returned map shouldn't affect the client.
+	delete(got, "repos/x/y")
+	if c.Etags()["repos/x/y"].ETag != `"abc"` {
+		t.Errorf("Etags() returned a shared map (mutation leaked back to client)")
+	}
+}
+
+func TestSetEtags_NilOrEmptyIsNoOp(t *testing.T) {
+	c := NewForTest(http.DefaultClient, "http://unused/")
+	c.SetEtags(map[string]EtagEntry{"k": {ETag: `"v"`, Body: []byte("body")}})
+	c.SetEtags(nil)
+	c.SetEtags(map[string]EtagEntry{})
+	if got := c.Etags(); len(got) != 1 {
+		t.Errorf("nil/empty SetEtags should not clear; got %d entries", len(got))
+	}
+}
+
+func TestSetEtags_SeedsTheCacheForCondGet(t *testing.T) {
+	// Server REQUIRES If-None-Match: "v1" and returns 304. Anything else 500s.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("If-None-Match") != `"v1"` {
+			t.Errorf("server expected If-None-Match \"v1\", got %q", r.Header.Get("If-None-Match"))
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("ETag", `"v1"`)
+		w.WriteHeader(http.StatusNotModified)
+	}))
+	defer srv.Close()
+
+	c := NewForTest(srv.Client(), srv.URL+"/")
+	c.SetEtags(map[string]EtagEntry{
+		"thing": {ETag: `"v1"`, Body: []byte(`{"value":99}`)},
+	})
+
+	var got struct {
+		Value int `json:"value"`
+	}
+	if err := c.Get("thing", &got); err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Value != 99 {
+		t.Errorf("got %+v, want value=99 (replayed from seeded cache)", got)
+	}
+}
+
 func TestViewer_FetchesAndCaches(t *testing.T) {
 	var calls int
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

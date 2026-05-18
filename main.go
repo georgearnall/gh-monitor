@@ -134,6 +134,7 @@ func runWatch(client *ghclient.Client, cfg watchConfig) {
 	if err != nil {
 		fail("load state: %v", err)
 	}
+	client.SetEtags(st.EtagCache)
 
 	if cfg.once {
 		runOnce(ctx, client, cfg, st)
@@ -181,6 +182,7 @@ func runWatch(client *ghclient.Client, cfg watchConfig) {
 		case res := <-results:
 			refreshing = false
 			applyResult(st, &cfg, res)
+			st.EtagCache = client.Etags()
 			renderFromState(st, cfg, false)
 			if err := st.Save(); err != nil {
 				fmt.Fprintf(os.Stderr, "save state: %v\n", err)
@@ -282,6 +284,7 @@ func runOnce(ctx context.Context, client *ghclient.Client, cfg watchConfig, st *
 		fmt.Fprintf(os.Stderr, "pr poll: %v\n", res.PRErr)
 	}
 	applyResult(st, &cfg, res)
+	st.EtagCache = client.Etags()
 	renderFromState(st, cfg, false)
 	if err := st.Save(); err != nil {
 		fmt.Fprintf(os.Stderr, "save state: %v\n", err)

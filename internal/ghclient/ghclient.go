@@ -34,13 +34,15 @@ type Client struct {
 
 	mu          sync.Mutex
 	last        RateLimit
-	etags       map[string]etagEntry
+	etags       map[string]EtagEntry
 	viewerLogin string
 }
 
-type etagEntry struct {
-	ETag string
-	Body []byte
+// EtagEntry is the cached response for one path. The Body is the raw HTTP
+// response body, base64-encoded by encoding/json when persisted.
+type EtagEntry struct {
+	ETag string `json:"etag"`
+	Body []byte `json:"body"`
 }
 
 func New() (*Client, error) {
@@ -48,13 +50,13 @@ func New() (*Client, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Client{http: hc, baseURL: githubAPIBase, etags: map[string]etagEntry{}}, nil
+	return &Client{http: hc, baseURL: githubAPIBase, etags: map[string]EtagEntry{}}, nil
 }
 
 // NewForTest constructs a Client pointed at a custom baseURL — used by tests
 // to wire the client to an httptest.NewServer. The baseURL must end in "/".
 func NewForTest(hc *http.Client, baseURL string) *Client {
-	return &Client{http: hc, baseURL: baseURL, etags: map[string]etagEntry{}}
+	return &Client{http: hc, baseURL: baseURL, etags: map[string]EtagEntry{}}
 }
 
 // Get performs an authenticated GET, transparently using a cached body when
@@ -108,7 +110,7 @@ func (c *Client) Get(path string, v any) error {
 		return err
 	}
 	if etag := resp.Header.Get("ETag"); etag != "" {
-		c.storeEtag(path, etagEntry{ETag: etag, Body: body})
+		c.storeEtag(path, EtagEntry{ETag: etag, Body: body})
 	}
 	if v == nil {
 		return nil
@@ -178,6 +180,31 @@ func (c *Client) GraphQL(query string, vars map[string]any, v any) error {
 	return json.Unmarshal(envelope.Data, v)
 }
 
+// Etags returns a defensive copy of the current ETag cache, suitable for
+// persisting alongside other state.
+func (c *Client) Etags() map[string]EtagEntry {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	out := make(map[string]EtagEntry, len(c.etags))
+	for k, v := range c.etags {
+		out[k] = v
+	}
+	return out
+}
+
+// SetEtags seeds the ETag cache, typically from a previously-persisted
+// state file. Nil or empty map is a no-op.
+func (c *Client) SetEtags(m map[string]EtagEntry) {
+	if len(m) == 0 {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for k, v := range m {
+		c.etags[k] = v
+	}
+}
+
 // Viewer returns the authenticated user's login. Cached after the first call.
 func (c *Client) Viewer() (string, error) {
 	c.mu.Lock()
@@ -204,14 +231,14 @@ func (c *Client) RateLimit() RateLimit {
 	return c.last
 }
 
-func (c *Client) lookupEtag(path string) (etagEntry, bool) {
+func (c *Client) lookupEtag(path string) (EtagEntry, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	e, ok := c.etags[path]
 	return e, ok
 }
 
-func (c *Client) storeEtag(path string, e etagEntry) {
+func (c *Client) storeEtag(path string, e EtagEntry) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.etags[path] = e

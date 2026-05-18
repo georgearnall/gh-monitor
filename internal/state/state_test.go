@@ -64,6 +64,10 @@ func TestSaveLoad_Roundtrip(t *testing.T) {
 	original.LastPRs = []prs.PR{{Repo: "x/y", Number: 1, Title: "test", URL: "https://github.com/x/y/pull/1", State: "SUCCESS", Passing: 3, Total: 3, UpdatedAt: now}}
 	original.LastPoll = now
 	original.LastRateLimit = ghclient.RateLimit{Limit: 5000, Remaining: 4823, ResetAt: now.Add(time.Hour)}
+	original.EtagCache = map[string]ghclient.EtagEntry{
+		"repos/x/y/actions/runs?per_page=10": {ETag: `"abc123"`, Body: []byte(`{"workflow_runs":[]}`)},
+		"user/repos?sort=pushed":              {ETag: `"def456"`, Body: []byte(`[]`)},
+	}
 
 	if err := original.Save(); err != nil {
 		t.Fatalf("Save: %v", err)
@@ -90,6 +94,9 @@ func TestSaveLoad_Roundtrip(t *testing.T) {
 	}
 	if !reflect.DeepEqual(reloaded.LastRateLimit, original.LastRateLimit) {
 		t.Errorf("LastRateLimit differs:\n  got %+v\n  want %+v", reloaded.LastRateLimit, original.LastRateLimit)
+	}
+	if !reflect.DeepEqual(reloaded.EtagCache, original.EtagCache) {
+		t.Errorf("EtagCache differs:\n  got %+v\n  want %+v", reloaded.EtagCache, original.EtagCache)
 	}
 }
 
