@@ -124,7 +124,7 @@ func relativeAge(t time.Time) string {
 
 func writePRTable(ps []prs.PR, tty bool) {
 	rows := make([][]string, 0, len(ps)+1)
-	rows = append(rows, dimRow([]string{"STATUS", "REPO", "#", "TITLE", "BRANCH", "AGE", "LINK"}, tty))
+	rows = append(rows, dimRow([]string{"CHECKS", "REVIEW", "REPO", "#", "TITLE", "BRANCH", "AGE", "LINK"}, tty))
 	for _, p := range ps {
 		link := p.URL
 		if tty {
@@ -132,6 +132,7 @@ func writePRTable(ps []prs.PR, tty bool) {
 		}
 		rows = append(rows, []string{
 			prStatusCell(p, tty),
+			prReviewCell(p, tty),
 			p.Repo,
 			fmt.Sprintf("#%d", p.Number),
 			truncate(p.Title, 40),
@@ -141,6 +142,28 @@ func writePRTable(ps []prs.PR, tty bool) {
 		})
 	}
 	printAligned(rows)
+}
+
+func prReviewCell(p prs.PR, tty bool) string {
+	var label string
+	switch p.ReviewDecision {
+	case "APPROVED":
+		label = color(ansiGreen, "✓", tty) + " approved"
+	case "CHANGES_REQUESTED":
+		label = color(ansiRed, "✗", tty) + " changes"
+	case "REVIEW_REQUIRED":
+		label = color(ansiDim, "·", tty) + " needs review"
+	default:
+		if p.ReviewCount > 0 {
+			label = color(ansiYellow, "◐", tty) + " reviewed"
+		} else {
+			label = color(ansiDim, "·", tty) + " no review"
+		}
+	}
+	if p.CommentCount > 0 {
+		label += dim(fmt.Sprintf(" +%d", p.CommentCount), tty)
+	}
+	return label
 }
 
 func prStatusCell(p prs.PR, tty bool) string {

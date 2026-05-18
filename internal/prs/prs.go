@@ -8,17 +8,20 @@ import (
 )
 
 type PR struct {
-	Repo       string    `json:"repo"`
-	Number     int       `json:"number"`
-	Title      string    `json:"title"`
-	HeadBranch string    `json:"head_branch"`
-	URL        string    `json:"url"`
-	UpdatedAt  time.Time `json:"updated_at"`
-	State      string    `json:"state"` // SUCCESS|FAILURE|ERROR|PENDING|EXPECTED|""
-	Passing    int       `json:"passing"`
-	Failing    int       `json:"failing"`
-	Pending    int       `json:"pending"`
-	Total      int       `json:"total"`
+	Repo           string    `json:"repo"`
+	Number         int       `json:"number"`
+	Title          string    `json:"title"`
+	HeadBranch     string    `json:"head_branch"`
+	URL            string    `json:"url"`
+	UpdatedAt      time.Time `json:"updated_at"`
+	State          string    `json:"state"` // SUCCESS|FAILURE|ERROR|PENDING|EXPECTED|""
+	Passing        int       `json:"passing"`
+	Failing        int       `json:"failing"`
+	Pending        int       `json:"pending"`
+	Total          int       `json:"total"`
+	ReviewDecision string    `json:"review_decision"` // APPROVED|CHANGES_REQUESTED|REVIEW_REQUIRED|""
+	ReviewCount    int       `json:"review_count"`
+	CommentCount   int       `json:"comment_count"`
 }
 
 // IsFailing reports whether any check in the rollup is in a failure state.
@@ -55,6 +58,9 @@ const query = `
         isDraft
         updatedAt
         headRefName
+        reviewDecision
+        reviews(first: 1) { totalCount }
+        comments(first: 1) { totalCount }
         repository { nameWithOwner }
         commits(last: 1) {
           nodes {
@@ -87,13 +93,20 @@ type response struct {
 }
 
 type prNode struct {
-	Number      int       `json:"number"`
-	Title       string    `json:"title"`
-	URL         string    `json:"url"`
-	IsDraft     bool      `json:"isDraft"`
-	UpdatedAt   time.Time `json:"updatedAt"`
-	HeadRefName string    `json:"headRefName"`
-	Repository  struct {
+	Number         int       `json:"number"`
+	Title          string    `json:"title"`
+	URL            string    `json:"url"`
+	IsDraft        bool      `json:"isDraft"`
+	UpdatedAt      time.Time `json:"updatedAt"`
+	HeadRefName    string    `json:"headRefName"`
+	ReviewDecision string    `json:"reviewDecision"`
+	Reviews        struct {
+		TotalCount int `json:"totalCount"`
+	} `json:"reviews"`
+	Comments struct {
+		TotalCount int `json:"totalCount"`
+	} `json:"comments"`
+	Repository struct {
 		NameWithOwner string `json:"nameWithOwner"`
 	} `json:"repository"`
 	Commits struct {
@@ -134,12 +147,15 @@ func Poll(client *ghclient.Client) ([]PR, error) {
 			continue
 		}
 		pr := PR{
-			Repo:       n.Repository.NameWithOwner,
-			Number:     n.Number,
-			Title:      n.Title,
-			HeadBranch: n.HeadRefName,
-			URL:        n.URL,
-			UpdatedAt:  n.UpdatedAt,
+			Repo:           n.Repository.NameWithOwner,
+			Number:         n.Number,
+			Title:          n.Title,
+			HeadBranch:     n.HeadRefName,
+			URL:            n.URL,
+			UpdatedAt:      n.UpdatedAt,
+			ReviewDecision: n.ReviewDecision,
+			ReviewCount:    n.Reviews.TotalCount,
+			CommentCount:   n.Comments.TotalCount,
 		}
 		if len(n.Commits.Nodes) > 0 {
 			if r := n.Commits.Nodes[0].Commit.StatusCheckRollup; r != nil {
