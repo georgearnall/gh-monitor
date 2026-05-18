@@ -221,6 +221,7 @@ func runWatch(client *ghclient.Client, cfg watchConfig) {
 				renderFromState(st, cfg, refreshing, focusedID)
 			case '\r', '\n':
 				openFocused(st, focusedID)
+				markFocusedRead(client, st, &cfg, focusedID)
 			case 'm':
 				markFocusedRead(client, st, &cfg, focusedID)
 			case 'M':
