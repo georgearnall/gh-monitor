@@ -106,6 +106,7 @@ the discovered repo set and exits. `help` prints the full help page.
 | `↵` (enter) | Open the focused row in the browser. For notifications, also mark read. |
 | `m` | Mark the focused notification read |
 | `M` | Mark every visible unread notification read |
+| `d` | Dismiss (mark as done) the focused notification; removes it from the inbox entirely |
 | `r`, `R`, space | Trigger an immediate refresh |
 | `q`, `Q`, Ctrl-C | Quit cleanly, restore terminal, save state |
 

@@ -174,6 +174,42 @@ func TestSetEtags_DropsDegenerate(t *testing.T) {
 	}
 }
 
+func TestDelete_HappyPath(t *testing.T) {
+	var (
+		sawMethod string
+		sawPath   string
+	)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sawMethod = r.Method
+		sawPath = r.URL.Path
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+
+	c := newTestClient(srv)
+	if err := c.Delete("notifications/threads/42"); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	if sawMethod != http.MethodDelete {
+		t.Errorf("got method %q, want DELETE", sawMethod)
+	}
+	if sawPath != "/notifications/threads/42" {
+		t.Errorf("got path %q, want /notifications/threads/42", sawPath)
+	}
+}
+
+func TestDelete_ErrorOn500(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	c := newTestClient(srv)
+	if err := c.Delete("x/y"); err == nil {
+		t.Errorf("expected error on 500, got nil")
+	}
+}
+
 func TestGet_RateLimitedError_403(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Retry-After", "60")

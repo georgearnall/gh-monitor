@@ -184,6 +184,41 @@ func (c *Client) Patch(path string, body any) error {
 	return nil
 }
 
+// Delete performs an authenticated DELETE. No body is sent. Used for
+// endpoints like DELETE /notifications/threads/{id} that side-effect
+// without returning a body.
+// Returns *RateLimitedError on 403/429.
+func (c *Client) Delete(path string) error {
+	req, err := http.NewRequest(http.MethodDelete, c.baseURL+path, nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	c.recordRateLimit(resp)
+
+	if resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusTooManyRequests {
+		raw, _ := io.ReadAll(resp.Body)
+		return &RateLimitedError{
+			Status:     resp.StatusCode,
+			RetryAfter: parseRetryAfter(resp.Header.Get("Retry-After")),
+			Body:       string(raw),
+		}
+	}
+	if resp.StatusCode >= 400 {
+		raw, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("DELETE %s: HTTP %d: %s", path, resp.StatusCode, raw)
+	}
+	return nil
+}
+
 // GraphQL posts an authenticated GraphQL query to /graphql and decodes the
 // `data` portion of the response into v. Returns an error if the response
 // contains GraphQL `errors[]` or is a rate-limit response.

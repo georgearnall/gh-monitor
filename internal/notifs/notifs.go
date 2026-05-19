@@ -133,6 +133,37 @@ func MarkAllRead(client *ghclient.Client, ids []string) error {
 	return firstErr
 }
 
+// DismissAll fires DELETE /notifications/threads/{id} for each given
+// thread ID, in parallel, bounded to 8 concurrent requests. This is
+// GitHub's "mark as done" operation: the thread is removed from the
+// inbox entirely and won't appear on subsequent polls.
+func DismissAll(client *ghclient.Client, ids []string) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	g, _ := errgroup.WithContext(context.Background())
+	g.SetLimit(8)
+	var (
+		mu       sync.Mutex
+		firstErr error
+	)
+	for _, id := range ids {
+		id := id
+		g.Go(func() error {
+			if err := client.Delete("notifications/threads/" + id); err != nil {
+				mu.Lock()
+				if firstErr == nil {
+					firstErr = err
+				}
+				mu.Unlock()
+			}
+			return nil
+		})
+	}
+	_ = g.Wait()
+	return firstErr
+}
+
 // buildHTMLURL produces a clickable github.com URL. When the reason is a new
 // reply on a thread, it anchors to the specific comment so the link jumps
 // straight to it.

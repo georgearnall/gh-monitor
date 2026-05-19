@@ -251,6 +251,62 @@ func TestMarkAllRead_ReturnsFirstError(t *testing.T) {
 	}
 }
 
+func TestDismissAll_FansOutToEachID(t *testing.T) {
+	var (
+		mu  sync.Mutex
+		hit []string
+	)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodDelete {
+			t.Errorf("want DELETE, got %s", r.Method)
+		}
+		if !strings.HasPrefix(r.URL.Path, "/notifications/threads/") {
+			t.Errorf("unexpected path: %s", r.URL.Path)
+		}
+		mu.Lock()
+		hit = append(hit, strings.TrimPrefix(r.URL.Path, "/notifications/threads/"))
+		mu.Unlock()
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+
+	c := ghclient.NewForTest(srv.Client(), srv.URL+"/")
+	if err := DismissAll(c, []string{"1", "2", "3"}); err != nil {
+		t.Fatalf("DismissAll: %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(hit) != 3 {
+		t.Errorf("got %d DELETEs, want 3: %v", len(hit), hit)
+	}
+}
+
+func TestDismissAll_EmptyIDs_NoRequests(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("expected no requests, got %s %s", r.Method, r.URL.Path)
+	}))
+	defer srv.Close()
+
+	c := ghclient.NewForTest(srv.Client(), srv.URL+"/")
+	if err := DismissAll(c, nil); err != nil {
+		t.Errorf("DismissAll(nil): %v", err)
+	}
+}
+
+func TestDismissAll_ReturnsFirstError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	c := ghclient.NewForTest(srv.Client(), srv.URL+"/")
+	err := DismissAll(c, []string{"1", "2"})
+	if err == nil {
+		t.Errorf("expected error on 500, got nil")
+	}
+}
+
 func TestPoll_HTTPErrorPropagates(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)

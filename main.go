@@ -151,6 +151,8 @@ KEYBINDINGS (watch mode)
                         also mark it read.
   m                     Mark focused notification read (no-op on PRs/runs)
   M                     Mark every visible unread notification read
+  d                     Dismiss (mark as done) the focused notification.
+                        Removes it from the inbox entirely.
   r  /  R  /  space     Refresh now (don't wait for the next interval)
   q  /  Q  /  Ctrl-C    Quit cleanly, restore terminal, save state
 
@@ -299,6 +301,8 @@ func runWatch(client *ghclient.Client, cfg watchConfig) {
 				markFocusedRead(client, st, &cfg, focused)
 			case 'M':
 				markAllVisibleRead(client, st, &cfg, focused)
+			case 'd':
+				focused = dismissFocused(client, st, &cfg, focused)
 			case 'q', 'Q':
 				return
 			}
@@ -343,6 +347,55 @@ func focusedURL(st *state.State, f focusTarget) string {
 		}
 	}
 	return ""
+}
+
+// applyDismiss removes the notification with id from local state and
+// returns the focus that should take its place: the next row in the
+// notifications list (clamped at the end), or pickFocus's fallback when
+// the notifications panel becomes empty. The bool reports whether the
+// notification was actually present. Pure: no I/O, no goroutines.
+func applyDismiss(st *state.State, id string) (focusTarget, bool) {
+	idx := -1
+	for i, n := range st.LastNotifs {
+		if n.ID == id {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		return focusTarget{}, false
+	}
+	st.LastNotifs = append(st.LastNotifs[:idx], st.LastNotifs[idx+1:]...)
+	if len(st.LastNotifs) == 0 {
+		return pickFocus(st, focusTarget{}), true
+	}
+	ni := idx
+	if ni >= len(st.LastNotifs) {
+		ni = len(st.LastNotifs) - 1
+	}
+	return focusTarget{"notifs", st.LastNotifs[ni].ID}, true
+}
+
+// dismissFocused removes the focused notification both locally and on
+// GitHub via DELETE /notifications/threads/{id}. No-op if the focused
+// row is not in the notifications panel. Fires the DELETE in the
+// background after an optimistic local removal so the UI feels instant.
+func dismissFocused(client *ghclient.Client, st *state.State, cfg *watchConfig, f focusTarget) focusTarget {
+	if f.Panel != "notifs" || f.ID == "" {
+		return f
+	}
+	newFocus, ok := applyDismiss(st, f.ID)
+	if !ok {
+		return f
+	}
+	dismissedID := f.ID
+	renderFromState(st, *cfg, false, newFocus)
+	go func() {
+		if err := notifs.DismissAll(client, []string{dismissedID}); err != nil {
+			fmt.Fprintf(os.Stderr, "dismiss: %v\n", err)
+		}
+	}()
+	return newFocus
 }
 
 // markFocusedRead marks the focused notification read. No-op if the focused

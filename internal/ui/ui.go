@@ -142,7 +142,7 @@ func footer(snap Snapshot, tty bool) {
 	pln(tty)
 	pln(tty, dim(join(parts, " · "), tty))
 	if tty {
-		pln(tty, dim("[↑↓] move  [↵] open  [m] mark read  [M] mark all  [r] refresh  [q] quit", tty))
+		pln(tty, dim("[↑↓] move  [↵] open  [m] read  [d] dismiss  [M] read all  [r] refresh  [q] quit", tty))
 	}
 }
 

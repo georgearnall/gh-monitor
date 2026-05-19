@@ -259,6 +259,67 @@ func TestCursorTargets_HonoursVisibilityFilter(t *testing.T) {
 	}
 }
 
+func TestApplyDismiss_RemovesAndAdvancesToNext(t *testing.T) {
+	st := mkState(t)
+	st.LastNotifs = []notifs.Notification{
+		{ID: "1"}, {ID: "2"}, {ID: "3"},
+	}
+	got, ok := applyDismiss(st, "2")
+	if !ok {
+		t.Fatalf("expected ok=true for present ID")
+	}
+	if got != (focusTarget{"notifs", "3"}) {
+		t.Errorf("focus = %+v, want notifs:3 (next row at same index)", got)
+	}
+	if len(st.LastNotifs) != 2 {
+		t.Errorf("expected 2 notifs left, got %d", len(st.LastNotifs))
+	}
+}
+
+func TestApplyDismiss_ClampsAtEnd(t *testing.T) {
+	st := mkState(t)
+	st.LastNotifs = []notifs.Notification{
+		{ID: "1"}, {ID: "2"}, {ID: "3"},
+	}
+	// Dismiss the last item: focus should clamp to the new last item.
+	got, ok := applyDismiss(st, "3")
+	if !ok {
+		t.Fatalf("expected ok=true")
+	}
+	if got != (focusTarget{"notifs", "2"}) {
+		t.Errorf("focus = %+v, want notifs:2 (clamped to new last)", got)
+	}
+}
+
+func TestApplyDismiss_FallsBackWhenEmpty(t *testing.T) {
+	st := mkState(t)
+	st.LastNotifs = []notifs.Notification{{ID: "1"}}
+	st.LastPRs = []prs.PR{{Repo: "a/b", Number: 7}}
+	// Dismiss the only notif: focus should fall through to the PR.
+	got, ok := applyDismiss(st, "1")
+	if !ok {
+		t.Fatalf("expected ok=true")
+	}
+	if got != (focusTarget{"prs", "a/b#7"}) {
+		t.Errorf("focus = %+v, want prs:a/b#7 (fallback)", got)
+	}
+}
+
+func TestApplyDismiss_NotPresent(t *testing.T) {
+	st := mkState(t)
+	st.LastNotifs = []notifs.Notification{{ID: "1"}}
+	got, ok := applyDismiss(st, "missing")
+	if ok {
+		t.Errorf("expected ok=false for missing ID")
+	}
+	if got != (focusTarget{}) {
+		t.Errorf("focus = %+v, want zero", got)
+	}
+	if len(st.LastNotifs) != 1 {
+		t.Errorf("state should be unchanged when not found; got %d notifs", len(st.LastNotifs))
+	}
+}
+
 func TestCoalesceSignal_DebouncesBurst(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
