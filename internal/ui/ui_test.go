@@ -362,24 +362,54 @@ func TestReasonCell_AuthorWithStateShowsState(t *testing.T) {
 	}
 }
 
-func TestStateCell_ColoursUnreadOnly(t *testing.T) {
-	// Unread + tty: icon is colour-wrapped.
+func TestStateCell_ColoursUnreadAndRead(t *testing.T) {
+	// Unread: full reset closer (icon stands fully bright).
 	got := stateCell("OPEN", true, true)
 	if !strings.Contains(got, ansiGreen+"●"+ansiReset) {
-		t.Errorf("unread OPEN should have green icon; got %q", got)
+		t.Errorf("unread OPEN should close with full reset; got %q", got)
 	}
 	got = stateCell("MERGED", true, true)
 	if !strings.Contains(got, ansiPurple+"●"+ansiReset) {
-		t.Errorf("unread MERGED should have purple icon; got %q", got)
+		t.Errorf("unread MERGED should close with full reset; got %q", got)
 	}
 
-	// Read + tty: plain (no SGR codes) so the outer row dim wrap survives.
+	// Read: dim-safe closer (default-fg). Icon stays coloured under the
+	// outer dim wrap; dim survives the span end so " open" continues dim.
 	got = stateCell("OPEN", false, true)
-	if strings.Contains(got, "\x1b[") {
-		t.Errorf("read row should be plain (no ANSI); got %q", got)
+	if !strings.Contains(got, ansiGreen+"●"+ansiDefaultFg) {
+		t.Errorf("read OPEN should close with default-fg; got %q", got)
 	}
+	got = stateCell("MERGED", false, true)
+	if !strings.Contains(got, ansiPurple+"●"+ansiDefaultFg) {
+		t.Errorf("read MERGED should close with default-fg; got %q", got)
+	}
+
+	// Non-tty: plain regardless of read/unread.
+	got = stateCell("OPEN", false, false)
 	if got != "● open" {
-		t.Errorf("got %q, want '● open'", got)
+		t.Errorf("non-tty got %q, want '● open'", got)
+	}
+}
+
+func TestColorInsideDim(t *testing.T) {
+	// Closes with default-fg, so an outer dim wrap survives the span end.
+	got := colorInsideDim(ansiCyan, "@", true)
+	want := ansiCyan + "@" + ansiDefaultFg
+	if got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+	// Non-tty is a no-op.
+	got = colorInsideDim(ansiCyan, "@", false)
+	if got != "@" {
+		t.Errorf("non-tty got %q, want '@'", got)
+	}
+}
+
+func TestVisibleWidth_DefaultFgIsStripped(t *testing.T) {
+	// The new closer must be invisible to the alignment math.
+	in := ansiCyan + "@" + ansiDefaultFg + " mention"
+	if got := visibleWidth(in); got != 9 {
+		t.Errorf("visibleWidth = %d, want 9 (@ + space + 'mention')", got)
 	}
 }
 
@@ -405,12 +435,19 @@ func TestStateGlyph(t *testing.T) {
 	}
 }
 
-func TestReasonCell_ReadVariant(t *testing.T) {
-	// Read notifications return plain (no colour) so the caller can dim the
-	// whole row consistently.
+func TestReasonCell_ReadVariant_UsesDimSafeColour(t *testing.T) {
+	// Read rows still get a colour on the icon, but closed with default-fg
+	// instead of full reset so the row-level dim wrap survives.
 	got := reasonCell(notifs.Notification{Reason: "mention", Unread: false}, true)
-	if got != "@ mention" {
-		t.Errorf("read mention reasonCell = %q, want %q", got, "@ mention")
+	want := ansiCyan + "@" + ansiDefaultFg + " mention"
+	if got != want {
+		t.Errorf("read mention reasonCell = %q, want %q", got, want)
+	}
+	// Same shape for review_requested.
+	got = reasonCell(notifs.Notification{Reason: "review_requested", Unread: false}, true)
+	want = ansiYellow + "◐" + ansiDefaultFg + " review"
+	if got != want {
+		t.Errorf("read review reasonCell = %q, want %q", got, want)
 	}
 }
 

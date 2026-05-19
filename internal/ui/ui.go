@@ -42,6 +42,10 @@ const (
 	// ansiPurple is a 256-colour purple chosen to match GitHub's merged-
 	// PR colour reasonably well in most terminals.
 	ansiPurple = "\x1b[38;5;141m"
+	// ansiDefaultFg cancels the foreground colour without touching the
+	// intensity attribute. Used as a closer inside row-level dim wraps
+	// so that a colour span ends without also turning off dim.
+	ansiDefaultFg = "\x1b[39m"
 )
 
 type Snapshot struct {
@@ -258,29 +262,37 @@ func reasonCell(n notifs.Notification, tty bool) string {
 	if n.Reason == "author" || n.Reason == "assign" {
 		return stateCell(n.PRState, n.Unread, tty)
 	}
+	// Choose the colour helper based on whether the row will be wrapped
+	// in outer dim later (read rows). colorInsideDim closes its colour
+	// span with default-fg so the wrap's dim attribute survives.
+	wrap := color
 	if !n.Unread {
-		return reasonGlyph(n.Reason) + " " + reasonLabel(n.Reason)
+		wrap = colorInsideDim
 	}
 	switch n.Reason {
 	case "mention", "team_mention":
-		return color(ansiCyan, "@", tty) + " mention"
+		return wrap(ansiCyan, "@", tty) + " mention"
 	case "review_requested":
-		return color(ansiYellow, "◐", tty) + " review"
+		return wrap(ansiYellow, "◐", tty) + " review"
 	case "comment":
-		return color(ansiDim, "+", tty) + " comment"
+		return wrap(ansiDim, "+", tty) + " comment"
 	}
-	return color(ansiDim, "·", tty) + " " + n.Reason
+	return wrap(ansiDim, "·", tty) + " " + n.Reason
 }
 
 // stateCell renders the PR state for an author/assign notification. The
-// icon is coloured for unread rows; read rows return plain text so the
-// outer row-dim wrap (applied later) stays intact.
+// icon is coloured for both read and unread rows; read rows use a
+// dim-safe colour closer so the outer row-dim wrap renders the icon as
+// a muted version of its colour and continues dimming the label text.
 func stateCell(state string, unread, tty bool) string {
 	icon, label, col := stateGlyph(state)
-	if !unread || !tty {
+	if !tty {
 		return icon + " " + label
 	}
-	return color(col, icon, tty) + " " + label
+	if unread {
+		return color(col, icon, tty) + " " + label
+	}
+	return colorInsideDim(col, icon, tty) + " " + label
 }
 
 // stateGlyph maps a PR state to (icon, label, colour). Falls back to the
@@ -876,6 +888,18 @@ func color(code, s string, tty bool) string {
 		return s
 	}
 	return code + s + ansiReset
+}
+
+// colorInsideDim wraps s in a foreground colour, closing with default-fg
+// rather than a full SGR reset. Use inside cells that will sit within an
+// outer ansiDim row wrap (read notification rows): the dim survives the
+// inner span, so the icon shows up in a muted colour and the rest of the
+// row stays uniformly dim.
+func colorInsideDim(code, s string, tty bool) string {
+	if !tty {
+		return s
+	}
+	return code + s + ansiDefaultFg
 }
 
 // pln writes a line followed by a clear-to-EOL escape (on tty) and a
