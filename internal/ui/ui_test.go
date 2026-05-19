@@ -199,7 +199,7 @@ func TestVisibleRows_FilterAndCap(t *testing.T) {
 			mk(1, "in_progress", "", "someone-else", -1*time.Minute),
 			mk(2, "queued", "", "me", -1*time.Minute),
 		}
-		out := visibleRows(rs, viewer)
+		out := VisibleRows(rs, viewer)
 		if len(out) != 2 {
 			t.Errorf("got %d, want 2: %+v", len(out), out)
 		}
@@ -210,7 +210,7 @@ func TestVisibleRows_FilterAndCap(t *testing.T) {
 			mk(1, "completed", "failure", "someone-else", -5*time.Minute),
 			mk(2, "completed", "success", "someone-else", -5*time.Minute),
 		}
-		out := visibleRows(rs, viewer)
+		out := VisibleRows(rs, viewer)
 		if len(out) != 0 {
 			t.Errorf("got %d, want 0: %+v", len(out), out)
 		}
@@ -222,7 +222,7 @@ func TestVisibleRows_FilterAndCap(t *testing.T) {
 			mk(2, "completed", "failure", "me", -23*time.Hour),     // within 24h — keep
 			mk(3, "completed", "success", "me", -25*time.Hour),     // outside 24h — drop
 		}
-		out := visibleRows(rs, viewer)
+		out := VisibleRows(rs, viewer)
 		if len(out) != 2 {
 			t.Errorf("got %d, want 2: %+v", len(out), out)
 		}
@@ -239,7 +239,7 @@ func TestVisibleRows_FilterAndCap(t *testing.T) {
 			mk(2, "in_progress", "", "someone-else", -5*time.Hour),
 			mk(3, "completed", "failure", "me", -30*time.Minute),
 		}
-		out := visibleRows(rs, viewer)
+		out := VisibleRows(rs, viewer)
 		if len(out) != 3 {
 			t.Fatalf("got %d, want 3", len(out))
 		}
@@ -257,7 +257,7 @@ func TestVisibleRows_FilterAndCap(t *testing.T) {
 		for i := 0; i < 15; i++ {
 			rs = append(rs, mk(int64(i), "in_progress", "", "someone-else", time.Duration(-i)*time.Minute))
 		}
-		out := visibleRows(rs, viewer)
+		out := VisibleRows(rs, viewer)
 		if len(out) != maxVisibleRuns {
 			t.Errorf("got %d, want %d", len(out), maxVisibleRuns)
 		}
@@ -274,7 +274,7 @@ func TestVisibleRows_FilterAndCap(t *testing.T) {
 			// genuine active run from someone else -> keep
 			{ID: 4, Status: "in_progress", ActorLogin: "alice", Branch: "feature/x", WorkflowName: "CI", UpdatedAt: now},
 		}
-		out := visibleRows(rs, viewer)
+		out := VisibleRows(rs, viewer)
 		if len(out) != 1 || out[0].ID != 4 {
 			t.Errorf("got %+v, want only id=4", out)
 		}
@@ -285,7 +285,7 @@ func TestVisibleRows_FilterAndCap(t *testing.T) {
 			mk(1, "in_progress", "", "me", -1*time.Minute),
 			mk(2, "completed", "success", "me", -5*time.Minute),
 		}
-		out := visibleRows(rs, "")
+		out := VisibleRows(rs, "")
 		if len(out) != 1 || out[0].ID != 1 {
 			t.Errorf("got %+v, want only id=1", out)
 		}
@@ -339,7 +339,7 @@ func TestVisibleNotifs_CapsAtMax(t *testing.T) {
 	for i := 0; i < maxVisibleNotifs+5; i++ {
 		ns = append(ns, notifs.Notification{ID: "x"})
 	}
-	if got := visibleNotifs(ns); len(got) != maxVisibleNotifs {
+	if got := VisibleNotifs(ns); len(got) != maxVisibleNotifs {
 		t.Errorf("got %d, want %d", len(got), maxVisibleNotifs)
 	}
 }

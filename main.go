@@ -406,26 +406,30 @@ func runKey(r runs.Run) string {
 }
 
 // cursorTargets materialises the flat ordered list of every focusable row
-// across all three panels, in the same order they're rendered. The cursor
-// walks this list when the user presses up/down so it flows naturally
-// across section boundaries.
+// across all three panels, in the same order they're rendered. Critically,
+// it applies the same VisibleNotifs / VisibleRows filters the UI uses so
+// the cursor never lands on a row that isn't on screen (otherwise arrow
+// keys feel "sticky" as they walk through invisible items).
 func cursorTargets(st *state.State) []focusTarget {
-	out := make([]focusTarget, 0, len(st.LastNotifs)+len(st.LastPRs)+len(st.LastView))
-	for _, n := range st.LastNotifs {
+	notifRows := ui.VisibleNotifs(st.LastNotifs)
+	runRows := ui.VisibleRows(st.LastView, st.ViewerLogin)
+	out := make([]focusTarget, 0, len(notifRows)+len(st.LastPRs)+len(runRows))
+	for _, n := range notifRows {
 		out = append(out, focusTarget{"notifs", n.ID})
 	}
 	for _, p := range st.LastPRs {
 		out = append(out, focusTarget{"prs", prKey(p)})
 	}
-	for _, r := range st.LastView {
+	for _, r := range runRows {
 		out = append(out, focusTarget{"runs", runKey(r)})
 	}
 	return out
 }
 
 // pickFocus returns current if it still appears in the cursor target list,
-// otherwise falls back to the first unread notification, then the first
-// item overall. Returns the zero value when there's nothing focusable.
+// otherwise falls back to the first unread notification (if visible),
+// otherwise the first target row overall. Returns the zero value when
+// there's nothing focusable.
 func pickFocus(st *state.State, current focusTarget) focusTarget {
 	targets := cursorTargets(st)
 	if current.Panel != "" {
@@ -435,7 +439,7 @@ func pickFocus(st *state.State, current focusTarget) focusTarget {
 			}
 		}
 	}
-	for _, n := range st.LastNotifs {
+	for _, n := range ui.VisibleNotifs(st.LastNotifs) {
 		if n.Unread {
 			return focusTarget{"notifs", n.ID}
 		}

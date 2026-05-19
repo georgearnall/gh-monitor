@@ -154,7 +154,13 @@ func TestMoveFocus_AcrossPanels(t *testing.T) {
 	st := mkState(t)
 	st.LastNotifs = []notifs.Notification{{ID: "n1"}, {ID: "n2"}}
 	st.LastPRs = []prs.PR{{Repo: "a/b", Number: 7}}
-	st.LastView = []runs.Run{{ID: 9001}, {ID: 9002}}
+	// Status must be active for VisibleRows (used by cursorTargets) to keep
+	// these runs; otherwise the cursor would skip the runs panel entirely.
+	now := time.Now()
+	st.LastView = []runs.Run{
+		{ID: 9001, Status: "in_progress", UpdatedAt: now, CreatedAt: now},
+		{ID: 9002, Status: "in_progress", UpdatedAt: now.Add(-time.Second), CreatedAt: now.Add(-time.Second)},
+	}
 
 	// Order down through the flat list: n1 -> n2 -> a/b#7 -> 9001 -> 9002
 	cases := []struct {

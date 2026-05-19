@@ -17,9 +17,13 @@ import (
 )
 
 const (
-	ansiClear  = "\x1b[H\x1b[2J"
-	ansiReset  = "\x1b[0m"
-	ansiBold   = "\x1b[1m"
+	// ansiHome moves the cursor to (1,1) without clearing. The render uses
+	// it together with ansiClearBelow so each redraw overwrites content in
+	// place (no full-screen-clear flash on every keypress).
+	ansiHome       = "\x1b[H"
+	ansiClearBelow = "\x1b[J"
+	ansiReset      = "\x1b[0m"
+	ansiBold       = "\x1b[1m"
 	ansiDim    = "\x1b[2m"
 	ansiGreen  = "\x1b[32m"
 	ansiRed    = "\x1b[31m"
@@ -49,13 +53,13 @@ type Snapshot struct {
 func Render(snap Snapshot) {
 	tty := isTTY(os.Stdout)
 
-	rows := visibleRows(snap.Runs, snap.ViewerLogin)
+	rows := VisibleRows(snap.Runs, snap.ViewerLogin)
 	active, failed := countByOutcome(rows)
-	notifRows := visibleNotifs(snap.Notifs)
+	notifRows := VisibleNotifs(snap.Notifs)
 	unread := unreadCount(notifRows)
 
 	if tty {
-		fmt.Print(ansiClear)
+		fmt.Print(ansiHome)
 		setWindowTitle(windowTitleString(unread, active, failed))
 	}
 
@@ -85,6 +89,11 @@ func Render(snap Snapshot) {
 		}
 	}
 	footer(snap, tty)
+	if tty {
+		// Clear from the current cursor position to the end of the screen.
+		// Removes any leftover lines from a previous render that was taller.
+		fmt.Print(ansiClearBelow)
+	}
 }
 
 func windowTitleString(unread, active, failed int) string {
@@ -155,9 +164,11 @@ func relativeAge(t time.Time) string {
 // maxVisibleNotifs caps the notifications section length.
 const maxVisibleNotifs = 15
 
-// visibleNotifs slices the notifications list to maxVisibleNotifs. Filtering
-// and sorting already happened upstream in notifs.Poll.
-func visibleNotifs(ns []notifs.Notification) []notifs.Notification {
+// VisibleNotifs slices the notifications list to maxVisibleNotifs. Filtering
+// and sorting already happened upstream in notifs.Poll. Exported so the
+// watch loop can build a cursor target list that exactly matches what's
+// rendered (e.g. for arrow-key navigation).
+func VisibleNotifs(ns []notifs.Notification) []notifs.Notification {
 	if len(ns) > maxVisibleNotifs {
 		return ns[:maxVisibleNotifs]
 	}
@@ -395,15 +406,16 @@ func dimRow(cells []string, tty bool) []string {
 // doesn't blow out the table.
 const maxVisibleRuns = 10
 
-// visibleRows filters runs for the workflow table:
+// VisibleRows filters runs for the workflow table:
 //   - All currently-active runs are kept (any actor).
 //   - Completed runs are kept only if triggered by the viewer themselves
 //     AND within the last 24 hours.
 //   - Anything else drops as soon as it finishes.
 //
 // Result is sorted active-first, then by UpdatedAt desc, then truncated to
-// maxVisibleRuns.
-func visibleRows(rs []runs.Run, viewerLogin string) []runs.Run {
+// maxVisibleRuns. Exported so the watch loop can mirror the same filter
+// when building its cursor target list.
+func VisibleRows(rs []runs.Run, viewerLogin string) []runs.Run {
 	var out []runs.Run
 	for _, r := range rs {
 		if r.IsBot() {
