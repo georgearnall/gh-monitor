@@ -117,30 +117,52 @@ func TestPRStatusCell_PlainWhenNotTTY(t *testing.T) {
 		{prs.PR{State: "", Total: 0}, "· none"},
 	}
 	for _, c := range cases {
-		got := prStatusCell(c.pr, false)
+		got := prStatusCell(c.pr, false, false)
 		if got != c.want {
-			t.Errorf("prStatusCell(%+v, false) = %q, want %q", c.pr, got, c.want)
+			t.Errorf("prStatusCell(%+v, tty=false, compact=false) = %q, want %q", c.pr, got, c.want)
+		}
+	}
+}
+
+func TestPRStatusCell_CompactDropsText(t *testing.T) {
+	cases := []struct {
+		pr   prs.PR
+		want string
+	}{
+		{prs.PR{State: "SUCCESS", Passing: 6, Total: 6}, "✓ 6/6"},
+		{prs.PR{State: "FAILURE", Failing: 1, Total: 2}, "✗ 1/2"},
+		{prs.PR{State: "PENDING", Passing: 2, Failing: 0, Total: 5}, "◐ 2/5"},
+		{prs.PR{State: "", Total: 0}, "·"},
+	}
+	for _, c := range cases {
+		got := prStatusCell(c.pr, false, true)
+		if got != c.want {
+			t.Errorf("prStatusCell(%+v, compact=true) = %q, want %q", c.pr, got, c.want)
 		}
 	}
 }
 
 func TestPRReviewCell_PlainWhenNotTTY(t *testing.T) {
 	cases := []struct {
+		name string
 		pr   prs.PR
 		want string
 	}{
-		{prs.PR{ReviewDecision: "APPROVED"}, "✓ approved"},
-		{prs.PR{ReviewDecision: "CHANGES_REQUESTED"}, "✗ changes"},
-		{prs.PR{ReviewDecision: "REVIEW_REQUIRED"}, "· needs review"},
-		{prs.PR{ReviewCount: 3}, "◐ reviewed"},
-		{prs.PR{}, "· no review"},
-		{prs.PR{ReviewDecision: "APPROVED", CommentCount: 3}, "✓ approved +3"},
+		{"approved", prs.PR{ReviewDecision: "APPROVED"}, "✓ approved"},
+		{"changes requested", prs.PR{ReviewDecision: "CHANGES_REQUESTED"}, "✗ changes"},
+		{"review required is blocked", prs.PR{ReviewDecision: "REVIEW_REQUIRED"}, "· blocked"},
+		{"some reviews but no decision", prs.PR{ReviewCount: 3}, "◐ reviewed"},
+		{"no reviews, no decision -> blank", prs.PR{}, ""},
+		{"approved with comments", prs.PR{ReviewDecision: "APPROVED", CommentCount: 3}, "✓ approved +3"},
+		{"no review but has comments shows just the comment count", prs.PR{CommentCount: 2}, "+2"},
 	}
 	for _, c := range cases {
-		got := prReviewCell(c.pr, false)
-		if got != c.want {
-			t.Errorf("prReviewCell(%+v, false) = %q, want %q", c.pr, got, c.want)
-		}
+		t.Run(c.name, func(t *testing.T) {
+			got := prReviewCell(c.pr, false)
+			if got != c.want {
+				t.Errorf("prReviewCell = %q, want %q", got, c.want)
+			}
+		})
 	}
 }
 
@@ -384,29 +406,32 @@ func TestWriteNotifsTable_AlignsWithDimmedRows(t *testing.T) {
 
 func TestShrinkRepo(t *testing.T) {
 	cases := []struct {
+		name   string
 		repo   string
 		budget int
 		want   string
 	}{
-		// fits as-is
-		{"acme/billing", 20, "acme/billing"},
-		// trims owner with ellipsis, keeps full name
-		{"trainline-private/partnerships-api", 20, "tr…/partnerships-api"},
-		{"trainline-private/foo", 10, "train…/foo"},
-		// owner exactly fits the budget after trimming
-		{"trainline-private/partnerships-api", 22, "trai…/partnerships-api"},
-		// budget too small to keep full name -> generic truncate
-		{"trainline-private/partnerships-api", 12, "trainline-p…"},
-		// no slash -> falls back to plain truncate
-		{"unparseable-thing", 10, "unparseab…"},
-		// already short
-		{"a/b", 5, "a/b"},
+		{"fits as-is", "acme/billing", 20, "acme/billing"},
+		{"already short", "a/b", 5, "a/b"},
+		// Stage 1 of the cascade: keep some owner via "<stub>…/<name>".
+		// name="partnerships-api" (16 chars), so stub = budget - 18.
+		{"owner trimmed with 4-char stub", "trainline-private/partnerships-api", 22, "trai…/partnerships-api"},
+		{"owner stub of 1 char", "trainline-private/partnerships-api", 19, "t…/partnerships-api"},
+		// Stage 2: drop the org entirely when there's no useful stub room.
+		{"drops org when stub would be <1", "trainline-private/foo", 4, "foo"},
+		{"drops org and shows just name", "trainline-private/partnerships-api", 17, "partnerships-api"},
+		// Stage 3: name itself doesn't fit -> generic truncate of the name.
+		{"truncates name when name is too long", "trainline-private/partnerships-api", 12, "partnership…"},
+		// No slash: fall through to plain truncate.
+		{"no slash", "unparseable-thing", 10, "unparseab…"},
 	}
 	for _, c := range cases {
-		got := shrinkRepo(c.repo, c.budget)
-		if got != c.want {
-			t.Errorf("shrinkRepo(%q, %d) = %q, want %q", c.repo, c.budget, got, c.want)
-		}
+		t.Run(c.name, func(t *testing.T) {
+			got := shrinkRepo(c.repo, c.budget)
+			if got != c.want {
+				t.Errorf("shrinkRepo(%q, %d) = %q, want %q", c.repo, c.budget, got, c.want)
+			}
+		})
 	}
 }
 
@@ -531,6 +556,30 @@ func TestWriteNotifsTable_FocusCursor(t *testing.T) {
 	out = captureStdout(t, func() { writeNotifsTable(ns, "", true, 0) })
 	if strings.Contains(ansiRe.ReplaceAllString(out, ""), "▶") {
 		t.Errorf("expected no cursor when focusedID empty:\n%s", out)
+	}
+}
+
+func TestWritePRTable_CompactDropsBranch(t *testing.T) {
+	now := time.Now()
+	ps := []prs.PR{
+		{Repo: "acme/a", Number: 1, Title: "test", HeadBranch: "feature/x", URL: "u", UpdatedAt: now},
+	}
+	// Narrow termWidth (below compactThreshold of 120) triggers compact mode.
+	narrow := captureStdout(t, func() { writePRTable(ps, "", true, 80) })
+	if strings.Contains(narrow, "BRANCH") {
+		t.Errorf("BRANCH header should be hidden when compact:\n%s", narrow)
+	}
+	if strings.Contains(narrow, "feature/x") {
+		t.Errorf("BRANCH cell content should be hidden when compact:\n%s", narrow)
+	}
+
+	// Wide termWidth keeps BRANCH visible.
+	wide := captureStdout(t, func() { writePRTable(ps, "", true, 200) })
+	if !strings.Contains(wide, "BRANCH") {
+		t.Errorf("BRANCH header should be present when wide:\n%s", wide)
+	}
+	if !strings.Contains(wide, "feature/x") {
+		t.Errorf("BRANCH cell content should be present when wide:\n%s", wide)
 	}
 }
 

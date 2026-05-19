@@ -275,11 +275,22 @@ func reasonLabel(reason string) string {
 }
 
 // prRepoCol is the column index of REPO inside writePRTable's rows.
+// Same value in compact and full modes: REPO sits at index 4 either way
+// (BRANCH is the only column that gets dropped, and it sits after REPO).
 const prRepoCol = 4
 
+// compactThreshold is the terminal width below which PR rows shed their
+// BRANCH column and use shorter status/check labels.
+const compactThreshold = 120
+
 func writePRTable(ps []prs.PR, focusedKey string, tty bool, termWidth int) {
+	compact := termWidth > 0 && termWidth < compactThreshold
+	header := []string{"  ", "CHECKS", "REVIEW", "TITLE", "REPO", "#", "BRANCH", "AGE", "LINK"}
+	if compact {
+		header = []string{"  ", "CHECKS", "REVIEW", "TITLE", "REPO", "#", "AGE", "LINK"}
+	}
 	rows := make([][]string, 0, len(ps)+1)
-	rows = append(rows, dimRow([]string{"  ", "CHECKS", "REVIEW", "TITLE", "REPO", "#", "BRANCH", "AGE", "LINK"}, tty))
+	rows = append(rows, dimRow(header, tty))
 	for _, p := range ps {
 		link := p.URL
 		if tty {
@@ -289,17 +300,19 @@ func writePRTable(ps []prs.PR, focusedKey string, tty bool, termWidth int) {
 		if focusedKey != "" && fmt.Sprintf("%s#%d", p.Repo, p.Number) == focusedKey {
 			cursor = color(ansiYellow, "▶", tty) + " "
 		}
-		rows = append(rows, []string{
+		row := []string{
 			cursor,
-			prStatusCell(p, tty),
+			prStatusCell(p, tty, compact),
 			prReviewCell(p, tty),
 			truncate(p.Title, 40),
 			p.Repo,
 			fmt.Sprintf("#%d", p.Number),
-			truncate(p.HeadBranch, 30),
-			relativeAge(p.UpdatedAt),
-			link,
-		})
+		}
+		if !compact {
+			row = append(row, truncate(p.HeadBranch, 30))
+		}
+		row = append(row, relativeAge(p.UpdatedAt), link)
+		rows = append(rows, row)
 	}
 	fitRepoColumn(rows, prRepoCol, termWidth)
 	printAligned(rows)
@@ -313,29 +326,56 @@ func prReviewCell(p prs.PR, tty bool) string {
 	case "CHANGES_REQUESTED":
 		label = color(ansiRed, "✗", tty) + " changes"
 	case "REVIEW_REQUIRED":
-		label = color(ansiDim, "·", tty) + " needs review"
+		label = color(ansiDim, "·", tty) + " blocked"
 	default:
 		if p.ReviewCount > 0 {
 			label = color(ansiYellow, "◐", tty) + " reviewed"
 		} else {
-			label = color(ansiDim, "·", tty) + " no review"
+			// No decision and no reviewers yet: render nothing rather
+			// than a "no review" placeholder that just wastes column.
+			label = ""
 		}
 	}
 	if p.CommentCount > 0 {
-		label += dim(fmt.Sprintf(" +%d", p.CommentCount), tty)
+		if label != "" {
+			label += " "
+		}
+		label += dim(fmt.Sprintf("+%d", p.CommentCount), tty)
 	}
 	return label
 }
 
-func prStatusCell(p prs.PR, tty bool) string {
+func prStatusCell(p prs.PR, tty, compact bool) string {
+	failed := func() string {
+		if compact {
+			return fmt.Sprintf(" %d/%d", p.Failing, p.Total)
+		}
+		return fmt.Sprintf(" %d/%d fail", p.Failing, p.Total)
+	}
+	pending := func() string {
+		if compact {
+			return fmt.Sprintf(" %d/%d", p.Passing+p.Failing, p.Total)
+		}
+		return fmt.Sprintf(" %d/%d wait", p.Passing+p.Failing, p.Total)
+	}
+	passed := func() string {
+		if compact {
+			return fmt.Sprintf(" %d/%d", p.Passing, p.Total)
+		}
+		return fmt.Sprintf(" %d/%d pass", p.Passing, p.Total)
+	}
+
 	switch {
 	case p.IsFailing():
-		return color(ansiRed, "✗", tty) + fmt.Sprintf(" %d/%d fail", p.Failing, p.Total)
+		return color(ansiRed, "✗", tty) + failed()
 	case p.IsPending():
-		return color(ansiYellow, "◐", tty) + fmt.Sprintf(" %d/%d wait", p.Passing+p.Failing, p.Total)
+		return color(ansiYellow, "◐", tty) + pending()
 	case p.IsPassing():
-		return color(ansiGreen, "✓", tty) + fmt.Sprintf(" %d/%d pass", p.Passing, p.Total)
+		return color(ansiGreen, "✓", tty) + passed()
 	case p.Total == 0:
+		if compact {
+			return color(ansiDim, "·", tty)
+		}
 		return color(ansiDim, "·", tty) + " none"
 	}
 	return color(ansiDim, "·", tty) + " " + p.State
@@ -443,9 +483,15 @@ func fitRepoColumn(rows [][]string, colIdx, termWidth int) {
 	}
 }
 
-// shrinkRepo fits "owner/name" into budget visible runes. Prefers to keep
-// the full repo name and trim the owner with a leading ellipsis. Falls
-// back to a generic truncate when even the name can't fit.
+// shrinkRepo fits "owner/name" into budget visible runes. Cascade:
+//  1. fits as-is → return unchanged
+//  2. enough room for at least one owner char + "…/name" → trim owner
+//  3. not enough room for any owner stub → drop the org entirely, show
+//     just the repo name (truncated if still too long)
+//
+// The "show the repo name" goal beats showing a long org prefix, because
+// when a user has many notifications for one org the org name is repeated
+// noise but the repo name is the distinguishing signal.
 func shrinkRepo(repo string, budget int) string {
 	if visibleWidth(repo) <= budget {
 		return repo
@@ -454,19 +500,23 @@ func shrinkRepo(repo string, budget int) string {
 	if slash < 0 {
 		return truncate(repo, budget)
 	}
-	name := repo[slash:] // includes the slash
+	name := repo[slash+1:] // without the slash
 	nameLen := visibleWidth(name)
-	ownerBudget := budget - nameLen
-	if ownerBudget < 2 {
-		// not enough room for at least "x…/name" — fall back to generic
-		// truncation of the whole string
-		return truncate(repo, budget)
-	}
 	ownerRunes := []rune(repo[:slash])
-	if len(ownerRunes) <= ownerBudget {
-		return repo
+
+	// Try preserving some of the owner: "<stub>…/<name>". Width consumed
+	// is stub + 2 (ellipsis + slash) + nameLen, so stub = budget-2-nameLen.
+	ownerStub := budget - 2 - nameLen
+	if ownerStub >= 1 && ownerStub < len(ownerRunes) {
+		return string(ownerRunes[:ownerStub]) + "…/" + name
 	}
-	return string(ownerRunes[:ownerBudget-1]) + "…" + name
+
+	// No room for a useful owner stub: drop the org. Prefer full name,
+	// fall back to truncated name.
+	if nameLen <= budget {
+		return name
+	}
+	return truncate(name, budget)
 }
 
 // printAligned prints rows with columns padded to their widest VISIBLE cell.
