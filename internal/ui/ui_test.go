@@ -611,6 +611,90 @@ func TestWritePRTable_VeryNarrowAlsoCompactsStatus(t *testing.T) {
 	}
 }
 
+func TestStyleTickets(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"bracketed prefix-number", "[ECOM-9026] Convert SQL", ansiAmber + "[ECOM-9026]" + ansiReset + " Convert SQL"},
+		{"bare prefix-number", "NB-1068 Add feature", ansiAmber + "NB-1068" + ansiReset + " Add feature"},
+		{"multiple in one title", "[NB-1] and NB-2", ansiAmber + "[NB-1]" + ansiReset + " and " + ansiAmber + "NB-2" + ansiReset},
+		{"no match leaves string untouched", "Just a regular title", "Just a regular title"},
+		{"single-letter prefix not matched", "A-1 ignored", "A-1 ignored"},
+		{"lowercase prefix not matched", "ab-12 ignored", "ab-12 ignored"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := styleTickets(c.in)
+			if got != c.want {
+				t.Errorf("styleTickets(%q) = %q, want %q", c.in, got, c.want)
+			}
+		})
+	}
+}
+
+func TestStyleTickets_VisibleWidthPreserved(t *testing.T) {
+	in := "[ECOM-9026] Convert SQL statements"
+	styled := styleTickets(in)
+	if visibleWidth(in) != visibleWidth(styled) {
+		t.Errorf("visible width mismatch: raw=%d styled=%d", visibleWidth(in), visibleWidth(styled))
+	}
+}
+
+func TestColoredHyperlink_WrapsInPaleBlue(t *testing.T) {
+	out := coloredHyperlink("https://example.com", "open ↗")
+	if !strings.Contains(out, ansiPaleBlue+"open ↗"+ansiReset) {
+		t.Errorf("expected pale blue around the link text; got %q", out)
+	}
+	// Visible width should still equal the rune count of "open ↗" (= 6).
+	if visibleWidth(out) != 6 {
+		t.Errorf("visibleWidth = %d, want 6", visibleWidth(out))
+	}
+}
+
+func TestWritePRTable_LinkUsesPaleBlue(t *testing.T) {
+	now := time.Now()
+	ps := []prs.PR{
+		{Repo: "x/y", Number: 1, Title: "t", URL: "https://x/y/pull/1", UpdatedAt: now},
+	}
+	out := captureStdout(t, func() { writePRTable(ps, "", true, 300) })
+	if !strings.Contains(out, ansiPaleBlue+"open ↗"+ansiReset) {
+		t.Errorf("expected pale blue link in PR row:\n%q", out)
+	}
+}
+
+func TestWriteTable_LinkUsesPaleBlue(t *testing.T) {
+	now := time.Now()
+	rs := []runs.Run{
+		{ID: 1, Repo: "x/y", WorkflowName: "CI", Status: "in_progress", URL: "u", CreatedAt: now, UpdatedAt: now},
+	}
+	out := captureStdout(t, func() { writeTable(rs, "", true, 300) })
+	if !strings.Contains(out, ansiPaleBlue+"open ↗"+ansiReset) {
+		t.Errorf("expected pale blue link in workflow runs row:\n%q", out)
+	}
+}
+
+func TestWriteNotifsTable_UnreadGetsColoredLinkAndTickets_ReadDoesNot(t *testing.T) {
+	now := time.Now()
+	ns := []notifs.Notification{
+		{ID: "1", Repo: "x/y", PRNumber: 1, Title: "[NB-1] unread", Reason: "mention", URL: "u", UpdatedAt: now, Unread: true},
+		{ID: "2", Repo: "x/y", PRNumber: 2, Title: "[NB-2] read", Reason: "mention", URL: "u", UpdatedAt: now, Unread: false},
+	}
+	out := captureStdout(t, func() { writeNotifsTable(ns, "", true, 300) })
+	if !strings.Contains(out, ansiPaleBlue+"open ↗"+ansiReset) {
+		t.Errorf("unread row should have pale blue link:\n%q", out)
+	}
+	if !strings.Contains(out, ansiAmber+"[NB-1]"+ansiReset) {
+		t.Errorf("unread row should have ticket styled:\n%q", out)
+	}
+	// Read row's ticket [NB-2] should NOT be wrapped in amber (would break
+	// the row dim wrap).
+	if strings.Contains(out, ansiAmber+"[NB-2]"+ansiReset) {
+		t.Errorf("read row should NOT have ticket styling:\n%q", out)
+	}
+}
+
 func TestStyleRepoCell(t *testing.T) {
 	cases := []struct {
 		name string

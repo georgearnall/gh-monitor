@@ -29,6 +29,12 @@ const (
 	ansiRed    = "\x1b[31m"
 	ansiYellow = "\x1b[33m"
 	ansiCyan   = "\x1b[36m"
+	// ansiPaleBlue is a 256-colour soft blue used for hyperlink labels,
+	// distinct from any of the status colours.
+	ansiPaleBlue = "\x1b[38;5;111m"
+	// ansiAmber is a 256-colour muted gold used to subtly distinguish
+	// ticket references like [ECOM-9026], NB-1068, etc. in titles.
+	ansiAmber = "\x1b[38;5;179m"
 )
 
 type Snapshot struct {
@@ -193,8 +199,16 @@ func writeNotifsTable(ns []notifs.Notification, focusedID string, tty bool, term
 	dimMask := make([]bool, len(ns)) // which data row should be dimmed post-fit
 	for i, n := range ns {
 		link := n.URL
+		title := truncate(n.Title, 50)
 		if tty {
-			link = hyperlink(n.URL, "open ↗")
+			if n.Unread {
+				link = coloredHyperlink(n.URL, "open ↗")
+				title = styleTickets(title)
+			} else {
+				// Read row: avoid inner SGR codes that would break the
+				// outer dim wrap applied below.
+				link = hyperlink(n.URL, "open ↗")
+			}
 		}
 		cursor := "  "
 		if n.ID == focusedID {
@@ -203,7 +217,7 @@ func writeNotifsTable(ns []notifs.Notification, focusedID string, tty bool, term
 		rows = append(rows, []string{
 			cursor,
 			reasonCell(n, tty),
-			truncate(n.Title, 50),
+			title,
 			n.Repo, // kept plain so shrinkRepo can parse the slash
 			fmt.Sprintf("#%d", n.PRNumber),
 			relativeAge(n.UpdatedAt),
@@ -314,8 +328,10 @@ func buildPRRows(ps []prs.PR, focusedKey string, tty, includeBranch, compactStat
 	rows = append(rows, dimRow(header, tty))
 	for _, p := range ps {
 		link := p.URL
+		title := truncate(p.Title, prTitleMax)
 		if tty {
-			link = hyperlink(p.URL, "open ↗")
+			link = coloredHyperlink(p.URL, "open ↗")
+			title = styleTickets(title)
 		}
 		cursor := "  "
 		if focusedKey != "" && fmt.Sprintf("%s#%d", p.Repo, p.Number) == focusedKey {
@@ -325,7 +341,7 @@ func buildPRRows(ps []prs.PR, focusedKey string, tty, includeBranch, compactStat
 			cursor,
 			prStatusCell(p, tty, compactStatus),
 			prReviewCell(p, tty),
-			truncate(p.Title, prTitleMax),
+			title,
 			p.Repo,
 			fmt.Sprintf("#%d", p.Number),
 		}
@@ -410,7 +426,7 @@ func writeTable(rows []runs.Run, focusedID string, tty bool, termWidth int) {
 	for _, r := range rows {
 		link := r.URL
 		if tty {
-			link = hyperlink(r.URL, "open ↗")
+			link = coloredHyperlink(r.URL, "open ↗")
 		}
 		cursor := "  "
 		if focusedID != "" && strconv.FormatInt(r.ID, 10) == focusedID {
@@ -717,8 +733,31 @@ func truncate(s string, n int) string {
 	return string(runes[:n-1]) + "…"
 }
 
+// hyperlink emits an OSC 8 hyperlink with no colour styling. Safe to use
+// inside an outer ansiDim wrap because OSC sequences don't carry SGR
+// attributes that would interact with intensity.
 func hyperlink(url, text string) string {
 	return "\x1b]8;;" + url + "\x1b\\" + text + "\x1b]8;;\x1b\\"
+}
+
+// coloredHyperlink emits a pale-blue OSC 8 hyperlink. The inner SGR reset
+// would terminate any outer dim wrap, so callers must NOT use this for
+// cells that will be dimmed at the row level (use plain hyperlink there).
+func coloredHyperlink(url, text string) string {
+	return "\x1b]8;;" + url + "\x1b\\" + ansiPaleBlue + text + ansiReset + "\x1b]8;;\x1b\\"
+}
+
+// ticketRe matches things that look like ticket references: an optional
+// opening bracket, 2+ uppercase letters, a hyphen, one or more digits,
+// and an optional closing bracket. Covers [ECOM-9026], NB-1068, etc.
+var ticketRe = regexp.MustCompile(`\[?[A-Z]{2,}-\d+\]?`)
+
+// styleTickets wraps every ticket-like substring in ansiAmber so they're
+// visually distinct in a title. Same dim-wrap caveat as coloredHyperlink.
+func styleTickets(s string) string {
+	return ticketRe.ReplaceAllStringFunc(s, func(match string) string {
+		return ansiAmber + match + ansiReset
+	})
 }
 
 func setWindowTitle(s string) {
