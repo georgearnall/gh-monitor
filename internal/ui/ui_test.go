@@ -634,6 +634,26 @@ func TestRender_EmptyStateMessages(t *testing.T) {
 	}
 }
 
+func TestRender_EmptyLinesTerminateWithClearEOL(t *testing.T) {
+	// Forcing stdout to a pipe makes isTTY return false inside Render, so
+	// we can't assert the tty-mode escape from there. Instead, exercise
+	// pln directly with tty=true to lock in the clear-EOL behaviour.
+	out := captureStdout(t, func() {
+		pln(true, "short content")
+	})
+	want := "short content" + ansiClearEOL + "\n"
+	if out != want {
+		t.Errorf("pln(tty=true, ...) = %q, want %q", out, want)
+	}
+
+	out = captureStdout(t, func() {
+		pln(false, "short content")
+	})
+	if out != "short content\n" {
+		t.Errorf("pln(tty=false, ...) = %q, want %q", out, "short content\n")
+	}
+}
+
 func TestRender_NonEmptySectionShowsTable(t *testing.T) {
 	// PRs section non-empty: its empty message must NOT appear, but the
 	// other two sections still show their empty messages.

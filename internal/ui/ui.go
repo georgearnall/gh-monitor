@@ -22,6 +22,10 @@ const (
 	// place (no full-screen-clear flash on every keypress).
 	ansiHome       = "\x1b[H"
 	ansiClearBelow = "\x1b[J"
+	// ansiClearEOL clears from the cursor to the end of the current line.
+	// Appended to every printed line during in-place redraws so leftover
+	// characters from a previous, longer line don't dangle.
+	ansiClearEOL = "\x1b[K"
 	ansiReset      = "\x1b[0m"
 	ansiBold       = "\x1b[1m"
 	ansiDim    = "\x1b[2m"
@@ -72,28 +76,28 @@ func Render(snap Snapshot) {
 
 	header(snap, tty)
 
-	fmt.Println()
-	fmt.Println(dim("NOTIFICATIONS", tty))
+	pln(tty)
+	pln(tty, dim("NOTIFICATIONS", tty))
 	if len(notifRows) > 0 {
 		writeNotifsTable(notifRows, snap.FocusedNotifID, tty, snap.TermWidth)
 	} else {
-		fmt.Println(dim("all caught up", tty))
+		pln(tty, dim("all caught up", tty))
 	}
 
-	fmt.Println()
-	fmt.Println(dim("PULL REQUESTS", tty))
+	pln(tty)
+	pln(tty, dim("PULL REQUESTS", tty))
 	if len(snap.PRs) > 0 {
 		writePRTable(snap.PRs, snap.FocusedPRKey, tty, snap.TermWidth)
 	} else {
-		fmt.Println(dim("no open pull requests", tty))
+		pln(tty, dim("no open pull requests", tty))
 	}
 
-	fmt.Println()
-	fmt.Println(dim("WORKFLOW RUNS", tty))
+	pln(tty)
+	pln(tty, dim("WORKFLOW RUNS", tty))
 	if len(rows) > 0 {
 		writeTable(rows, snap.FocusedRunID, tty, snap.TermWidth)
 	} else {
-		fmt.Println(dim("no active runs or recent failures", tty))
+		pln(tty, dim("no active runs or recent failures", tty))
 	}
 	footer(snap, tty)
 	if tty {
@@ -115,7 +119,7 @@ func header(_ Snapshot, tty bool) {
 	if tty {
 		title = ansiBold + title + ansiReset
 	}
-	fmt.Println(title)
+	pln(tty, title)
 }
 
 func footer(snap Snapshot, tty bool) {
@@ -135,10 +139,10 @@ func footer(snap Snapshot, tty bool) {
 	} else if snap.NextPollIn > 0 {
 		parts = append(parts, fmt.Sprintf("next poll in %s", snap.NextPollIn.Round(time.Second)))
 	}
-	fmt.Println()
-	fmt.Println(dim(join(parts, " · "), tty))
+	pln(tty)
+	pln(tty, dim(join(parts, " · "), tty))
 	if tty {
-		fmt.Println(dim("[↑↓] move  [↵] open  [m] mark read  [M] mark all  [r] refresh  [q] quit", tty))
+		pln(tty, dim("[↑↓] move  [↵] open  [m] mark read  [M] mark all  [r] refresh  [q] quit", tty))
 	}
 }
 
@@ -596,10 +600,14 @@ func shrinkRepo(repo string, budget int) string {
 // printAligned prints rows with columns padded to their widest VISIBLE cell.
 // ANSI escapes (colors, OSC 8 hyperlinks) are stripped before width measurement
 // so they don't inflate column widths past what the terminal actually shows.
+// Each output line is terminated with a clear-to-EOL when stdout is a tty,
+// so an in-place redraw doesn't leave dangling characters from a previous
+// longer line.
 func printAligned(rows [][]string) {
 	if len(rows) == 0 {
 		return
 	}
+	tty := isTTY(os.Stdout)
 	cols := len(rows[0])
 	widths := make([]int, cols)
 	for _, row := range rows {
@@ -610,18 +618,20 @@ func printAligned(rows [][]string) {
 			}
 		}
 	}
+	var line strings.Builder
 	for _, row := range rows {
+		line.Reset()
 		for i := 0; i < cols && i < len(row); i++ {
 			cell := row[i]
-			fmt.Print(cell)
+			line.WriteString(cell)
 			if i < cols-1 {
 				pad := widths[i] - visibleWidth(cell) + 2
 				if pad > 0 {
-					fmt.Print(strings.Repeat(" ", pad))
+					line.WriteString(strings.Repeat(" ", pad))
 				}
 			}
 		}
-		fmt.Println()
+		pln(tty, line.String())
 	}
 }
 
@@ -833,6 +843,18 @@ func color(code, s string, tty bool) string {
 		return s
 	}
 	return code + s + ansiReset
+}
+
+// pln writes a line followed by a clear-to-EOL escape (on tty) and a
+// newline. Use instead of fmt.Println inside Render so a shorter new
+// line doesn't leave the trailing characters of a longer previous render
+// on screen.
+func pln(tty bool, args ...any) {
+	if tty {
+		fmt.Print(fmt.Sprint(args...) + ansiClearEOL + "\n")
+		return
+	}
+	fmt.Println(args...)
 }
 
 func dim(s string, tty bool) string {
