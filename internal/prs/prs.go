@@ -134,8 +134,9 @@ type contextNode struct {
 }
 
 // Poll returns the authenticated user's open, non-draft pull requests with
-// aggregated status-check counts. One GraphQL call.
-func Poll(client *ghclient.Client) ([]PR, error) {
+// aggregated status-check counts. PRs whose UpdatedAt is before `since` are
+// dropped; a zero `since` disables the filter and returns everything.
+func Poll(client *ghclient.Client, since time.Time) ([]PR, error) {
 	var resp response
 	if err := client.GraphQL(query, nil, &resp); err != nil {
 		return nil, err
@@ -144,6 +145,9 @@ func Poll(client *ghclient.Client) ([]PR, error) {
 	out := make([]PR, 0, len(resp.Viewer.PullRequests.Nodes))
 	for _, n := range resp.Viewer.PullRequests.Nodes {
 		if n.IsDraft {
+			continue
+		}
+		if !since.IsZero() && n.UpdatedAt.Before(since) {
 			continue
 		}
 		pr := PR{

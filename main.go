@@ -54,6 +54,7 @@ type watchConfig struct {
 	lowQuotaFloor  time.Duration
 	lowQuotaLimit  int
 
+	prSince  time.Duration // hide PRs not updated within this window (0 disables)
 	once     bool
 	excluded stringSet
 	noNotify bool
@@ -85,6 +86,7 @@ func main() {
 	fs.DurationVar(&cfg.activeInterval, "interval", cfg.activeInterval, "poll interval while runs are active")
 	fs.DurationVar(&cfg.baseInterval, "idle-interval", cfg.baseInterval, "poll interval while no runs are active")
 	fs.DurationVar(&cfg.repoRefresh, "repo-refresh", 5*time.Minute, "repo list refresh interval")
+	fs.DurationVar(&cfg.prSince, "pr-since", 60*24*time.Hour, "hide pull requests not updated within this duration (0 disables)")
 	fs.BoolVar(&cfg.once, "once", false, "run a single poll cycle and exit")
 	fs.Var(&cfg.excluded, "exclude", "owner/repo to exclude from monitoring (repeatable)")
 	fs.BoolVar(&cfg.noNotify, "no-notify", false, "suppress desktop notifications")
@@ -135,6 +137,8 @@ FLAGS
   --interval D          Poll interval while runs are active (default 20s)
   --idle-interval D     Poll interval when nothing is running (default 1m)
   --repo-refresh D      How often to re-run discovery (default 5m)
+  --pr-since D          Hide PRs not updated within this duration (default
+                        1440h = 60 days). Use 0 to disable the filter.
   --once                Single poll cycle then exit (no TUI, script-friendly)
   --exclude owner/repo  Skip a noisy repo. Repeatable.
   --no-notify           Suppress desktop notifications on workflow failure
@@ -666,7 +670,11 @@ func doRefresh(ctx context.Context, client *ghclient.Client, cfg *watchConfig) p
 		return nil
 	})
 	g.Go(func() error {
-		pulled, prErr := prs.Poll(client)
+		var since time.Time
+		if cfg.prSince > 0 {
+			since = time.Now().Add(-cfg.prSince)
+		}
+		pulled, prErr := prs.Poll(client, since)
 		res.PRs = pulled
 		res.PRErr = prErr
 		return nil

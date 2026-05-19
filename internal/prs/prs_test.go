@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/georgearnall/gha-monitor/internal/ghclient"
 )
@@ -164,7 +165,7 @@ func TestPoll_FiltersDraftsAndBucketsChecks(t *testing.T) {
 	defer srv.Close()
 
 	c := ghclient.NewForTest(srv.Client(), srv.URL+"/")
-	got, err := Poll(c)
+	got, err := Poll(c, time.Time{})
 	if err != nil {
 		t.Fatalf("Poll: %v", err)
 	}
@@ -207,6 +208,48 @@ func TestPoll_FiltersDraftsAndBucketsChecks(t *testing.T) {
 	}
 }
 
+func TestPoll_FiltersBySince(t *testing.T) {
+	now := time.Now().UTC()
+	recent := now.Add(-30 * 24 * time.Hour).Format(time.RFC3339)
+	old := now.Add(-200 * 24 * time.Hour).Format(time.RFC3339)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintf(w, `{"data":{"viewer":{"pullRequests":{"nodes":[
+			{"number":1,"title":"recent","url":"u1","isDraft":false,"updatedAt":%q,
+			 "headRefName":"a","reviewDecision":"","reviews":{"totalCount":0},"comments":{"totalCount":0},
+			 "repository":{"nameWithOwner":"x/y"},
+			 "commits":{"nodes":[{"commit":{"statusCheckRollup":null}}]}},
+			{"number":2,"title":"old","url":"u2","isDraft":false,"updatedAt":%q,
+			 "headRefName":"b","reviewDecision":"","reviews":{"totalCount":0},"comments":{"totalCount":0},
+			 "repository":{"nameWithOwner":"x/y"},
+			 "commits":{"nodes":[{"commit":{"statusCheckRollup":null}}]}}
+		]}}}}`, recent, old)
+	}))
+	defer srv.Close()
+	c := ghclient.NewForTest(srv.Client(), srv.URL+"/")
+
+	// Zero since: both kept.
+	got, err := Poll(c, time.Time{})
+	if err != nil {
+		t.Fatalf("Poll(zero since): %v", err)
+	}
+	if len(got) != 2 {
+		t.Errorf("zero since should keep both; got %d", len(got))
+	}
+
+	// since = now - 60 days: drops the 200d-old PR.
+	got, err = Poll(c, now.Add(-60*24*time.Hour))
+	if err != nil {
+		t.Fatalf("Poll(60d since): %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("60d since should keep only the recent PR; got %d: %+v", len(got), got)
+	}
+	if got[0].Number != 1 {
+		t.Errorf("expected to keep #1 (recent); got #%d", got[0].Number)
+	}
+}
+
 func TestPoll_GraphQLError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprint(w, `{"errors":[{"message":"viewer not authorized"}]}`)
@@ -214,7 +257,7 @@ func TestPoll_GraphQLError(t *testing.T) {
 	defer srv.Close()
 
 	c := ghclient.NewForTest(srv.Client(), srv.URL+"/")
-	if _, err := Poll(c); err == nil {
+	if _, err := Poll(c, time.Time{}); err == nil {
 		t.Error("expected error from graphql errors[], got nil")
 	}
 }
