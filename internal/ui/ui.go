@@ -72,28 +72,28 @@ func Render(snap Snapshot) {
 
 	header(snap, tty)
 
+	fmt.Println()
+	fmt.Println(dim("NOTIFICATIONS", tty))
 	if len(notifRows) > 0 {
-		fmt.Println()
-		fmt.Println(dim("NOTIFICATIONS", tty))
 		writeNotifsTable(notifRows, snap.FocusedNotifID, tty, snap.TermWidth)
+	} else {
+		fmt.Println(dim("all caught up", tty))
 	}
 
+	fmt.Println()
+	fmt.Println(dim("PULL REQUESTS", tty))
 	if len(snap.PRs) > 0 {
-		fmt.Println()
-		fmt.Println(dim("PULL REQUESTS", tty))
 		writePRTable(snap.PRs, snap.FocusedPRKey, tty, snap.TermWidth)
+	} else {
+		fmt.Println(dim("no open pull requests", tty))
 	}
 
-	if len(rows) > 0 || (len(snap.PRs) == 0 && len(notifRows) == 0) {
-		fmt.Println()
-		if len(snap.PRs) > 0 || len(notifRows) > 0 {
-			fmt.Println(dim("WORKFLOW RUNS", tty))
-		}
-		if len(rows) == 0 {
-			fmt.Println(dim("no active runs or recent failures", tty))
-		} else {
-			writeTable(rows, snap.FocusedRunID, tty, snap.TermWidth)
-		}
+	fmt.Println()
+	fmt.Println(dim("WORKFLOW RUNS", tty))
+	if len(rows) > 0 {
+		writeTable(rows, snap.FocusedRunID, tty, snap.TermWidth)
+	} else {
+		fmt.Println(dim("no active runs or recent failures", tty))
 	}
 	footer(snap, tty)
 	if tty {

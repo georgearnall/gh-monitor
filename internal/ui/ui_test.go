@@ -611,6 +611,51 @@ func TestWritePRTable_VeryNarrowAlsoCompactsStatus(t *testing.T) {
 	}
 }
 
+func TestRender_EmptyStateMessages(t *testing.T) {
+	// All three panels empty: every section header should appear with its
+	// dim empty-state message.
+	out := captureStdout(t, func() {
+		Render(Snapshot{TermWidth: 200})
+	})
+	stripped := ansiRe.ReplaceAllString(out, "")
+
+	wants := []string{
+		"NOTIFICATIONS",
+		"all caught up",
+		"PULL REQUESTS",
+		"no open pull requests",
+		"WORKFLOW RUNS",
+		"no active runs or recent failures",
+	}
+	for _, w := range wants {
+		if !strings.Contains(stripped, w) {
+			t.Errorf("expected output to contain %q; got:\n%s", w, stripped)
+		}
+	}
+}
+
+func TestRender_NonEmptySectionShowsTable(t *testing.T) {
+	// PRs section non-empty: its empty message must NOT appear, but the
+	// other two sections still show their empty messages.
+	now := time.Now()
+	out := captureStdout(t, func() {
+		Render(Snapshot{
+			TermWidth: 200,
+			PRs:       []prs.PR{{Repo: "x/y", Number: 1, Title: "t", URL: "u", UpdatedAt: now}},
+		})
+	})
+	stripped := ansiRe.ReplaceAllString(out, "")
+	if strings.Contains(stripped, "no open pull requests") {
+		t.Errorf("PR section should not show empty message when PRs are present:\n%s", stripped)
+	}
+	if !strings.Contains(stripped, "all caught up") {
+		t.Errorf("notifications panel should still show empty message:\n%s", stripped)
+	}
+	if !strings.Contains(stripped, "no active runs or recent failures") {
+		t.Errorf("workflow runs panel should still show empty message:\n%s", stripped)
+	}
+}
+
 func TestStyleTickets(t *testing.T) {
 	cases := []struct {
 		name string
