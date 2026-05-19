@@ -238,8 +238,9 @@ func runWatch(client *ghclient.Client, cfg watchConfig) {
 
 	enqueue(trigger) // initial refresh
 
-	winch, stopWinch := notifyWinch()
+	winchRaw, stopWinch := notifyWinch()
 	defer stopWinch()
+	winch := coalesceSignal(ctx, winchRaw, 100*time.Millisecond)
 
 	var (
 		refreshing bool
@@ -474,6 +475,41 @@ func moveFocus(st *state.State, current focusTarget, delta int) focusTarget {
 		next = len(targets) - 1
 	}
 	return targets[next]
+}
+
+// coalesceSignal forwards events from in to the returned channel, collapsing
+// a burst of signals into a single event delivered once the burst has been
+// quiet for d. Used to debounce SIGWINCH during a resize drag, which can
+// fire 30+ times a second and produce visible flicker if each one triggers
+// a full screen redraw.
+//
+// Cancels cleanly when ctx is done.
+func coalesceSignal(ctx context.Context, in <-chan os.Signal, d time.Duration) <-chan struct{} {
+	out := make(chan struct{}, 1)
+	go func() {
+		var timer *time.Timer
+		fire := func() {
+			select {
+			case out <- struct{}{}:
+			default:
+			}
+		}
+		for {
+			select {
+			case <-in:
+				if timer != nil {
+					timer.Stop()
+				}
+				timer = time.AfterFunc(d, fire)
+			case <-ctx.Done():
+				if timer != nil {
+					timer.Stop()
+				}
+				return
+			}
+		}
+	}()
+	return out
 }
 
 // enqueue sends to a single-slot channel without blocking when full.
