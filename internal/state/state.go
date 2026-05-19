@@ -44,6 +44,13 @@ type State struct {
 	ViewerLogin     string                        `json:"viewer_login,omitempty"`
 	EtagCache       map[string]ghclient.EtagEntry `json:"etag_cache,omitempty"`
 	path            string
+
+	// BgErr is the most recent error from a background task (dismiss
+	// queue, mark-read, etc.). Surfaced in the UI footer so the user can
+	// see failures the alt-screen would otherwise swallow.
+	// Runtime-only; not persisted.
+	BgErr   string    `json:"-"`
+	BgErrAt time.Time `json:"-"`
 }
 
 // DismissEntry remembers a notification the user dismissed locally so the

@@ -3,9 +3,12 @@ package main
 import (
 	"context"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -256,6 +259,89 @@ func TestCursorTargets_HonoursVisibilityFilter(t *testing.T) {
 	want := []string{"1", "4"}
 	if !reflect.DeepEqual(runIDs, want) {
 		t.Errorf("cursor target run IDs = %v, want %v (bot + completed-by-other should be filtered)", runIDs, want)
+	}
+}
+
+func TestDismissWorker_DrainsSequentially(t *testing.T) {
+	// Simulates GitHub: returns 204 to every DELETE and records the
+	// arrival times to prove we don't fire concurrently.
+	var (
+		mu       sync.Mutex
+		arrivals []time.Time
+	)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodDelete {
+			t.Errorf("want DELETE, got %s", r.Method)
+		}
+		mu.Lock()
+		arrivals = append(arrivals, time.Now())
+		mu.Unlock()
+		time.Sleep(10 * time.Millisecond) // simulate latency
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+	c := ghclient.NewForTest(srv.Client(), srv.URL+"/")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	in := make(chan dismissReq, 8)
+	out := make(chan dismissOutcome, 8)
+	go dismissWorker(ctx, c, in, out)
+
+	in <- dismissReq{ID: "1"}
+	in <- dismissReq{ID: "2"}
+	in <- dismissReq{ID: "3"}
+
+	for i := 0; i < 3; i++ {
+		select {
+		case o := <-out:
+			if o.Err != nil {
+				t.Errorf("dismiss %s errored: %v", o.ID, o.Err)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatalf("timed out waiting for outcome %d", i+1)
+		}
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(arrivals) != 3 {
+		t.Fatalf("got %d arrivals, want 3", len(arrivals))
+	}
+	// Each arrival should be at least ~10ms (one latency unit) after
+	// the previous, since the worker is sequential.
+	for i := 1; i < len(arrivals); i++ {
+		gap := arrivals[i].Sub(arrivals[i-1])
+		if gap < 5*time.Millisecond {
+			t.Errorf("arrival %d came %v after arrival %d; expected serial execution", i, gap, i-1)
+		}
+	}
+}
+
+func TestDismissWorker_ReportsError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+	c := ghclient.NewForTest(srv.Client(), srv.URL+"/")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	in := make(chan dismissReq, 1)
+	out := make(chan dismissOutcome, 1)
+	go dismissWorker(ctx, c, in, out)
+
+	in <- dismissReq{ID: "fail-me"}
+	select {
+	case o := <-out:
+		if o.Err == nil {
+			t.Errorf("expected error for 500 response")
+		}
+		if o.ID != "fail-me" {
+			t.Errorf("outcome.ID = %q, want fail-me", o.ID)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for outcome")
 	}
 }
 

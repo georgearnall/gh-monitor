@@ -718,6 +718,25 @@ func TestWritePRTable_VeryNarrowAlsoCompactsStatus(t *testing.T) {
 	}
 }
 
+func TestRender_BgErrShownInFooter(t *testing.T) {
+	out := captureStdout(t, func() {
+		Render(Snapshot{TermWidth: 200, BgErr: "dismiss failed: HTTP 429"})
+	})
+	stripped := ansiRe.ReplaceAllString(out, "")
+	if !strings.Contains(stripped, "⚠ dismiss failed: HTTP 429") {
+		t.Errorf("expected warning line in footer; got:\n%s", stripped)
+	}
+}
+
+func TestRender_NoBgErrLineWhenEmpty(t *testing.T) {
+	out := captureStdout(t, func() {
+		Render(Snapshot{TermWidth: 200})
+	})
+	if strings.Contains(out, "⚠") {
+		t.Errorf("expected no warning glyph when BgErr is empty; got:\n%s", out)
+	}
+}
+
 func TestRender_EmptyStateMessages(t *testing.T) {
 	// All three panels empty: every section header should appear with its
 	// dim empty-state message.

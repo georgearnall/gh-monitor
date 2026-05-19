@@ -248,6 +248,10 @@ func runWatch(client *ghclient.Client, cfg watchConfig) {
 	defer stopWinch()
 	winch := coalesceSignal(ctx, winchRaw, 100*time.Millisecond)
 
+	dismissQueue := make(chan dismissReq, 128)
+	dismissOutcomes := make(chan dismissOutcome, 16)
+	go dismissWorker(ctx, client, dismissQueue, dismissOutcomes)
+
 	var (
 		refreshing bool
 		nextTimer  *time.Timer
@@ -302,9 +306,20 @@ func runWatch(client *ghclient.Client, cfg watchConfig) {
 			case 'M':
 				markAllVisibleRead(client, st, &cfg, focused)
 			case 'd':
-				focused = dismissFocused(client, st, &cfg, focused)
+				focused = dismissFocused(dismissQueue, st, &cfg, focused)
 			case 'q', 'Q':
 				return
+			}
+
+		case out := <-dismissOutcomes:
+			if out.Err != nil {
+				// Un-record so the notification reappears honestly on
+				// the next poll instead of being hidden by the
+				// bounce-back cache for 10 minutes.
+				delete(st.DismissedNotifs, out.ID)
+				st.BgErr = fmt.Sprintf("dismiss failed: %v", out.Err)
+				st.BgErrAt = time.Now()
+				renderFromState(st, cfg, refreshing, focused)
 			}
 
 		case <-ctx.Done():
@@ -380,7 +395,45 @@ func applyDismiss(st *state.State, id string) (focusTarget, bool) {
 // GitHub via DELETE /notifications/threads/{id}. No-op if the focused
 // row is not in the notifications panel. Fires the DELETE in the
 // background after an optimistic local removal so the UI feels instant.
-func dismissFocused(client *ghclient.Client, st *state.State, cfg *watchConfig, f focusTarget) focusTarget {
+// dismissQueue is the in-process work queue for DELETE
+// /notifications/threads/{id} requests. We enqueue one ID per `d`
+// press; a single worker goroutine drains it sequentially so we never
+// fire concurrent writes against GitHub (which trips secondary
+// rate-limits and used to silently lose some requests).
+type dismissReq struct {
+	ID string
+}
+
+// dismissOutcome reports the result of one queued dismissal back to
+// the main loop so it can update state.LastError, un-record failed
+// entries from DismissedNotifs, and trigger a re-render.
+type dismissOutcome struct {
+	ID  string
+	Err error
+}
+
+// dismissWorker drains the queue one at a time and posts outcomes back
+// to the main loop. Sequential by design.
+func dismissWorker(ctx context.Context, client *ghclient.Client, in <-chan dismissReq, out chan<- dismissOutcome) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case req, ok := <-in:
+			if !ok {
+				return
+			}
+			err := notifs.DismissAll(client, []string{req.ID})
+			select {
+			case out <- dismissOutcome{ID: req.ID, Err: err}:
+			case <-ctx.Done():
+				return
+			}
+		}
+	}
+}
+
+func dismissFocused(queue chan<- dismissReq, st *state.State, cfg *watchConfig, f focusTarget) focusTarget {
 	if f.Panel != "notifs" || f.ID == "" {
 		return f
 	}
@@ -399,13 +452,17 @@ func dismissFocused(client *ghclient.Client, st *state.State, cfg *watchConfig, 
 	}
 	st.RecordDismiss(f.ID, updatedAt)
 
-	dismissedID := f.ID
 	renderFromState(st, *cfg, false, newFocus)
-	go func() {
-		if err := notifs.DismissAll(client, []string{dismissedID}); err != nil {
-			fmt.Fprintf(os.Stderr, "dismiss: %v\n", err)
-		}
-	}()
+	// Non-blocking enqueue. Buffer is generous; if it's somehow full,
+	// drop and the user will see the notification reappear on next
+	// poll (correctly reflecting GitHub state).
+	select {
+	case queue <- dismissReq{ID: f.ID}:
+	default:
+		// queue full; revert the bounce-back guard so the user sees
+		// the notif return honestly instead of staying hidden.
+		delete(st.DismissedNotifs, f.ID)
+	}
 	return newFocus
 }
 
@@ -831,6 +888,11 @@ func renderFromState(st *state.State, cfg watchConfig, refreshing bool, f focusT
 	if !refreshing {
 		next = cfg.nextInterval(activeCount(st.LastView), st.LastRateLimit, nil)
 	}
+	// Surface a recent background error in the footer for ~30s.
+	var bgErr string
+	if !st.BgErrAt.IsZero() && time.Since(st.BgErrAt) < 30*time.Second {
+		bgErr = st.BgErr
+	}
 	snap := ui.Snapshot{
 		Runs:          st.LastView,
 		PRs:           st.LastPRs,
@@ -844,6 +906,7 @@ func renderFromState(st *state.State, cfg watchConfig, refreshing bool, f focusT
 		TermWidth:     ui.TermWidth(),
 		Stale:         stale,
 		Refreshing:    refreshing,
+		BgErr:         bgErr,
 	}
 	switch f.Panel {
 	case "notifs":

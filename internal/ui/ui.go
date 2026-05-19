@@ -64,6 +64,7 @@ type Snapshot struct {
 	TermWidth      int  // 0 = unknown / unconstrained
 	Stale          bool // rendering from disk cache, not fresh
 	Refreshing     bool // a background refresh is in flight
+	BgErr          string // recent background-task error to surface in the footer
 }
 
 // Render redraws the status table. Safe to call when stdout is not a tty;
@@ -148,6 +149,9 @@ func footer(snap Snapshot, tty bool) {
 	}
 	pln(tty)
 	pln(tty, dim(join(parts, " · "), tty))
+	if snap.BgErr != "" {
+		pln(tty, color(ansiRed, "⚠ "+snap.BgErr, tty))
+	}
 	if tty {
 		pln(tty, dim("[↑↓] move  [↵] open  [m] read  [d] dismiss  [M] read all  [r] refresh  [q] quit", tty))
 	}
