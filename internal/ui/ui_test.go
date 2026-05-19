@@ -611,6 +611,77 @@ func TestWritePRTable_VeryNarrowAlsoCompactsStatus(t *testing.T) {
 	}
 }
 
+func TestStyleRepoCell(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		tty  bool
+		want string
+	}{
+		{"non-tty is no-op", "trainline/foo", false, "trainline/foo"},
+		{"owner+slash wrapped in dim", "trainline/foo", true, ansiDim + "trainline/" + ansiReset + "foo"},
+		{"already-dropped org untouched", "foo", true, "foo"},
+		{"truncated owner with ellipsis still gets dimmed", "tra…/foo", true, ansiDim + "tra…/" + ansiReset + "foo"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := styleRepoCell(c.in, c.tty)
+			if got != c.want {
+				t.Errorf("styleRepoCell(%q, tty=%v) = %q, want %q", c.in, c.tty, got, c.want)
+			}
+		})
+	}
+}
+
+func TestStyleRepoCell_VisibleWidthUnchanged(t *testing.T) {
+	// Adding ANSI codes must not affect alignment math.
+	raw := "trainline-private/foo"
+	styled := styleRepoCell(raw, true)
+	if visibleWidth(raw) != visibleWidth(styled) {
+		t.Errorf("visible width mismatch: raw=%d styled=%d", visibleWidth(raw), visibleWidth(styled))
+	}
+}
+
+func TestWritePRTable_DimsOrganisation(t *testing.T) {
+	now := time.Now()
+	ps := []prs.PR{
+		{Repo: "trainline-private/foo", Number: 1, Title: "test", URL: "u", UpdatedAt: now},
+	}
+	out := captureStdout(t, func() { writePRTable(ps, "", true, 300) })
+	if !strings.Contains(out, ansiDim+"trainline-private/"+ansiReset+"foo") {
+		t.Errorf("expected owner+slash dimmed; output:\n%q", out)
+	}
+}
+
+func TestWriteNotifsTable_UnreadGetsDimOrg_ReadIsRowDim(t *testing.T) {
+	now := time.Now()
+	ns := []notifs.Notification{
+		{ID: "1", Repo: "trainline-private/foo", PRNumber: 1, Title: "t", Reason: "mention", URL: "u", UpdatedAt: now, Unread: true},
+		{ID: "2", Repo: "trainline-private/bar", PRNumber: 2, Title: "t", Reason: "mention", URL: "u", UpdatedAt: now, Unread: false},
+	}
+	out := captureStdout(t, func() { writeNotifsTable(ns, "", true, 300) })
+	// Unread row: owner+slash wrapped in dim, rest bright.
+	if !strings.Contains(out, ansiDim+"trainline-private/"+ansiReset+"foo") {
+		t.Errorf("unread row should have owner dimmed; output:\n%q", out)
+	}
+	// Read row: whole row wrapped, so the dimmed-owner pattern should NOT
+	// appear (it would put a reset in the middle and break the row dim).
+	if strings.Contains(out, ansiDim+"trainline-private/"+ansiReset+"bar") {
+		t.Errorf("read row should not have inner owner-dim (would break row dim); output:\n%q", out)
+	}
+}
+
+func TestWriteTable_DimsOrganisation(t *testing.T) {
+	now := time.Now()
+	rs := []runs.Run{
+		{ID: 1, Repo: "trainline-private/foo", WorkflowName: "CI", Status: "in_progress", URL: "u", CreatedAt: now, UpdatedAt: now},
+	}
+	out := captureStdout(t, func() { writeTable(rs, "", true, 300) })
+	if !strings.Contains(out, ansiDim+"trainline-private/"+ansiReset+"foo") {
+		t.Errorf("expected owner+slash dimmed in workflow runs table; output:\n%q", out)
+	}
+}
+
 func TestWritePRTable_TitleTruncatedAt55(t *testing.T) {
 	now := time.Now()
 	title := strings.Repeat("a", 80) // longer than the 55-char cap

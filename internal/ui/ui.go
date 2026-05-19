@@ -215,14 +215,16 @@ func writeNotifsTable(ns []notifs.Notification, focusedID string, tty bool, term
 	}
 	fitRepoColumn(rows, notifsRepoCol, termWidth)
 	// Apply per-row dimming AFTER shrinking so shrinkRepo sees raw repo
-	// strings. Cursor (col 0) stays bright on dimmed rows.
+	// strings. Cursor (col 0) stays bright on dimmed rows. Unread rows
+	// also get the owner-dim treatment so the repo name pops.
 	for i, d := range dimMask {
-		if !d {
+		if d {
+			for j := 1; j < len(rows[i+1]); j++ {
+				rows[i+1][j] = ansiDim + rows[i+1][j] + ansiReset
+			}
 			continue
 		}
-		for j := 1; j < len(rows[i+1]); j++ {
-			rows[i+1][j] = ansiDim + rows[i+1][j] + ansiReset
-		}
+		rows[i+1][notifsRepoCol] = styleRepoCell(rows[i+1][notifsRepoCol], tty)
 	}
 	printAligned(rows)
 }
@@ -293,6 +295,11 @@ func writePRTable(ps []prs.PR, focusedKey string, tty bool, termWidth int) {
 		}
 	}
 	fitRepoColumn(rows, prRepoCol, termWidth)
+	for r := 1; r < len(rows); r++ {
+		if prRepoCol < len(rows[r]) {
+			rows[r][prRepoCol] = styleRepoCell(rows[r][prRepoCol], tty)
+		}
+	}
 	printAligned(rows)
 }
 
@@ -420,6 +427,11 @@ func writeTable(rows []runs.Run, focusedID string, tty bool, termWidth int) {
 		})
 	}
 	fitRepoColumn(out, runsRepoCol, termWidth)
+	for r := 1; r < len(out); r++ {
+		if runsRepoCol < len(out[r]) {
+			out[r][runsRepoCol] = styleRepoCell(out[r][runsRepoCol], tty)
+		}
+	}
 	printAligned(out)
 }
 
@@ -510,6 +522,23 @@ func fitRepoColumn(rows [][]string, colIdx, termWidth int) {
 		}
 		rows[r][colIdx] = shrinkRepo(rows[r][colIdx], budget)
 	}
+}
+
+// styleRepoCell dims the organisation portion (owner + slash) so the repo
+// name stands out. No-op on non-tty or when the cell has no slash (i.e.
+// shrinkRepo already dropped the org).
+//
+// CALLER NOTE: must not be applied to cells that will be wrapped in an
+// outer dim later; the embedded reset would terminate the outer dim wrap.
+func styleRepoCell(cell string, tty bool) string {
+	if !tty {
+		return cell
+	}
+	slash := strings.IndexByte(cell, '/')
+	if slash < 0 {
+		return cell
+	}
+	return ansiDim + cell[:slash+1] + ansiReset + cell[slash+1:]
 }
 
 // shrinkRepo fits "owner/name" into budget visible runes. Cascade:
