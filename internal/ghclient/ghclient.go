@@ -214,7 +214,12 @@ func (c *Client) Delete(path string) error {
 	}
 	if resp.StatusCode >= 400 {
 		raw, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("DELETE %s: HTTP %d: %s", path, resp.StatusCode, raw)
+		return &HTTPError{
+			Method: http.MethodDelete,
+			Path:   path,
+			Status: resp.StatusCode,
+			Body:   string(raw),
+		}
 	}
 	return nil
 }
@@ -431,6 +436,36 @@ func (c *Client) recordRateLimit(resp *http.Response) {
 			c.last.ResetAt = time.Unix(n, 0)
 		}
 	}
+}
+
+// HTTPError carries the HTTP status of a failed REST call so callers
+// can distinguish retryable transient failures (5xx) from permanent
+// client errors (4xx). Currently produced by Delete; Get and Patch
+// still wrap with fmt.Errorf for backward compatibility.
+type HTTPError struct {
+	Method string
+	Path   string
+	Status int
+	Body   string
+}
+
+func (e *HTTPError) Error() string {
+	return fmt.Sprintf("%s %s: HTTP %d: %s", e.Method, e.Path, e.Status, e.Body)
+}
+
+// IsServerError reports whether the status is a 5xx, indicating a
+// transient server-side failure worth retrying.
+func (e *HTTPError) IsServerError() bool {
+	return e.Status >= 500 && e.Status < 600
+}
+
+// AsHTTPError checks if err wraps an *HTTPError and returns it.
+func AsHTTPError(err error) (*HTTPError, bool) {
+	var he *HTTPError
+	if errors.As(err, &he) {
+		return he, true
+	}
+	return nil, false
 }
 
 // RateLimitedError is returned when GitHub responds 403/429.

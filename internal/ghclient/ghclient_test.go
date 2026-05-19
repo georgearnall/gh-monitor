@@ -205,8 +205,39 @@ func TestDelete_ErrorOn500(t *testing.T) {
 	defer srv.Close()
 
 	c := newTestClient(srv)
-	if err := c.Delete("x/y"); err == nil {
-		t.Errorf("expected error on 500, got nil")
+	err := c.Delete("x/y")
+	if err == nil {
+		t.Fatalf("expected error on 500, got nil")
+	}
+	he, ok := AsHTTPError(err)
+	if !ok {
+		t.Fatalf("expected *HTTPError, got %T", err)
+	}
+	if he.Status != 500 {
+		t.Errorf("Status = %d, want 500", he.Status)
+	}
+	if !he.IsServerError() {
+		t.Errorf("IsServerError() = false, want true")
+	}
+}
+
+func TestDelete_HTTPError400IsNotServerError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	c := newTestClient(srv)
+	err := c.Delete("missing")
+	he, ok := AsHTTPError(err)
+	if !ok {
+		t.Fatalf("expected *HTTPError, got %T", err)
+	}
+	if he.Status != 404 {
+		t.Errorf("Status = %d, want 404", he.Status)
+	}
+	if he.IsServerError() {
+		t.Errorf("404 should not be considered a server error")
 	}
 }
 

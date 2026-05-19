@@ -423,7 +423,7 @@ func dismissWorker(ctx context.Context, client *ghclient.Client, in <-chan dismi
 			if !ok {
 				return
 			}
-			err := notifs.DismissAll(client, []string{req.ID})
+			err := dismissWithRetry(ctx, client, req.ID)
 			select {
 			case out <- dismissOutcome{ID: req.ID, Err: err}:
 			case <-ctx.Done():
@@ -431,6 +431,57 @@ func dismissWorker(ctx context.Context, client *ghclient.Client, in <-chan dismi
 			}
 		}
 	}
+}
+
+// dismissMaxAttempts caps the total tries for one dismissal: one initial
+// attempt plus this-many retries. Three is enough to ride out the brief
+// 5xx blips GitHub sometimes serves without dragging a single 'd' press
+// out into seconds of perceived hang.
+const dismissMaxAttempts = 4
+
+// dismissWithRetry tries one DELETE up to dismissMaxAttempts times.
+// Retries on 5xx (transient server errors) and on rate-limit responses
+// (honouring Retry-After). 4xx and other errors return immediately.
+// Cancelled via ctx during a backoff sleep.
+func dismissWithRetry(ctx context.Context, client *ghclient.Client, id string) error {
+	var lastErr error
+	for attempt := 0; attempt < dismissMaxAttempts; attempt++ {
+		err := notifs.DismissAll(client, []string{id})
+		if err == nil {
+			return nil
+		}
+		lastErr = err
+		if !shouldRetryDismiss(err) {
+			return err
+		}
+		wait := dismissBackoff(attempt, err)
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(wait):
+		}
+	}
+	return lastErr
+}
+
+func shouldRetryDismiss(err error) bool {
+	if he, ok := ghclient.AsHTTPError(err); ok {
+		return he.IsServerError()
+	}
+	if _, ok := ghclient.AsRateLimited(err); ok {
+		return true
+	}
+	return false
+}
+
+// dismissBackoff returns the wait duration before the next retry.
+// Honours Retry-After on rate-limit errors, otherwise exponential:
+// 500ms, 1s, 2s.
+func dismissBackoff(attempt int, err error) time.Duration {
+	if rl, ok := ghclient.AsRateLimited(err); ok && rl.RetryAfter > 0 {
+		return rl.RetryAfter
+	}
+	return time.Duration(500<<attempt) * time.Millisecond
 }
 
 func dismissFocused(queue chan<- dismissReq, st *state.State, cfg *watchConfig, f focusTarget) focusTarget {
