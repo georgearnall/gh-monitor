@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -187,6 +188,72 @@ func TestMoveFocus_AcrossPanels(t *testing.T) {
 	// Empty state returns zero value.
 	if got := moveFocus(mkState(t), focusTarget{"notifs", "x"}, +1); got != (focusTarget{}) {
 		t.Errorf("empty state should yield zero focus; got %+v", got)
+	}
+}
+
+func TestFocusedURL_EachPanel(t *testing.T) {
+	st := mkState(t)
+	st.LastNotifs = []notifs.Notification{
+		{ID: "n1", URL: "https://example.com/notif1"},
+	}
+	st.LastPRs = []prs.PR{
+		{Repo: "a/b", Number: 7, URL: "https://example.com/pr7"},
+	}
+	st.LastView = []runs.Run{
+		{ID: 9001, URL: "https://example.com/run9001"},
+	}
+
+	cases := []struct {
+		name string
+		f    focusTarget
+		want string
+	}{
+		{"notif hit", focusTarget{"notifs", "n1"}, "https://example.com/notif1"},
+		{"pr hit", focusTarget{"prs", "a/b#7"}, "https://example.com/pr7"},
+		{"run hit", focusTarget{"runs", "9001"}, "https://example.com/run9001"},
+		{"unknown panel", focusTarget{"other", "x"}, ""},
+		{"missing notif", focusTarget{"notifs", "missing"}, ""},
+		{"zero focus", focusTarget{}, ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := focusedURL(st, c.f); got != c.want {
+				t.Errorf("focusedURL = %q, want %q", got, c.want)
+			}
+		})
+	}
+}
+
+// TestCursorTargets_HonoursVisibilityFilter is a regression test for the bug
+// where arrow keys would land on workflow runs that VisibleRows filtered out
+// (bots / >24h-completed / past the cap). cursorTargets must only emit rows
+// that the UI is actually rendering, otherwise pressing ↓ feels "sticky".
+func TestCursorTargets_HonoursVisibilityFilter(t *testing.T) {
+	st := mkState(t)
+	st.ViewerLogin = "me"
+	now := time.Now()
+
+	st.LastView = []runs.Run{
+		// active any-actor: kept
+		{ID: 1, Status: "in_progress", ActorLogin: "alice", UpdatedAt: now, CreatedAt: now},
+		// completed by someone else: dropped
+		{ID: 2, Status: "completed", Conclusion: "success", ActorLogin: "alice", UpdatedAt: now},
+		// dependabot active: dropped
+		{ID: 3, Status: "in_progress", ActorLogin: "dependabot[bot]", UpdatedAt: now},
+		// recent my-success: kept
+		{ID: 4, Status: "completed", Conclusion: "success", ActorLogin: "me", UpdatedAt: now.Add(-time.Hour), CreatedAt: now.Add(-time.Hour)},
+	}
+
+	got := cursorTargets(st)
+	var runIDs []string
+	for _, t := range got {
+		if t.Panel == "runs" {
+			runIDs = append(runIDs, t.ID)
+		}
+	}
+	want := []string{"1", "4"}
+	if !reflect.DeepEqual(runIDs, want) {
+		t.Errorf("cursor target run IDs = %v, want %v (bot + completed-by-other should be filtered)", runIDs, want)
 	}
 }
 

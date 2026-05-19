@@ -407,6 +407,52 @@ func TestWriteNotifsTable_FocusCursor(t *testing.T) {
 	}
 }
 
+func TestWritePRTable_FocusCursor(t *testing.T) {
+	now := time.Now()
+	ps := []prs.PR{
+		{Repo: "acme/a", Number: 1, Title: "one", URL: "https://github.com/acme/a/pull/1", UpdatedAt: now},
+		{Repo: "acme/b", Number: 2, Title: "two", URL: "https://github.com/acme/b/pull/2", UpdatedAt: now},
+	}
+	out := captureStdout(t, func() { writePRTable(ps, "acme/b#2", true) })
+	stripped := ansiRe.ReplaceAllString(out, "")
+	if !strings.Contains(stripped, "▶") {
+		t.Fatalf("expected cursor glyph in output:\n%s", stripped)
+	}
+	for _, line := range strings.Split(strings.TrimRight(stripped, "\n"), "\n") {
+		if strings.Contains(line, "▶") && !strings.Contains(line, "acme/b") {
+			t.Errorf("PR cursor on wrong row: %q", line)
+		}
+	}
+
+	out = captureStdout(t, func() { writePRTable(ps, "", true) })
+	if strings.Contains(ansiRe.ReplaceAllString(out, ""), "▶") {
+		t.Errorf("expected no PR cursor when focusedKey empty:\n%s", out)
+	}
+}
+
+func TestWriteTable_FocusCursor(t *testing.T) {
+	now := time.Now()
+	rs := []runs.Run{
+		{ID: 9001, Repo: "acme/a", WorkflowName: "CI", Status: "in_progress", URL: "https://github.com/acme/a/runs/9001", CreatedAt: now, UpdatedAt: now},
+		{ID: 9002, Repo: "acme/b", WorkflowName: "Deploy", Status: "in_progress", URL: "https://github.com/acme/b/runs/9002", CreatedAt: now, UpdatedAt: now},
+	}
+	out := captureStdout(t, func() { writeTable(rs, "9002", true) })
+	stripped := ansiRe.ReplaceAllString(out, "")
+	if !strings.Contains(stripped, "▶") {
+		t.Fatalf("expected cursor glyph in output:\n%s", stripped)
+	}
+	for _, line := range strings.Split(strings.TrimRight(stripped, "\n"), "\n") {
+		if strings.Contains(line, "▶") && !strings.Contains(line, "acme/b") {
+			t.Errorf("run cursor on wrong row: %q", line)
+		}
+	}
+
+	out = captureStdout(t, func() { writeTable(rs, "", true) })
+	if strings.Contains(ansiRe.ReplaceAllString(out, ""), "▶") {
+		t.Errorf("expected no run cursor when focusedID empty:\n%s", out)
+	}
+}
+
 // captureStdout temporarily redirects os.Stdout to a pipe and returns whatever
 // fn wrote to it.
 func captureStdout(t *testing.T, fn func()) string {

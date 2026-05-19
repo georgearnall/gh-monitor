@@ -103,13 +103,10 @@ func windowTitleString(unread, active, failed int) string {
 	return fmt.Sprintf("gha-monitor · %d active · %d recent failures", active, failed)
 }
 
-func header(snap Snapshot, tty bool) {
+func header(_ Snapshot, tty bool) {
 	title := "gha-monitor"
 	if tty {
 		title = ansiBold + title + ansiReset
-	}
-	if snap.Refreshing {
-		title += dim(" · refreshing", tty)
 	}
 	fmt.Println(title)
 }
@@ -563,27 +560,6 @@ func sttyApply(args ...string) {
 	cmd := exec.Command("stty", args...)
 	cmd.Stdin = os.Stdin
 	_ = cmd.Run()
-}
-
-// SpinnerFrame returns the spinner glyph for the given frame index.
-func SpinnerFrame(frame int) string {
-	const frames = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
-	runes := []rune(frames)
-	return string(runes[frame%len(runes)])
-}
-
-// RenderSpinner overwrites the header line in place with an animated
-// spinner. Cheap (one terminal write, no full redraw) so it's safe to call
-// at ~8fps. No-op on non-tty.
-func RenderSpinner(frame int) {
-	if !isTTY(os.Stdout) {
-		return
-	}
-	fmt.Fprintf(os.Stdout,
-		"\x1b[1;1H\x1b[K%sgha-monitor%s%s · %s refreshing%s",
-		ansiBold, ansiReset,
-		ansiDim, SpinnerFrame(frame), ansiReset,
-	)
 }
 
 func color(code, s string, tty bool) string {

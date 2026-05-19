@@ -238,21 +238,16 @@ func runWatch(client *ghclient.Client, cfg watchConfig) {
 
 	enqueue(trigger) // initial refresh
 
-	spinnerTick := time.NewTicker(120 * time.Millisecond)
-	defer spinnerTick.Stop()
-
 	var (
-		refreshing   bool
-		spinnerFrame int
-		nextTimer    *time.Timer
+		refreshing bool
+		nextTimer  *time.Timer
 	)
 
 	for {
 		select {
 		case <-started:
 			refreshing = true
-			spinnerFrame = 0
-			ui.RenderSpinner(spinnerFrame)
+			renderFromState(st, cfg, refreshing, focused)
 
 		case res := <-results:
 			refreshing = false
@@ -268,12 +263,6 @@ func runWatch(client *ghclient.Client, cfg watchConfig) {
 				nextTimer.Stop()
 			}
 			nextTimer = time.AfterFunc(next, func() { enqueue(trigger) })
-
-		case <-spinnerTick.C:
-			if refreshing {
-				spinnerFrame++
-				ui.RenderSpinner(spinnerFrame)
-			}
 
 		case k := <-keys:
 			switch k {
