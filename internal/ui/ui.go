@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -27,18 +28,20 @@ const (
 )
 
 type Snapshot struct {
-	Runs            []runs.Run
-	PRs             []prs.PR
-	Notifs          []notifs.Notification
-	FocusedNotifID  string // ID of the notification row to highlight, or "" for none
-	ViewerLogin     string // authenticated user's login, used to keep their own runs longer
-	RepoCount       int
-	RateRemaining   int
-	RateLimit       int
-	PolledAt        time.Time
-	NextPollIn      time.Duration
-	Stale           bool // rendering from disk cache, not fresh
-	Refreshing      bool // a background refresh is in flight
+	Runs           []runs.Run
+	PRs            []prs.PR
+	Notifs         []notifs.Notification
+	FocusedNotifID string // notification ID to highlight, or "" for none
+	FocusedPRKey   string // PR key "owner/repo#number" to highlight, or "" for none
+	FocusedRunID   string // run ID (as string) to highlight, or "" for none
+	ViewerLogin    string // authenticated user's login, used to keep their own runs longer
+	RepoCount      int
+	RateRemaining  int
+	RateLimit      int
+	PolledAt       time.Time
+	NextPollIn     time.Duration
+	Stale          bool // rendering from disk cache, not fresh
+	Refreshing     bool // a background refresh is in flight
 }
 
 // Render redraws the status table. Safe to call when stdout is not a tty;
@@ -67,7 +70,7 @@ func Render(snap Snapshot) {
 	if len(snap.PRs) > 0 {
 		fmt.Println()
 		fmt.Println(dim("PULL REQUESTS", tty))
-		writePRTable(snap.PRs, tty)
+		writePRTable(snap.PRs, snap.FocusedPRKey, tty)
 	}
 
 	if len(rows) > 0 || (len(snap.PRs) == 0 && len(notifRows) == 0) {
@@ -78,7 +81,7 @@ func Render(snap Snapshot) {
 		if len(rows) == 0 {
 			fmt.Println(dim("no active runs or recent failures", tty))
 		} else {
-			writeTable(rows, tty)
+			writeTable(rows, snap.FocusedRunID, tty)
 		}
 	}
 	footer(snap, tty)
@@ -251,15 +254,20 @@ func reasonLabel(reason string) string {
 	return reason
 }
 
-func writePRTable(ps []prs.PR, tty bool) {
+func writePRTable(ps []prs.PR, focusedKey string, tty bool) {
 	rows := make([][]string, 0, len(ps)+1)
-	rows = append(rows, dimRow([]string{"CHECKS", "REVIEW", "REPO", "#", "TITLE", "BRANCH", "AGE", "LINK"}, tty))
+	rows = append(rows, dimRow([]string{"  ", "CHECKS", "REVIEW", "REPO", "#", "TITLE", "BRANCH", "AGE", "LINK"}, tty))
 	for _, p := range ps {
 		link := p.URL
 		if tty {
 			link = hyperlink(p.URL, "open ↗")
 		}
+		cursor := "  "
+		if focusedKey != "" && fmt.Sprintf("%s#%d", p.Repo, p.Number) == focusedKey {
+			cursor = color(ansiYellow, "▶", tty) + " "
+		}
 		rows = append(rows, []string{
+			cursor,
 			prStatusCell(p, tty),
 			prReviewCell(p, tty),
 			p.Repo,
@@ -309,15 +317,20 @@ func prStatusCell(p prs.PR, tty bool) string {
 	return color(ansiDim, "·", tty) + " " + p.State
 }
 
-func writeTable(rows []runs.Run, tty bool) {
+func writeTable(rows []runs.Run, focusedID string, tty bool) {
 	out := make([][]string, 0, len(rows)+1)
-	out = append(out, dimRow([]string{"STATUS", "REPO", "WORKFLOW", "BRANCH", "AGE", "LINK"}, tty))
+	out = append(out, dimRow([]string{"  ", "STATUS", "REPO", "WORKFLOW", "BRANCH", "AGE", "LINK"}, tty))
 	for _, r := range rows {
 		link := r.URL
 		if tty {
 			link = hyperlink(r.URL, "open ↗")
 		}
+		cursor := "  "
+		if focusedID != "" && strconv.FormatInt(r.ID, 10) == focusedID {
+			cursor = color(ansiYellow, "▶", tty) + " "
+		}
 		out = append(out, []string{
+			cursor,
 			statusCell(r, tty),
 			r.Repo,
 			truncate(r.WorkflowName, 30),

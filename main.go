@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -140,10 +141,12 @@ FLAGS
   --sound               Also play a system sound on failure
 
 KEYBINDINGS (watch mode)
-  ↑ / ↓                 Move cursor through the NOTIFICATIONS panel
-  ↵  (enter)            Open focused notification in browser + mark it read
-  m                     Mark focused notification as read
-  M                     Mark every visible unread notification as read
+  ↑ / ↓                 Move cursor across all three panels (notifications,
+                        PRs, and workflow runs)
+  ↵  (enter)            Open focused row in browser. If it's a notification,
+                        also mark it read.
+  m                     Mark focused notification read (no-op on PRs/runs)
+  M                     Mark every visible unread notification read
   r  /  R  /  space     Refresh now (don't wait for the next interval)
   q  /  Q  /  Ctrl-C    Quit cleanly, restore terminal, save state
 
@@ -220,10 +223,10 @@ func runWatch(client *ghclient.Client, cfg watchConfig) {
 		}
 	}()
 
-	focusedID := pickFocus(st.LastNotifs, "")
+	focused := pickFocus(st, focusTarget{})
 
 	// First paint: render whatever's in the cache. <100ms because no network.
-	renderFromState(st, cfg, true /*refreshing*/, focusedID)
+	renderFromState(st, cfg, true /*refreshing*/, focused)
 
 	trigger := make(chan struct{}, 1)
 	started := make(chan struct{}, 1)
@@ -255,8 +258,8 @@ func runWatch(client *ghclient.Client, cfg watchConfig) {
 			refreshing = false
 			applyResult(st, &cfg, res)
 			st.EtagCache = client.Etags()
-			focusedID = pickFocus(st.LastNotifs, focusedID)
-			renderFromState(st, cfg, false, focusedID)
+			focused = pickFocus(st, focused)
+			renderFromState(st, cfg, false, focused)
 			if err := st.Save(); err != nil {
 				fmt.Fprintf(os.Stderr, "save state: %v\n", err)
 			}
@@ -280,18 +283,18 @@ func runWatch(client *ghclient.Client, cfg watchConfig) {
 				}
 				enqueue(trigger)
 			case keyDown:
-				focusedID = moveFocus(st.LastNotifs, focusedID, +1)
-				renderFromState(st, cfg, refreshing, focusedID)
+				focused = moveFocus(st, focused, +1)
+				renderFromState(st, cfg, refreshing, focused)
 			case keyUp:
-				focusedID = moveFocus(st.LastNotifs, focusedID, -1)
-				renderFromState(st, cfg, refreshing, focusedID)
+				focused = moveFocus(st, focused, -1)
+				renderFromState(st, cfg, refreshing, focused)
 			case '\r', '\n':
-				openFocused(st, focusedID)
-				markFocusedRead(client, st, &cfg, focusedID)
+				openFocused(st, focused)
+				markFocusedRead(client, st, &cfg, focused)
 			case 'm':
-				markFocusedRead(client, st, &cfg, focusedID)
+				markFocusedRead(client, st, &cfg, focused)
 			case 'M':
-				markAllVisibleRead(client, st, &cfg, focusedID)
+				markAllVisibleRead(client, st, &cfg, focused)
 			case 'q', 'Q':
 				return
 			}
@@ -302,19 +305,10 @@ func runWatch(client *ghclient.Client, cfg watchConfig) {
 	}
 }
 
-// openFocused launches the URL of the focused notification in the user's
-// default browser. Non-blocking: doesn't wait for the browser to exit.
-func openFocused(st *state.State, focusedID string) {
-	if focusedID == "" {
-		return
-	}
-	var url string
-	for _, n := range st.LastNotifs {
-		if n.ID == focusedID {
-			url = n.URL
-			break
-		}
-	}
+// openFocused launches the URL of whatever row the cursor is on in the
+// user's default browser. Non-blocking.
+func openFocused(st *state.State, f focusTarget) {
+	url := focusedURL(st, f)
 	if url == "" {
 		return
 	}
@@ -323,24 +317,48 @@ func openFocused(st *state.State, focusedID string) {
 	}
 }
 
-// markFocusedRead marks the single focused notification read. No-op if the
-// focused row is already read or no row is focused.
-func markFocusedRead(client *ghclient.Client, st *state.State, cfg *watchConfig, focusedID string) {
-	if focusedID == "" {
+func focusedURL(st *state.State, f focusTarget) string {
+	switch f.Panel {
+	case "notifs":
+		for _, n := range st.LastNotifs {
+			if n.ID == f.ID {
+				return n.URL
+			}
+		}
+	case "prs":
+		for _, p := range st.LastPRs {
+			if prKey(p) == f.ID {
+				return p.URL
+			}
+		}
+	case "runs":
+		for _, r := range st.LastView {
+			if runKey(r) == f.ID {
+				return r.URL
+			}
+		}
+	}
+	return ""
+}
+
+// markFocusedRead marks the focused notification read. No-op if the focused
+// row is not in the notifications panel or is already read.
+func markFocusedRead(client *ghclient.Client, st *state.State, cfg *watchConfig, f focusTarget) {
+	if f.Panel != "notifs" || f.ID == "" {
 		return
 	}
 	var matched string
 	for i := range st.LastNotifs {
-		if st.LastNotifs[i].ID == focusedID && st.LastNotifs[i].Unread {
+		if st.LastNotifs[i].ID == f.ID && st.LastNotifs[i].Unread {
 			st.LastNotifs[i].Unread = false
-			matched = focusedID
+			matched = f.ID
 			break
 		}
 	}
 	if matched == "" {
 		return
 	}
-	renderFromState(st, *cfg, false, focusedID)
+	renderFromState(st, *cfg, false, f)
 	go func() {
 		if err := notifs.MarkAllRead(client, []string{matched}); err != nil {
 			fmt.Fprintf(os.Stderr, "mark read: %v\n", err)
@@ -349,9 +367,8 @@ func markFocusedRead(client *ghclient.Client, st *state.State, cfg *watchConfig,
 }
 
 // markAllVisibleRead optimistically flips every unread notification in the
-// cached snapshot to read, repaints immediately so the UI dims them, then
-// fires PATCH calls in the background.
-func markAllVisibleRead(client *ghclient.Client, st *state.State, cfg *watchConfig, focusedID string) {
+// cached snapshot to read, repaints, then fires PATCH calls in background.
+func markAllVisibleRead(client *ghclient.Client, st *state.State, cfg *watchConfig, f focusTarget) {
 	ids := make([]string, 0, len(st.LastNotifs))
 	for i := range st.LastNotifs {
 		if st.LastNotifs[i].Unread {
@@ -362,7 +379,7 @@ func markAllVisibleRead(client *ghclient.Client, st *state.State, cfg *watchConf
 	if len(ids) == 0 {
 		return
 	}
-	renderFromState(st, *cfg, false, focusedID)
+	renderFromState(st, *cfg, false, f)
 	go func() {
 		if err := notifs.MarkAllRead(client, ids); err != nil {
 			fmt.Fprintf(os.Stderr, "mark read: %v\n", err)
@@ -370,52 +387,90 @@ func markAllVisibleRead(client *ghclient.Client, st *state.State, cfg *watchConf
 	}()
 }
 
-// pickFocus returns currentID if it still appears in ns, otherwise falls
-// back to the first unread notification, otherwise the first overall.
-// Returns "" only when ns is empty.
-func pickFocus(ns []notifs.Notification, currentID string) string {
-	if currentID != "" {
-		for _, n := range ns {
-			if n.ID == currentID {
-				return currentID
+// focusTarget identifies one focused row across any of the three panels.
+// Zero value means "no focus" (empty state).
+type focusTarget struct {
+	Panel string // "notifs" | "prs" | "runs"
+	ID    string // panel-specific identifier
+}
+
+// prKey returns the stable identifier we use to track a PR row across
+// refreshes: "owner/repo#number".
+func prKey(p prs.PR) string {
+	return fmt.Sprintf("%s#%d", p.Repo, p.Number)
+}
+
+// runKey returns the stable identifier for a workflow run row.
+func runKey(r runs.Run) string {
+	return strconv.FormatInt(r.ID, 10)
+}
+
+// cursorTargets materialises the flat ordered list of every focusable row
+// across all three panels, in the same order they're rendered. The cursor
+// walks this list when the user presses up/down so it flows naturally
+// across section boundaries.
+func cursorTargets(st *state.State) []focusTarget {
+	out := make([]focusTarget, 0, len(st.LastNotifs)+len(st.LastPRs)+len(st.LastView))
+	for _, n := range st.LastNotifs {
+		out = append(out, focusTarget{"notifs", n.ID})
+	}
+	for _, p := range st.LastPRs {
+		out = append(out, focusTarget{"prs", prKey(p)})
+	}
+	for _, r := range st.LastView {
+		out = append(out, focusTarget{"runs", runKey(r)})
+	}
+	return out
+}
+
+// pickFocus returns current if it still appears in the cursor target list,
+// otherwise falls back to the first unread notification, then the first
+// item overall. Returns the zero value when there's nothing focusable.
+func pickFocus(st *state.State, current focusTarget) focusTarget {
+	targets := cursorTargets(st)
+	if current.Panel != "" {
+		for _, t := range targets {
+			if t == current {
+				return current
 			}
 		}
 	}
-	for _, n := range ns {
+	for _, n := range st.LastNotifs {
 		if n.Unread {
-			return n.ID
+			return focusTarget{"notifs", n.ID}
 		}
 	}
-	if len(ns) > 0 {
-		return ns[0].ID
+	if len(targets) > 0 {
+		return targets[0]
 	}
-	return ""
+	return focusTarget{}
 }
 
-// moveFocus advances focus by delta rows (positive = down, negative = up),
-// clamped to the bounds of ns. Returns "" if ns is empty.
-func moveFocus(ns []notifs.Notification, currentID string, delta int) string {
-	if len(ns) == 0 {
-		return ""
+// moveFocus advances the cursor by delta rows across the flat target list,
+// clamped at both ends.
+func moveFocus(st *state.State, current focusTarget, delta int) focusTarget {
+	targets := cursorTargets(st)
+	if len(targets) == 0 {
+		return focusTarget{}
 	}
 	idx := -1
-	for i, n := range ns {
-		if n.ID == currentID {
+	for i, t := range targets {
+		if t == current {
 			idx = i
 			break
 		}
 	}
 	if idx < 0 {
-		return ns[0].ID
+		return targets[0]
 	}
 	next := idx + delta
 	if next < 0 {
 		next = 0
 	}
-	if next >= len(ns) {
-		next = len(ns) - 1
+	if next >= len(targets) {
+		next = len(targets) - 1
 	}
-	return ns[next].ID
+	return targets[next]
 }
 
 // enqueue sends to a single-slot channel without blocking when full.
@@ -542,7 +597,7 @@ func runOnce(ctx context.Context, client *ghclient.Client, cfg watchConfig, st *
 	}
 	applyResult(st, &cfg, res)
 	st.EtagCache = client.Etags()
-	renderFromState(st, cfg, false, "")
+	renderFromState(st, cfg, false, focusTarget{})
 	if err := st.Save(); err != nil {
 		fmt.Fprintf(os.Stderr, "save state: %v\n", err)
 	}
@@ -639,17 +694,16 @@ func applyResult(st *state.State, cfg *watchConfig, res pollResult) {
 	}
 }
 
-func renderFromState(st *state.State, cfg watchConfig, refreshing bool, focusedID string) {
+func renderFromState(st *state.State, cfg watchConfig, refreshing bool, f focusTarget) {
 	stale := refreshing && !st.LastPoll.IsZero()
 	var next time.Duration
 	if !refreshing {
 		next = cfg.nextInterval(activeCount(st.LastView), st.LastRateLimit, nil)
 	}
-	ui.Render(ui.Snapshot{
-		Runs:           st.LastView,
+	snap := ui.Snapshot{
+		Runs:          st.LastView,
 		PRs:            st.LastPRs,
 		Notifs:         st.LastNotifs,
-		FocusedNotifID: focusedID,
 		ViewerLogin:    st.ViewerLogin,
 		RepoCount:      len(st.Repos),
 		RateRemaining:  st.LastRateLimit.Remaining,
@@ -658,7 +712,16 @@ func renderFromState(st *state.State, cfg watchConfig, refreshing bool, focusedI
 		NextPollIn:     next,
 		Stale:          stale,
 		Refreshing:     refreshing,
-	})
+	}
+	switch f.Panel {
+	case "notifs":
+		snap.FocusedNotifID = f.ID
+	case "prs":
+		snap.FocusedPRKey = f.ID
+	case "runs":
+		snap.FocusedRunID = f.ID
+	}
+	ui.Render(snap)
 }
 
 func activeCount(rs []runs.Run) int {

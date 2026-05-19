@@ -9,6 +9,9 @@ import (
 	"github.com/georgearnall/gha-monitor/internal/discovery"
 	"github.com/georgearnall/gha-monitor/internal/ghclient"
 	"github.com/georgearnall/gha-monitor/internal/notifs"
+	"github.com/georgearnall/gha-monitor/internal/prs"
+	"github.com/georgearnall/gha-monitor/internal/runs"
+	"github.com/georgearnall/gha-monitor/internal/state"
 )
 
 func TestStringSet(t *testing.T) {
@@ -92,52 +95,92 @@ func TestWatchConfig_NextInterval(t *testing.T) {
 	}
 }
 
-func TestPickFocus(t *testing.T) {
-	ns := []notifs.Notification{
+func mkState(t *testing.T) *state.State {
+	t.Helper()
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	s, err := state.Load()
+	if err != nil {
+		t.Fatalf("state.Load: %v", err)
+	}
+	return s
+}
+
+func TestPickFocus_NotifsFirstUnread(t *testing.T) {
+	st := mkState(t)
+	st.LastNotifs = []notifs.Notification{
 		{ID: "1", Unread: false},
 		{ID: "2", Unread: true},
 		{ID: "3", Unread: true},
 	}
-
-	if got := pickFocus(ns, ""); got != "2" {
-		t.Errorf("empty current should pick first unread; got %q want %q", got, "2")
-	}
-	if got := pickFocus(ns, "3"); got != "3" {
-		t.Errorf("existing current should be preserved; got %q want %q", got, "3")
-	}
-	if got := pickFocus(ns, "missing"); got != "2" {
-		t.Errorf("missing current falls back to first unread; got %q", got)
-	}
-	if got := pickFocus(nil, ""); got != "" {
-		t.Errorf("empty list returns empty, got %q", got)
-	}
-
-	allRead := []notifs.Notification{{ID: "a", Unread: false}, {ID: "b", Unread: false}}
-	if got := pickFocus(allRead, ""); got != "a" {
-		t.Errorf("all-read list falls back to first item, got %q", got)
+	if got := pickFocus(st, focusTarget{}); got != (focusTarget{"notifs", "2"}) {
+		t.Errorf("empty current should pick first unread; got %+v", got)
 	}
 }
 
-func TestMoveFocus(t *testing.T) {
-	ns := []notifs.Notification{{ID: "1"}, {ID: "2"}, {ID: "3"}}
+func TestPickFocus_PreservesExisting(t *testing.T) {
+	st := mkState(t)
+	st.LastNotifs = []notifs.Notification{{ID: "1"}, {ID: "2"}}
+	st.LastPRs = []prs.PR{{Repo: "a/b", Number: 7}}
+	current := focusTarget{"prs", "a/b#7"}
+	if got := pickFocus(st, current); got != current {
+		t.Errorf("existing focus should be preserved; got %+v", got)
+	}
+}
 
-	if got := moveFocus(ns, "1", +1); got != "2" {
-		t.Errorf("down from 1 = %q, want 2", got)
+func TestPickFocus_FallsBackOnMissing(t *testing.T) {
+	st := mkState(t)
+	st.LastNotifs = []notifs.Notification{{ID: "1", Unread: true}}
+	if got := pickFocus(st, focusTarget{"prs", "gone#1"}); got != (focusTarget{"notifs", "1"}) {
+		t.Errorf("missing focus should fall back to first unread; got %+v", got)
 	}
-	if got := moveFocus(ns, "3", -1); got != "2" {
-		t.Errorf("up from 3 = %q, want 2", got)
+}
+
+func TestPickFocus_EmptyEverything(t *testing.T) {
+	st := mkState(t)
+	if got := pickFocus(st, focusTarget{}); got != (focusTarget{}) {
+		t.Errorf("empty state should yield zero focus; got %+v", got)
 	}
-	if got := moveFocus(ns, "1", -1); got != "1" {
-		t.Errorf("clamp at top: got %q want 1", got)
+}
+
+func TestPickFocus_AllReadFallsBackToFirstItem(t *testing.T) {
+	st := mkState(t)
+	st.LastNotifs = []notifs.Notification{{ID: "a", Unread: false}, {ID: "b", Unread: false}}
+	if got := pickFocus(st, focusTarget{}); got != (focusTarget{"notifs", "a"}) {
+		t.Errorf("all-read should fall back to first item; got %+v", got)
 	}
-	if got := moveFocus(ns, "3", +1); got != "3" {
-		t.Errorf("clamp at bottom: got %q want 3", got)
+}
+
+func TestMoveFocus_AcrossPanels(t *testing.T) {
+	st := mkState(t)
+	st.LastNotifs = []notifs.Notification{{ID: "n1"}, {ID: "n2"}}
+	st.LastPRs = []prs.PR{{Repo: "a/b", Number: 7}}
+	st.LastView = []runs.Run{{ID: 9001}, {ID: 9002}}
+
+	// Order down through the flat list: n1 -> n2 -> a/b#7 -> 9001 -> 9002
+	cases := []struct {
+		from focusTarget
+		want focusTarget
+	}{
+		{focusTarget{"notifs", "n1"}, focusTarget{"notifs", "n2"}},
+		{focusTarget{"notifs", "n2"}, focusTarget{"prs", "a/b#7"}},
+		{focusTarget{"prs", "a/b#7"}, focusTarget{"runs", "9001"}},
+		{focusTarget{"runs", "9001"}, focusTarget{"runs", "9002"}},
+		{focusTarget{"runs", "9002"}, focusTarget{"runs", "9002"}}, // clamped
 	}
-	if got := moveFocus(ns, "missing", +1); got != "1" {
-		t.Errorf("missing current resets to first; got %q", got)
+	for _, c := range cases {
+		got := moveFocus(st, c.from, +1)
+		if got != c.want {
+			t.Errorf("moveFocus(%+v, +1) = %+v, want %+v", c.from, got, c.want)
+		}
 	}
-	if got := moveFocus(nil, "x", +1); got != "" {
-		t.Errorf("empty list returns empty, got %q", got)
+
+	// Up from the first row stays put.
+	if got := moveFocus(st, focusTarget{"notifs", "n1"}, -1); got != (focusTarget{"notifs", "n1"}) {
+		t.Errorf("clamp at top: got %+v", got)
+	}
+	// Empty state returns zero value.
+	if got := moveFocus(mkState(t), focusTarget{"notifs", "x"}, +1); got != (focusTarget{}) {
+		t.Errorf("empty state should yield zero focus; got %+v", got)
 	}
 }
 
