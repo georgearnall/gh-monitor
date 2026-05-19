@@ -210,6 +210,36 @@ func TestDelete_ErrorOn500(t *testing.T) {
 	}
 }
 
+func TestGraphQLBestEffort_UnmarshalsDespiteErrors(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"data":{"value":42},"errors":[{"message":"partial failure"}]}`)
+	}))
+	defer srv.Close()
+	c := newTestClient(srv)
+	var out struct {
+		Value int `json:"value"`
+	}
+	if err := c.GraphQLBestEffort("{value}", nil, &out); err != nil {
+		t.Errorf("GraphQLBestEffort should not return errors: %v", err)
+	}
+	if out.Value != 42 {
+		t.Errorf("Value = %d, want 42 (data should unmarshal despite errors[])", out.Value)
+	}
+}
+
+func TestGraphQLBestEffort_PropagatesRateLimit(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Retry-After", "30")
+		w.WriteHeader(http.StatusTooManyRequests)
+	}))
+	defer srv.Close()
+	c := newTestClient(srv)
+	err := c.GraphQLBestEffort("{x}", nil, nil)
+	if _, ok := AsRateLimited(err); !ok {
+		t.Errorf("expected RateLimitedError, got %T %v", err, err)
+	}
+}
+
 func TestGet_RateLimitedError_403(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Retry-After", "60")

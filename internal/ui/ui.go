@@ -39,6 +39,9 @@ const (
 	// ansiAmber is a 256-colour muted gold used to subtly distinguish
 	// ticket references like [ECOM-9026], NB-1068, etc. in titles.
 	ansiAmber = "\x1b[38;5;179m"
+	// ansiPurple is a 256-colour purple chosen to match GitHub's merged-
+	// PR colour reasonably well in most terminals.
+	ansiPurple = "\x1b[38;5;141m"
 )
 
 type Snapshot struct {
@@ -250,6 +253,11 @@ func writeNotifsTable(ns []notifs.Notification, focusedID string, tty bool, term
 // reasonCell formats the notification reason. Unread items keep their colour;
 // read items return plain text so the caller can wrap the whole row in dim.
 func reasonCell(n notifs.Notification, tty bool) string {
+	// author/assign rows are usually the user's own PRs. Replace the
+	// uninformative "· own" with the PR state when we have it.
+	if n.Reason == "author" || n.Reason == "assign" {
+		return stateCell(n.PRState, n.Unread, tty)
+	}
 	if !n.Unread {
 		return reasonGlyph(n.Reason) + " " + reasonLabel(n.Reason)
 	}
@@ -260,10 +268,35 @@ func reasonCell(n notifs.Notification, tty bool) string {
 		return color(ansiYellow, "◐", tty) + " review"
 	case "comment":
 		return color(ansiDim, "+", tty) + " comment"
-	case "author", "assign":
-		return color(ansiDim, "·", tty) + " own"
 	}
 	return color(ansiDim, "·", tty) + " " + n.Reason
+}
+
+// stateCell renders the PR state for an author/assign notification. The
+// icon is coloured for unread rows; read rows return plain text so the
+// outer row-dim wrap (applied later) stays intact.
+func stateCell(state string, unread, tty bool) string {
+	icon, label, col := stateGlyph(state)
+	if !unread || !tty {
+		return icon + " " + label
+	}
+	return color(col, icon, tty) + " " + label
+}
+
+// stateGlyph maps a PR state to (icon, label, colour). Falls back to the
+// dim "· own" tuple when the state is unknown / not yet fetched.
+func stateGlyph(state string) (icon, label, col string) {
+	switch state {
+	case "OPEN":
+		return "●", "open", ansiGreen
+	case "MERGED":
+		return "●", "merged", ansiPurple
+	case "CLOSED":
+		return "●", "closed", ansiRed
+	case "DRAFT":
+		return "○", "draft", ansiDim
+	}
+	return "·", "own", ansiDim
 }
 
 func reasonGlyph(reason string) string {

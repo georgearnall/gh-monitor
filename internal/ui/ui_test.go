@@ -323,6 +323,7 @@ func TestReasonCell_PlainWhenNotTTY_Unread(t *testing.T) {
 		{"team_mention", "@ mention"},
 		{"review_requested", "◐ review"},
 		{"comment", "+ comment"},
+		// author/assign with no PRState fall back to "own".
 		{"author", "· own"},
 		{"assign", "· own"},
 		{"subscribed", "· subscribed"},
@@ -332,6 +333,75 @@ func TestReasonCell_PlainWhenNotTTY_Unread(t *testing.T) {
 		if got != c.want {
 			t.Errorf("reasonCell(%q, unread=true, tty=false) = %q, want %q", c.reason, got, c.want)
 		}
+	}
+}
+
+func TestReasonCell_AuthorWithStateShowsState(t *testing.T) {
+	cases := []struct {
+		state string
+		want  string
+	}{
+		{"OPEN", "● open"},
+		{"MERGED", "● merged"},
+		{"CLOSED", "● closed"},
+		{"DRAFT", "○ draft"},
+		{"", "· own"}, // unknown / not yet fetched
+	}
+	for _, c := range cases {
+		t.Run(c.state, func(t *testing.T) {
+			got := reasonCell(notifs.Notification{Reason: "author", Unread: true, PRState: c.state}, false)
+			if got != c.want {
+				t.Errorf("reasonCell(author, state=%q) = %q, want %q", c.state, got, c.want)
+			}
+			// assign reason behaves the same.
+			got = reasonCell(notifs.Notification{Reason: "assign", Unread: true, PRState: c.state}, false)
+			if got != c.want {
+				t.Errorf("reasonCell(assign, state=%q) = %q, want %q", c.state, got, c.want)
+			}
+		})
+	}
+}
+
+func TestStateCell_ColoursUnreadOnly(t *testing.T) {
+	// Unread + tty: icon is colour-wrapped.
+	got := stateCell("OPEN", true, true)
+	if !strings.Contains(got, ansiGreen+"●"+ansiReset) {
+		t.Errorf("unread OPEN should have green icon; got %q", got)
+	}
+	got = stateCell("MERGED", true, true)
+	if !strings.Contains(got, ansiPurple+"●"+ansiReset) {
+		t.Errorf("unread MERGED should have purple icon; got %q", got)
+	}
+
+	// Read + tty: plain (no SGR codes) so the outer row dim wrap survives.
+	got = stateCell("OPEN", false, true)
+	if strings.Contains(got, "\x1b[") {
+		t.Errorf("read row should be plain (no ANSI); got %q", got)
+	}
+	if got != "● open" {
+		t.Errorf("got %q, want '● open'", got)
+	}
+}
+
+func TestStateGlyph(t *testing.T) {
+	cases := []struct {
+		state, wantIcon, wantLabel, wantColour string
+	}{
+		{"OPEN", "●", "open", ansiGreen},
+		{"MERGED", "●", "merged", ansiPurple},
+		{"CLOSED", "●", "closed", ansiRed},
+		{"DRAFT", "○", "draft", ansiDim},
+		{"unknown", "·", "own", ansiDim},
+		{"", "·", "own", ansiDim},
+	}
+	for _, c := range cases {
+		t.Run(c.state, func(t *testing.T) {
+			icon, label, col := stateGlyph(c.state)
+			if icon != c.wantIcon || label != c.wantLabel || col != c.wantColour {
+				t.Errorf("stateGlyph(%q) = (%q, %q, %q), want (%q, %q, %q)",
+					c.state, icon, label, col, c.wantIcon, c.wantLabel, c.wantColour)
+			}
+		})
 	}
 }
 

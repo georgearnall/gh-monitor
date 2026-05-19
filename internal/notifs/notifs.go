@@ -2,6 +2,7 @@ package notifs
 
 import (
 	"context"
+	"fmt"
 	"sort"
 	"strconv"
 	"strings"
@@ -24,6 +25,9 @@ type Notification struct {
 	URL       string    `json:"url"`
 	UpdatedAt time.Time `json:"updated_at"`
 	Unread    bool      `json:"unread"`
+	// PRState is the linked PR's state: "OPEN" | "CLOSED" | "MERGED" |
+	// "DRAFT". Empty when not yet fetched (best-effort enrichment).
+	PRState string `json:"pr_state,omitempty"`
 }
 
 // readWindow is how long a read notification stays visible before dropping.
@@ -100,6 +104,70 @@ func Poll(client *ghclient.Client) ([]Notification, error) {
 		}
 		return out[i].UpdatedAt.After(out[j].UpdatedAt)
 	})
+	return out, nil
+}
+
+// FetchPRStates batches PR state lookups into one GraphQL request keyed
+// by per-notification alias (pr0, pr1, ...). Returns a map of
+// notification.ID -> PR state string ("OPEN" | "CLOSED" | "MERGED" |
+// "DRAFT"). Best-effort: notifications whose repo/PR can't be resolved
+// are simply absent from the result.
+func FetchPRStates(client *ghclient.Client, ns []Notification) (map[string]string, error) {
+	if len(ns) == 0 {
+		return nil, nil
+	}
+	var query strings.Builder
+	query.WriteString("{\n")
+	type indexed struct {
+		alias string
+		notif Notification
+	}
+	var indices []indexed
+	for i, n := range ns {
+		if n.Repo == "" || n.PRNumber == 0 {
+			continue
+		}
+		slash := strings.IndexByte(n.Repo, '/')
+		if slash < 0 {
+			continue
+		}
+		owner := n.Repo[:slash]
+		name := n.Repo[slash+1:]
+		alias := fmt.Sprintf("pr%d", i)
+		indices = append(indices, indexed{alias, n})
+		fmt.Fprintf(&query, "  %s: repository(owner: %q, name: %q) {\n", alias, owner, name)
+		fmt.Fprintf(&query, "    pullRequest(number: %d) { state isDraft }\n", n.PRNumber)
+		query.WriteString("  }\n")
+	}
+	query.WriteString("}")
+	if len(indices) == 0 {
+		return nil, nil
+	}
+
+	type prNode struct {
+		State   string `json:"state"`
+		IsDraft bool   `json:"isDraft"`
+	}
+	type repoNode struct {
+		PullRequest *prNode `json:"pullRequest"`
+	}
+	var data map[string]*repoNode
+	if err := client.GraphQLBestEffort(query.String(), nil, &data); err != nil {
+		return nil, err
+	}
+
+	out := make(map[string]string, len(indices))
+	for _, ix := range indices {
+		repo := data[ix.alias]
+		if repo == nil || repo.PullRequest == nil {
+			continue
+		}
+		state := repo.PullRequest.State
+		if repo.PullRequest.IsDraft {
+			state = "DRAFT"
+		}
+		out[ix.notif.ID] = state
+	}
 	return out, nil
 }
 

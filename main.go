@@ -745,6 +745,18 @@ func doRefresh(ctx context.Context, client *ghclient.Client, cfg *watchConfig) p
 	})
 	g.Go(func() error {
 		ns, notifErr := notifs.Poll(client)
+		if notifErr == nil && len(ns) > 0 {
+			// Enrich with PR state in one extra GraphQL request. Best-
+			// effort: any error here just leaves PRState empty and the
+			// UI falls back to "· own".
+			if states, err := notifs.FetchPRStates(client, ns); err == nil {
+				for i := range ns {
+					if s, ok := states[ns[i].ID]; ok {
+						ns[i].PRState = s
+					}
+				}
+			}
+		}
 		res.Notifs = ns
 		res.NotifErr = notifErr
 		return nil

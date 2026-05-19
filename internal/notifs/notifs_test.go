@@ -307,6 +307,99 @@ func TestDismissAll_ReturnsFirstError(t *testing.T) {
 	}
 }
 
+func TestFetchPRStates_HappyPath(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/graphql" {
+			t.Errorf("unexpected path: %s", r.URL.Path)
+		}
+		// Mirror what GitHub returns for our aliased query. We don't
+		// parse the query body here; just respond with the shape the
+		// caller expects, keyed on the aliases pr0/pr1/pr2.
+		fmt.Fprint(w, `{"data":{
+			"pr0": {"pullRequest":{"state":"OPEN","isDraft":false}},
+			"pr1": {"pullRequest":{"state":"MERGED","isDraft":false}},
+			"pr2": {"pullRequest":{"state":"OPEN","isDraft":true}}
+		}}`)
+	}))
+	defer srv.Close()
+	c := ghclient.NewForTest(srv.Client(), srv.URL+"/")
+
+	ns := []Notification{
+		{ID: "n0", Repo: "a/b", PRNumber: 1},
+		{ID: "n1", Repo: "c/d", PRNumber: 2},
+		{ID: "n2", Repo: "e/f", PRNumber: 3},
+	}
+	states, err := FetchPRStates(c, ns)
+	if err != nil {
+		t.Fatalf("FetchPRStates: %v", err)
+	}
+	if states["n0"] != "OPEN" {
+		t.Errorf("n0 = %q, want OPEN", states["n0"])
+	}
+	if states["n1"] != "MERGED" {
+		t.Errorf("n1 = %q, want MERGED", states["n1"])
+	}
+	// isDraft=true overrides state -> DRAFT.
+	if states["n2"] != "DRAFT" {
+		t.Errorf("n2 = %q, want DRAFT (isDraft override)", states["n2"])
+	}
+}
+
+func TestFetchPRStates_EmptyNoRequest(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("expected no request, got %s", r.URL.Path)
+	}))
+	defer srv.Close()
+	c := ghclient.NewForTest(srv.Client(), srv.URL+"/")
+	if _, err := FetchPRStates(c, nil); err != nil {
+		t.Errorf("FetchPRStates(nil): %v", err)
+	}
+}
+
+func TestFetchPRStates_PartialResolveLeavesMissingOut(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Only pr0 resolved; pr1 came back null (e.g. private repo not
+		// visible to this token). Use the best-effort path that ignores
+		// per-field errors.
+		fmt.Fprint(w, `{"data":{
+			"pr0": {"pullRequest":{"state":"OPEN","isDraft":false}},
+			"pr1": null
+		},"errors":[{"message":"Could not resolve"}]}`)
+	}))
+	defer srv.Close()
+	c := ghclient.NewForTest(srv.Client(), srv.URL+"/")
+	ns := []Notification{
+		{ID: "n0", Repo: "a/b", PRNumber: 1},
+		{ID: "n1", Repo: "c/d", PRNumber: 2},
+	}
+	states, err := FetchPRStates(c, ns)
+	if err != nil {
+		t.Fatalf("FetchPRStates: %v", err)
+	}
+	if states["n0"] != "OPEN" {
+		t.Errorf("n0 = %q, want OPEN", states["n0"])
+	}
+	if _, ok := states["n1"]; ok {
+		t.Errorf("n1 should be missing from the map; got %q", states["n1"])
+	}
+}
+
+func TestFetchPRStates_SkipsMalformedNotifs(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("expected no request when all notifs are malformed")
+	}))
+	defer srv.Close()
+	c := ghclient.NewForTest(srv.Client(), srv.URL+"/")
+	ns := []Notification{
+		{ID: "n0"},                 // empty repo
+		{ID: "n1", Repo: "noslash"}, // no slash in repo
+		{ID: "n2", Repo: "a/b"},    // zero PRNumber
+	}
+	if _, err := FetchPRStates(c, ns); err != nil {
+		t.Errorf("FetchPRStates: %v", err)
+	}
+}
+
 func TestPoll_HTTPErrorPropagates(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)

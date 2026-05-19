@@ -281,6 +281,63 @@ func (c *Client) GraphQL(query string, vars map[string]any, v any) error {
 	return json.Unmarshal(envelope.Data, v)
 }
 
+// GraphQLBestEffort runs a GraphQL query and unmarshals whatever data
+// came back even when the response contains per-field errors (e.g. one
+// aliased subselection couldn't resolve while others did). Returns an
+// error only on HTTP failure, malformed JSON, or rate limits. The
+// caller inspects v to see which fields are populated.
+//
+// Use the regular GraphQL method for queries where any error should
+// abort; use this one for batched lookups where partial success is OK.
+func (c *Client) GraphQLBestEffort(query string, vars map[string]any, v any) error {
+	body, err := json.Marshal(map[string]any{
+		"query":     query,
+		"variables": vars,
+	})
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequest(http.MethodPost, c.baseURL+"graphql", bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	c.recordRateLimit(resp)
+
+	if resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusTooManyRequests {
+		raw, _ := io.ReadAll(resp.Body)
+		return &RateLimitedError{
+			Status:     resp.StatusCode,
+			RetryAfter: parseRetryAfter(resp.Header.Get("Retry-After")),
+			Body:       string(raw),
+		}
+	}
+	if resp.StatusCode >= 400 {
+		raw, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("graphql HTTP %d: %s", resp.StatusCode, raw)
+	}
+
+	var envelope struct {
+		Data json.RawMessage `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&envelope); err != nil {
+		return err
+	}
+	if v == nil || len(envelope.Data) == 0 {
+		return nil
+	}
+	return json.Unmarshal(envelope.Data, v)
+}
+
 // Etags returns a defensive copy of the current ETag cache, suitable for
 // persisting alongside other state.
 func (c *Client) Etags() map[string]EtagEntry {
