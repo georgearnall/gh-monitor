@@ -559,27 +559,70 @@ func TestWriteNotifsTable_FocusCursor(t *testing.T) {
 	}
 }
 
-func TestWritePRTable_CompactDropsBranch(t *testing.T) {
+func TestWritePRTable_AdaptiveDropsBranchOnOverflow(t *testing.T) {
 	now := time.Now()
 	ps := []prs.PR{
-		{Repo: "acme/a", Number: 1, Title: "test", HeadBranch: "feature/x", URL: "u", UpdatedAt: now},
-	}
-	// Narrow termWidth (below compactThreshold of 120) triggers compact mode.
-	narrow := captureStdout(t, func() { writePRTable(ps, "", true, 80) })
-	if strings.Contains(narrow, "BRANCH") {
-		t.Errorf("BRANCH header should be hidden when compact:\n%s", narrow)
-	}
-	if strings.Contains(narrow, "feature/x") {
-		t.Errorf("BRANCH cell content should be hidden when compact:\n%s", narrow)
+		{
+			Repo: "trainline-private/VatCalculationService", Number: 88,
+			Title:      "Ensure tests cover corporate onboarding for VAT calculation",
+			HeadBranch: "test-corporateonboarding",
+			URL:        "u",
+			UpdatedAt:  now,
+			State:      "FAILURE", Failing: 1, Total: 1,
+		},
 	}
 
-	// Wide termWidth keeps BRANCH visible.
+	// At a generous width the natural table fits and BRANCH stays.
 	wide := captureStdout(t, func() { writePRTable(ps, "", true, 200) })
 	if !strings.Contains(wide, "BRANCH") {
-		t.Errorf("BRANCH header should be present when wide:\n%s", wide)
+		t.Errorf("BRANCH header should remain at width=200:\n%s", wide)
 	}
-	if !strings.Contains(wide, "feature/x") {
-		t.Errorf("BRANCH cell content should be present when wide:\n%s", wide)
+	if !strings.Contains(wide, "test-corporateonboarding") {
+		t.Errorf("BRANCH cell should remain at width=200:\n%s", wide)
+	}
+
+	// At a width that would force aggressive repo truncation, BRANCH is
+	// the first column to go.
+	narrow := captureStdout(t, func() { writePRTable(ps, "", true, 110) })
+	if strings.Contains(narrow, "BRANCH") {
+		t.Errorf("BRANCH header should drop when too narrow:\n%s", narrow)
+	}
+	if strings.Contains(narrow, "test-corporateonboarding") {
+		t.Errorf("BRANCH cell should drop when too narrow:\n%s", narrow)
+	}
+}
+
+func TestWritePRTable_VeryNarrowAlsoCompactsStatus(t *testing.T) {
+	now := time.Now()
+	ps := []prs.PR{
+		{
+			Repo: "x/y", Number: 1, Title: "t", URL: "u", UpdatedAt: now,
+			State: "FAILURE", Failing: 1, Total: 1,
+		},
+	}
+	// Below the natural width even without BRANCH, status should compact.
+	out := captureStdout(t, func() { writePRTable(ps, "", true, 40) })
+	stripped := ansiRe.ReplaceAllString(out, "")
+	if strings.Contains(stripped, "1/1 fail") {
+		t.Errorf("status word 'fail' should drop at width=40:\n%s", stripped)
+	}
+	if !strings.Contains(stripped, "1/1") {
+		t.Errorf("status ratio should still be present:\n%s", stripped)
+	}
+}
+
+func TestWritePRTable_TitleTruncatedAt55(t *testing.T) {
+	now := time.Now()
+	title := strings.Repeat("a", 80) // longer than the 55-char cap
+	ps := []prs.PR{
+		{Repo: "x/y", Number: 1, Title: title, URL: "u", UpdatedAt: now},
+	}
+	out := captureStdout(t, func() { writePRTable(ps, "", true, 300) })
+	stripped := ansiRe.ReplaceAllString(out, "")
+	// 54 'a's + ellipsis = 55 visible runes.
+	wantTitle := strings.Repeat("a", 54) + "…"
+	if !strings.Contains(stripped, wantTitle) {
+		t.Errorf("expected title truncated to 55 runes; got:\n%s", stripped)
 	}
 }
 

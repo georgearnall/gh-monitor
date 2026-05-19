@@ -275,20 +275,34 @@ func reasonLabel(reason string) string {
 }
 
 // prRepoCol is the column index of REPO inside writePRTable's rows.
-// Same value in compact and full modes: REPO sits at index 4 either way
-// (BRANCH is the only column that gets dropped, and it sits after REPO).
+// Same value with or without BRANCH (BRANCH sits after REPO).
 const prRepoCol = 4
 
-// compactThreshold is the terminal width below which PR rows shed their
-// BRANCH column and use shorter status/check labels.
-const compactThreshold = 120
+// prTitleMax is the upper bound on title length before truncation.
+const prTitleMax = 55
 
 func writePRTable(ps []prs.PR, focusedKey string, tty bool, termWidth int) {
-	compact := termWidth > 0 && termWidth < compactThreshold
-	header := []string{"  ", "CHECKS", "REVIEW", "TITLE", "REPO", "#", "BRANCH", "AGE", "LINK"}
-	if compact {
-		header = []string{"  ", "CHECKS", "REVIEW", "TITLE", "REPO", "#", "AGE", "LINK"}
+	// Adaptive fit: try full layout first; if it overflows, drop BRANCH;
+	// if it still overflows, also drop the trailing "pass"/"fail"/"wait"
+	// status word. The repo column is shrunk last by fitRepoColumn.
+	rows := buildPRRows(ps, focusedKey, tty, true /*branch*/, false /*compact status*/)
+	if termWidth > 0 && tableWidth(rows) > termWidth {
+		rows = buildPRRows(ps, focusedKey, tty, false, false)
+		if tableWidth(rows) > termWidth {
+			rows = buildPRRows(ps, focusedKey, tty, false, true)
+		}
 	}
+	fitRepoColumn(rows, prRepoCol, termWidth)
+	printAligned(rows)
+}
+
+func buildPRRows(ps []prs.PR, focusedKey string, tty, includeBranch, compactStatus bool) [][]string {
+	header := []string{"  ", "CHECKS", "REVIEW", "TITLE", "REPO", "#"}
+	if includeBranch {
+		header = append(header, "BRANCH")
+	}
+	header = append(header, "AGE", "LINK")
+
 	rows := make([][]string, 0, len(ps)+1)
 	rows = append(rows, dimRow(header, tty))
 	for _, p := range ps {
@@ -302,20 +316,19 @@ func writePRTable(ps []prs.PR, focusedKey string, tty bool, termWidth int) {
 		}
 		row := []string{
 			cursor,
-			prStatusCell(p, tty, compact),
+			prStatusCell(p, tty, compactStatus),
 			prReviewCell(p, tty),
-			truncate(p.Title, 40),
+			truncate(p.Title, prTitleMax),
 			p.Repo,
 			fmt.Sprintf("#%d", p.Number),
 		}
-		if !compact {
+		if includeBranch {
 			row = append(row, truncate(p.HeadBranch, 30))
 		}
 		row = append(row, relativeAge(p.UpdatedAt), link)
 		rows = append(rows, row)
 	}
-	fitRepoColumn(rows, prRepoCol, termWidth)
-	printAligned(rows)
+	return rows
 }
 
 func prReviewCell(p prs.PR, tty bool) string {
@@ -434,6 +447,41 @@ func TermWidth() int {
 	return cols
 }
 
+// columnWidths returns the max visible width per column across all rows.
+func columnWidths(rows [][]string) []int {
+	if len(rows) == 0 {
+		return nil
+	}
+	cols := len(rows[0])
+	widths := make([]int, cols)
+	for _, row := range rows {
+		for i := 0; i < cols && i < len(row); i++ {
+			w := visibleWidth(row[i])
+			if w > widths[i] {
+				widths[i] = w
+			}
+		}
+	}
+	return widths
+}
+
+// tableWidth returns the total natural rendered width of rows (per-column
+// max widths plus inter-column gaps), matching what printAligned will emit.
+func tableWidth(rows [][]string) int {
+	widths := columnWidths(rows)
+	if len(widths) == 0 {
+		return 0
+	}
+	total := 0
+	for i, w := range widths {
+		total += w
+		if i < len(widths)-1 {
+			total += 2 // gap matches printAligned
+		}
+	}
+	return total
+}
+
 // fitRepoColumn shrinks the cells at colIdx so the total natural width of
 // every row fits within termWidth. The repo cell is shrunk owner-first
 // (owner part replaced with leading ellipsis), preserving the full repo
@@ -446,34 +494,15 @@ func fitRepoColumn(rows [][]string, colIdx, termWidth int) {
 	if colIdx < 0 || colIdx >= cols {
 		return
 	}
-	const gap = 2 // matches the inter-column padding in printAligned
-
-	// Compute per-column widths (visible).
-	widths := make([]int, cols)
-	for _, row := range rows {
-		for i := 0; i < cols && i < len(row); i++ {
-			w := visibleWidth(row[i])
-			if w > widths[i] {
-				widths[i] = w
-			}
-		}
-	}
-	total := 0
-	for i, w := range widths {
-		total += w
-		if i < cols-1 {
-			total += gap
-		}
-	}
+	widths := columnWidths(rows)
+	total := tableWidth(rows)
 	if total <= termWidth {
 		return
 	}
-
-	// Budget for the repo column: shrink it (and only it) to fit.
 	others := total - widths[colIdx]
 	budget := termWidth - others
 	if budget < 4 {
-		budget = 4 // never shrink to less than "x/y" + ellipsis fallback
+		budget = 4
 	}
 	for r := 1; r < len(rows); r++ {
 		if colIdx >= len(rows[r]) {
