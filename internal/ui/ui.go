@@ -44,6 +44,7 @@ type Snapshot struct {
 	RateLimit      int
 	PolledAt       time.Time
 	NextPollIn     time.Duration
+	TermWidth      int  // 0 = unknown / unconstrained
 	Stale          bool // rendering from disk cache, not fresh
 	Refreshing     bool // a background refresh is in flight
 }
@@ -68,13 +69,13 @@ func Render(snap Snapshot) {
 	if len(notifRows) > 0 {
 		fmt.Println()
 		fmt.Println(dim("NOTIFICATIONS", tty))
-		writeNotifsTable(notifRows, snap.FocusedNotifID, tty)
+		writeNotifsTable(notifRows, snap.FocusedNotifID, tty, snap.TermWidth)
 	}
 
 	if len(snap.PRs) > 0 {
 		fmt.Println()
 		fmt.Println(dim("PULL REQUESTS", tty))
-		writePRTable(snap.PRs, snap.FocusedPRKey, tty)
+		writePRTable(snap.PRs, snap.FocusedPRKey, tty, snap.TermWidth)
 	}
 
 	if len(rows) > 0 || (len(snap.PRs) == 0 && len(notifRows) == 0) {
@@ -85,7 +86,7 @@ func Render(snap Snapshot) {
 		if len(rows) == 0 {
 			fmt.Println(dim("no active runs or recent failures", tty))
 		} else {
-			writeTable(rows, snap.FocusedRunID, tty)
+			writeTable(rows, snap.FocusedRunID, tty, snap.TermWidth)
 		}
 	}
 	footer(snap, tty)
@@ -182,10 +183,15 @@ func unreadCount(ns []notifs.Notification) int {
 	return n
 }
 
-func writeNotifsTable(ns []notifs.Notification, focusedID string, tty bool) {
+// notifsRepoCol is the column index of REPO inside writeNotifsTable's rows.
+// Kept as a const so fitRepoColumn can target it directly.
+const notifsRepoCol = 3
+
+func writeNotifsTable(ns []notifs.Notification, focusedID string, tty bool, termWidth int) {
 	rows := make([][]string, 0, len(ns)+1)
-	rows = append(rows, dimRow([]string{"  ", "REASON", "REPO", "#", "TITLE", "AGE", "LINK"}, tty))
-	for _, n := range ns {
+	rows = append(rows, dimRow([]string{"  ", "REASON", "TITLE", "REPO", "#", "AGE", "LINK"}, tty))
+	dimMask := make([]bool, len(ns)) // which data row should be dimmed post-fit
+	for i, n := range ns {
 		link := n.URL
 		if tty {
 			link = hyperlink(n.URL, "open ↗")
@@ -194,23 +200,29 @@ func writeNotifsTable(ns []notifs.Notification, focusedID string, tty bool) {
 		if n.ID == focusedID {
 			cursor = color(ansiYellow, "▶", tty) + " "
 		}
-		cells := []string{
+		rows = append(rows, []string{
 			cursor,
 			reasonCell(n, tty),
-			n.Repo,
-			fmt.Sprintf("#%d", n.PRNumber),
 			truncate(n.Title, 50),
+			n.Repo, // kept plain so shrinkRepo can parse the slash
+			fmt.Sprintf("#%d", n.PRNumber),
 			relativeAge(n.UpdatedAt),
 			link,
-		}
+		})
 		if !n.Unread && tty {
-			// Dim everything except the cursor column so the focused row
-			// still stands out even when it's a read item.
-			for i := 1; i < len(cells); i++ {
-				cells[i] = ansiDim + cells[i] + ansiReset
-			}
+			dimMask[i] = true
 		}
-		rows = append(rows, cells)
+	}
+	fitRepoColumn(rows, notifsRepoCol, termWidth)
+	// Apply per-row dimming AFTER shrinking so shrinkRepo sees raw repo
+	// strings. Cursor (col 0) stays bright on dimmed rows.
+	for i, d := range dimMask {
+		if !d {
+			continue
+		}
+		for j := 1; j < len(rows[i+1]); j++ {
+			rows[i+1][j] = ansiDim + rows[i+1][j] + ansiReset
+		}
 	}
 	printAligned(rows)
 }
@@ -262,9 +274,12 @@ func reasonLabel(reason string) string {
 	return reason
 }
 
-func writePRTable(ps []prs.PR, focusedKey string, tty bool) {
+// prRepoCol is the column index of REPO inside writePRTable's rows.
+const prRepoCol = 4
+
+func writePRTable(ps []prs.PR, focusedKey string, tty bool, termWidth int) {
 	rows := make([][]string, 0, len(ps)+1)
-	rows = append(rows, dimRow([]string{"  ", "CHECKS", "REVIEW", "REPO", "#", "TITLE", "BRANCH", "AGE", "LINK"}, tty))
+	rows = append(rows, dimRow([]string{"  ", "CHECKS", "REVIEW", "TITLE", "REPO", "#", "BRANCH", "AGE", "LINK"}, tty))
 	for _, p := range ps {
 		link := p.URL
 		if tty {
@@ -278,14 +293,15 @@ func writePRTable(ps []prs.PR, focusedKey string, tty bool) {
 			cursor,
 			prStatusCell(p, tty),
 			prReviewCell(p, tty),
+			truncate(p.Title, 40),
 			p.Repo,
 			fmt.Sprintf("#%d", p.Number),
-			truncate(p.Title, 40),
 			truncate(p.HeadBranch, 30),
 			relativeAge(p.UpdatedAt),
 			link,
 		})
 	}
+	fitRepoColumn(rows, prRepoCol, termWidth)
 	printAligned(rows)
 }
 
@@ -325,9 +341,12 @@ func prStatusCell(p prs.PR, tty bool) string {
 	return color(ansiDim, "·", tty) + " " + p.State
 }
 
-func writeTable(rows []runs.Run, focusedID string, tty bool) {
+// runsRepoCol is the column index of REPO inside writeTable's rows.
+const runsRepoCol = 3
+
+func writeTable(rows []runs.Run, focusedID string, tty bool, termWidth int) {
 	out := make([][]string, 0, len(rows)+1)
-	out = append(out, dimRow([]string{"  ", "STATUS", "REPO", "WORKFLOW", "BRANCH", "AGE", "LINK"}, tty))
+	out = append(out, dimRow([]string{"  ", "STATUS", "WORKFLOW", "REPO", "BRANCH", "AGE", "LINK"}, tty))
 	for _, r := range rows {
 		link := r.URL
 		if tty {
@@ -340,14 +359,114 @@ func writeTable(rows []runs.Run, focusedID string, tty bool) {
 		out = append(out, []string{
 			cursor,
 			statusCell(r, tty),
-			r.Repo,
 			truncate(r.WorkflowName, 30),
+			r.Repo,
 			truncate(r.Branch, 30),
 			ageString(r),
 			link,
 		})
 	}
+	fitRepoColumn(out, runsRepoCol, termWidth)
 	printAligned(out)
+}
+
+// TermWidth returns the terminal's column count by shelling out to
+// `stty size`. Returns 0 when stdin/stdout isn't a tty or stty fails
+// (caller treats 0 as "unconstrained, don't shrink").
+func TermWidth() int {
+	if !isTTY(os.Stdout) || !isTTY(os.Stdin) {
+		return 0
+	}
+	cmd := exec.Command("stty", "size")
+	cmd.Stdin = os.Stdin
+	out, err := cmd.Output()
+	if err != nil {
+		return 0
+	}
+	fields := strings.Fields(string(out))
+	if len(fields) < 2 {
+		return 0
+	}
+	cols, err := strconv.Atoi(fields[1])
+	if err != nil {
+		return 0
+	}
+	return cols
+}
+
+// fitRepoColumn shrinks the cells at colIdx so the total natural width of
+// every row fits within termWidth. The repo cell is shrunk owner-first
+// (owner part replaced with leading ellipsis), preserving the full repo
+// name when possible. No-op when termWidth <= 0 or the table already fits.
+func fitRepoColumn(rows [][]string, colIdx, termWidth int) {
+	if termWidth <= 0 || len(rows) == 0 {
+		return
+	}
+	cols := len(rows[0])
+	if colIdx < 0 || colIdx >= cols {
+		return
+	}
+	const gap = 2 // matches the inter-column padding in printAligned
+
+	// Compute per-column widths (visible).
+	widths := make([]int, cols)
+	for _, row := range rows {
+		for i := 0; i < cols && i < len(row); i++ {
+			w := visibleWidth(row[i])
+			if w > widths[i] {
+				widths[i] = w
+			}
+		}
+	}
+	total := 0
+	for i, w := range widths {
+		total += w
+		if i < cols-1 {
+			total += gap
+		}
+	}
+	if total <= termWidth {
+		return
+	}
+
+	// Budget for the repo column: shrink it (and only it) to fit.
+	others := total - widths[colIdx]
+	budget := termWidth - others
+	if budget < 4 {
+		budget = 4 // never shrink to less than "x/y" + ellipsis fallback
+	}
+	for r := 1; r < len(rows); r++ {
+		if colIdx >= len(rows[r]) {
+			continue
+		}
+		rows[r][colIdx] = shrinkRepo(rows[r][colIdx], budget)
+	}
+}
+
+// shrinkRepo fits "owner/name" into budget visible runes. Prefers to keep
+// the full repo name and trim the owner with a leading ellipsis. Falls
+// back to a generic truncate when even the name can't fit.
+func shrinkRepo(repo string, budget int) string {
+	if visibleWidth(repo) <= budget {
+		return repo
+	}
+	slash := strings.IndexByte(repo, '/')
+	if slash < 0 {
+		return truncate(repo, budget)
+	}
+	name := repo[slash:] // includes the slash
+	nameLen := visibleWidth(name)
+	ownerBudget := budget - nameLen
+	if ownerBudget < 2 {
+		// not enough room for at least "x…/name" — fall back to generic
+		// truncation of the whole string
+		return truncate(repo, budget)
+	}
+	ownerRunes := []rune(repo[:slash])
+	if len(ownerRunes) <= ownerBudget {
+		return repo
+	}
+	return string(ownerRunes[:ownerBudget-1]) + "…" + name
 }
 
 // printAligned prints rows with columns padded to their widest VISIBLE cell.

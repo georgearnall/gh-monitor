@@ -367,7 +367,7 @@ func TestWriteNotifsTable_AlignsWithDimmedRows(t *testing.T) {
 		{ID: "1", Repo: "acme/billing", PRNumber: 88, Title: "Add VAT", Reason: "review_requested", URL: "https://github.com/acme/billing/pull/88", UpdatedAt: now.Add(-5 * time.Minute), Unread: true},
 		{ID: "2", Repo: "acme/legacy", PRNumber: 35, Title: "Tidy", Reason: "mention", URL: "https://github.com/acme/legacy/pull/35", UpdatedAt: now.Add(-2 * time.Hour), Unread: false},
 	}
-	out := captureStdout(t, func() { writeNotifsTable(ns, "", true) })
+	out := captureStdout(t, func() { writeNotifsTable(ns, "", true, 0) })
 	lines := strings.Split(strings.TrimRight(out, "\n"), "\n")
 	if len(lines) != 3 {
 		t.Fatalf("got %d lines, want 3:\n%s", len(lines), out)
@@ -382,13 +382,140 @@ func TestWriteNotifsTable_AlignsWithDimmedRows(t *testing.T) {
 	}
 }
 
+func TestShrinkRepo(t *testing.T) {
+	cases := []struct {
+		repo   string
+		budget int
+		want   string
+	}{
+		// fits as-is
+		{"acme/billing", 20, "acme/billing"},
+		// trims owner with ellipsis, keeps full name
+		{"trainline-private/partnerships-api", 20, "tr…/partnerships-api"},
+		{"trainline-private/foo", 10, "train…/foo"},
+		// owner exactly fits the budget after trimming
+		{"trainline-private/partnerships-api", 22, "trai…/partnerships-api"},
+		// budget too small to keep full name -> generic truncate
+		{"trainline-private/partnerships-api", 12, "trainline-p…"},
+		// no slash -> falls back to plain truncate
+		{"unparseable-thing", 10, "unparseab…"},
+		// already short
+		{"a/b", 5, "a/b"},
+	}
+	for _, c := range cases {
+		got := shrinkRepo(c.repo, c.budget)
+		if got != c.want {
+			t.Errorf("shrinkRepo(%q, %d) = %q, want %q", c.repo, c.budget, got, c.want)
+		}
+	}
+}
+
+func TestFitRepoColumn_NoopWhenFits(t *testing.T) {
+	rows := [][]string{
+		{"  ", "REASON", "TITLE", "REPO", "#"},
+		{"  ", "@ m", "Short title", "acme/billing", "#1"},
+	}
+	fitRepoColumn(rows, 3, 200)
+	if rows[1][3] != "acme/billing" {
+		t.Errorf("repo cell should be untouched when termWidth is generous: got %q", rows[1][3])
+	}
+}
+
+func TestFitRepoColumn_ShrinksWhenTight(t *testing.T) {
+	rows := [][]string{
+		{"  ", "REASON", "TITLE", "REPO", "#"},
+		{"  ", "@ mention", "Lorem ipsum dolor sit amet", "trainline-private/partnerships-api", "#42"},
+	}
+	// Natural width: 2 + 9 + 26 + 34 + 3 = 74 + 4*2 = 82. With termWidth=70
+	// the repo column has 22 chars of budget — enough to preserve the full
+	// name suffix while trimming the owner.
+	fitRepoColumn(rows, 3, 70)
+	if rows[1][3] == "trainline-private/partnerships-api" {
+		t.Errorf("repo cell should have been shrunk; got %q", rows[1][3])
+	}
+	if !strings.HasSuffix(rows[1][3], "/partnerships-api") {
+		t.Errorf("repo cell should preserve the full name suffix; got %q", rows[1][3])
+	}
+}
+
+func TestFitRepoColumn_FallsBackToPlainTruncateWhenTooTight(t *testing.T) {
+	rows := [][]string{
+		{"  ", "TITLE", "REPO"},
+		{"  ", "Lorem ipsum dolor sit amet", "trainline-private/very-long-repository-name"},
+	}
+	// Tight budget can't fit "/very-long-repository-name" suffix.
+	fitRepoColumn(rows, 2, 35)
+	if rows[1][2] == "trainline-private/very-long-repository-name" {
+		t.Errorf("repo cell should have been shrunk; got %q", rows[1][2])
+	}
+	if !strings.HasSuffix(rows[1][2], "…") {
+		t.Errorf("expected plain ellipsis truncation when too tight; got %q", rows[1][2])
+	}
+}
+
+func TestFitRepoColumn_NoopOnZeroWidth(t *testing.T) {
+	rows := [][]string{
+		{"a", "b", "c", "trainline-private/foo"},
+		{"a", "b", "c", "trainline-private/foo"},
+	}
+	fitRepoColumn(rows, 3, 0)
+	if rows[1][3] != "trainline-private/foo" {
+		t.Errorf("termWidth=0 means unconstrained; got %q", rows[1][3])
+	}
+}
+
+func TestColumnOrdering(t *testing.T) {
+	// Verify TITLE/WORKFLOW appears before REPO in the header for each table.
+	now := time.Now()
+
+	notifsOut := captureStdout(t, func() {
+		writeNotifsTable([]notifs.Notification{
+			{ID: "1", Repo: "a/b", PRNumber: 1, Title: "test", Reason: "mention", URL: "u", UpdatedAt: now, Unread: true},
+		}, "", true, 0)
+	})
+	if !columnOrderOK(notifsOut, []string{"TITLE", "REPO"}) {
+		t.Errorf("notifs: TITLE must come before REPO\n%s", notifsOut)
+	}
+
+	prOut := captureStdout(t, func() {
+		writePRTable([]prs.PR{
+			{Repo: "a/b", Number: 1, Title: "test", URL: "u", UpdatedAt: now},
+		}, "", true, 0)
+	})
+	if !columnOrderOK(prOut, []string{"TITLE", "REPO"}) {
+		t.Errorf("prs: TITLE must come before REPO\n%s", prOut)
+	}
+
+	runsOut := captureStdout(t, func() {
+		writeTable([]runs.Run{
+			{ID: 1, Repo: "a/b", WorkflowName: "CI", Status: "in_progress", URL: "u", CreatedAt: now, UpdatedAt: now},
+		}, "", true, 0)
+	})
+	if !columnOrderOK(runsOut, []string{"WORKFLOW", "REPO"}) {
+		t.Errorf("runs: WORKFLOW must come before REPO\n%s", runsOut)
+	}
+}
+
+func columnOrderOK(out string, order []string) bool {
+	stripped := ansiRe.ReplaceAllString(out, "")
+	lastIdx := -1
+	for _, label := range order {
+		idx := strings.Index(stripped, label)
+		if idx < 0 || idx <= lastIdx {
+			return false
+		}
+		lastIdx = idx
+	}
+	return true
+}
+
 func TestWriteNotifsTable_FocusCursor(t *testing.T) {
 	now := time.Now()
 	ns := []notifs.Notification{
 		{ID: "1", Repo: "acme/a", PRNumber: 1, Title: "one", Reason: "mention", URL: "https://github.com/acme/a/pull/1", UpdatedAt: now, Unread: true},
 		{ID: "2", Repo: "acme/b", PRNumber: 2, Title: "two", Reason: "mention", URL: "https://github.com/acme/b/pull/2", UpdatedAt: now, Unread: true},
 	}
-	out := captureStdout(t, func() { writeNotifsTable(ns, "2", true) })
+	out := captureStdout(t, func() { writeNotifsTable(ns, "2", true, 0) })
 	stripped := ansiRe.ReplaceAllString(out, "")
 	if !strings.Contains(stripped, "▶") {
 		t.Fatalf("expected cursor glyph in output:\n%s", stripped)
@@ -401,7 +528,7 @@ func TestWriteNotifsTable_FocusCursor(t *testing.T) {
 	}
 
 	// And no cursor when focusedID is empty.
-	out = captureStdout(t, func() { writeNotifsTable(ns, "", true) })
+	out = captureStdout(t, func() { writeNotifsTable(ns, "", true, 0) })
 	if strings.Contains(ansiRe.ReplaceAllString(out, ""), "▶") {
 		t.Errorf("expected no cursor when focusedID empty:\n%s", out)
 	}
@@ -413,7 +540,7 @@ func TestWritePRTable_FocusCursor(t *testing.T) {
 		{Repo: "acme/a", Number: 1, Title: "one", URL: "https://github.com/acme/a/pull/1", UpdatedAt: now},
 		{Repo: "acme/b", Number: 2, Title: "two", URL: "https://github.com/acme/b/pull/2", UpdatedAt: now},
 	}
-	out := captureStdout(t, func() { writePRTable(ps, "acme/b#2", true) })
+	out := captureStdout(t, func() { writePRTable(ps, "acme/b#2", true, 0) })
 	stripped := ansiRe.ReplaceAllString(out, "")
 	if !strings.Contains(stripped, "▶") {
 		t.Fatalf("expected cursor glyph in output:\n%s", stripped)
@@ -424,7 +551,7 @@ func TestWritePRTable_FocusCursor(t *testing.T) {
 		}
 	}
 
-	out = captureStdout(t, func() { writePRTable(ps, "", true) })
+	out = captureStdout(t, func() { writePRTable(ps, "", true, 0) })
 	if strings.Contains(ansiRe.ReplaceAllString(out, ""), "▶") {
 		t.Errorf("expected no PR cursor when focusedKey empty:\n%s", out)
 	}
@@ -436,7 +563,7 @@ func TestWriteTable_FocusCursor(t *testing.T) {
 		{ID: 9001, Repo: "acme/a", WorkflowName: "CI", Status: "in_progress", URL: "https://github.com/acme/a/runs/9001", CreatedAt: now, UpdatedAt: now},
 		{ID: 9002, Repo: "acme/b", WorkflowName: "Deploy", Status: "in_progress", URL: "https://github.com/acme/b/runs/9002", CreatedAt: now, UpdatedAt: now},
 	}
-	out := captureStdout(t, func() { writeTable(rs, "9002", true) })
+	out := captureStdout(t, func() { writeTable(rs, "9002", true, 0) })
 	stripped := ansiRe.ReplaceAllString(out, "")
 	if !strings.Contains(stripped, "▶") {
 		t.Fatalf("expected cursor glyph in output:\n%s", stripped)
@@ -447,7 +574,7 @@ func TestWriteTable_FocusCursor(t *testing.T) {
 		}
 	}
 
-	out = captureStdout(t, func() { writeTable(rs, "", true) })
+	out = captureStdout(t, func() { writeTable(rs, "", true, 0) })
 	if strings.Contains(ansiRe.ReplaceAllString(out, ""), "▶") {
 		t.Errorf("expected no run cursor when focusedID empty:\n%s", out)
 	}

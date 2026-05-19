@@ -238,6 +238,9 @@ func runWatch(client *ghclient.Client, cfg watchConfig) {
 
 	enqueue(trigger) // initial refresh
 
+	winch, stopWinch := notifyWinch()
+	defer stopWinch()
+
 	var (
 		refreshing bool
 		nextTimer  *time.Timer
@@ -247,6 +250,13 @@ func runWatch(client *ghclient.Client, cfg watchConfig) {
 		select {
 		case <-started:
 			refreshing = true
+			renderFromState(st, cfg, refreshing, focused)
+
+		case <-winch:
+			// On resize the alternate screen often retains wrapped
+			// fragments of the previous render that the in-place
+			// overwrite path won't touch. One-off full clear here.
+			fmt.Print("\x1b[H\x1b[2J")
 			renderFromState(st, cfg, refreshing, focused)
 
 		case res := <-results:
@@ -695,16 +705,17 @@ func renderFromState(st *state.State, cfg watchConfig, refreshing bool, f focusT
 	}
 	snap := ui.Snapshot{
 		Runs:          st.LastView,
-		PRs:            st.LastPRs,
-		Notifs:         st.LastNotifs,
-		ViewerLogin:    st.ViewerLogin,
-		RepoCount:      len(st.Repos),
-		RateRemaining:  st.LastRateLimit.Remaining,
-		RateLimit:      st.LastRateLimit.Limit,
-		PolledAt:       st.LastPoll,
-		NextPollIn:     next,
-		Stale:          stale,
-		Refreshing:     refreshing,
+		PRs:           st.LastPRs,
+		Notifs:        st.LastNotifs,
+		ViewerLogin:   st.ViewerLogin,
+		RepoCount:     len(st.Repos),
+		RateRemaining: st.LastRateLimit.Remaining,
+		RateLimit:     st.LastRateLimit.Limit,
+		PolledAt:      st.LastPoll,
+		NextPollIn:    next,
+		TermWidth:     ui.TermWidth(),
+		Stale:         stale,
+		Refreshing:    refreshing,
 	}
 	switch f.Panel {
 	case "notifs":
