@@ -189,6 +189,79 @@ func TestObserve_ActiveToSuccess_NoFire(t *testing.T) {
 	}
 }
 
+func TestRecordDismiss_AndIsDismissed(t *testing.T) {
+	isolate(t)
+	s, _ := Load()
+	id := "thread-1"
+	originalAt := time.Now().Add(-1 * time.Hour)
+
+	if s.IsDismissed(id, originalAt) {
+		t.Errorf("expected IsDismissed=false for unrecorded id")
+	}
+
+	s.RecordDismiss(id, originalAt)
+
+	// Same UpdatedAt as dismissed: suppressed.
+	if !s.IsDismissed(id, originalAt) {
+		t.Errorf("expected same-updatedAt to be dismissed")
+	}
+	// Older UpdatedAt (somehow): suppressed.
+	if !s.IsDismissed(id, originalAt.Add(-1*time.Minute)) {
+		t.Errorf("expected older-updatedAt to be dismissed")
+	}
+	// Newer UpdatedAt: NOT suppressed (genuine new activity).
+	if s.IsDismissed(id, originalAt.Add(1*time.Minute)) {
+		t.Errorf("newer updatedAt should bypass the filter")
+	}
+}
+
+func TestPruneDismissed(t *testing.T) {
+	isolate(t)
+	s, _ := Load()
+	now := time.Now()
+
+	// Record one entry, then forge its DismissedAt to be far in the past
+	// so PruneDismissed sees it as stale.
+	s.RecordDismiss("old", now)
+	s.RecordDismiss("new", now)
+	old := s.DismissedNotifs["old"]
+	old.DismissedAt = now.Add(-1 * time.Hour)
+	s.DismissedNotifs["old"] = old
+
+	s.PruneDismissed(10 * time.Minute)
+
+	if _, ok := s.DismissedNotifs["old"]; ok {
+		t.Errorf("expected 'old' to be pruned")
+	}
+	if _, ok := s.DismissedNotifs["new"]; !ok {
+		t.Errorf("expected 'new' to be kept")
+	}
+}
+
+func TestPruneDismissed_NilMapIsNoOp(t *testing.T) {
+	isolate(t)
+	s, _ := Load()
+	// Should not panic.
+	s.PruneDismissed(5 * time.Minute)
+}
+
+func TestSaveLoad_PreservesDismissedNotifs(t *testing.T) {
+	isolate(t)
+	original, _ := Load()
+	now := time.Now().UTC().Truncate(time.Second)
+	original.RecordDismiss("abc", now)
+	if err := original.Save(); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	reloaded, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !reloaded.IsDismissed("abc", now) {
+		t.Errorf("expected dismissal record to survive save/load")
+	}
+}
+
 func TestPrune(t *testing.T) {
 	isolate(t)
 	s, _ := Load()

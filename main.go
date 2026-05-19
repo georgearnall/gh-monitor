@@ -384,10 +384,21 @@ func dismissFocused(client *ghclient.Client, st *state.State, cfg *watchConfig, 
 	if f.Panel != "notifs" || f.ID == "" {
 		return f
 	}
+	// Capture UpdatedAt before applyDismiss removes the row, so we can
+	// suppress GitHub's stale-cache bounce-back on the next poll.
+	var updatedAt time.Time
+	for _, n := range st.LastNotifs {
+		if n.ID == f.ID {
+			updatedAt = n.UpdatedAt
+			break
+		}
+	}
 	newFocus, ok := applyDismiss(st, f.ID)
 	if !ok {
 		return f
 	}
+	st.RecordDismiss(f.ID, updatedAt)
+
 	dismissedID := f.ID
 	renderFromState(st, *cfg, false, newFocus)
 	go func() {
@@ -782,7 +793,15 @@ func applyResult(st *state.State, cfg *watchConfig, res pollResult) {
 		st.LastPRs = res.PRs
 	}
 	if res.NotifErr == nil && res.Notifs != nil {
-		st.LastNotifs = res.Notifs
+		st.PruneDismissed(10 * time.Minute)
+		filtered := make([]notifs.Notification, 0, len(res.Notifs))
+		for _, n := range res.Notifs {
+			if st.IsDismissed(n.ID, n.UpdatedAt) {
+				continue
+			}
+			filtered = append(filtered, n)
+		}
+		st.LastNotifs = filtered
 	}
 	if res.DiscErr == nil && res.Repos != nil {
 		st.Repos = res.Repos

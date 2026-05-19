@@ -33,16 +33,34 @@ type RunRecord struct {
 }
 
 type State struct {
-	Runs          map[int64]RunRecord           `json:"runs"`
-	LastView      []runs.Run                    `json:"last_view,omitempty"`
-	LastPRs       []prs.PR                      `json:"last_prs,omitempty"`
-	LastNotifs    []notifs.Notification         `json:"last_notifs,omitempty"`
-	Repos         []discovery.Repo              `json:"repos,omitempty"`
-	LastPoll      time.Time                     `json:"last_poll,omitempty"`
-	LastRateLimit ghclient.RateLimit            `json:"last_rate_limit,omitempty"`
-	ViewerLogin   string                        `json:"viewer_login,omitempty"`
-	EtagCache     map[string]ghclient.EtagEntry `json:"etag_cache,omitempty"`
-	path          string
+	Runs            map[int64]RunRecord           `json:"runs"`
+	LastView        []runs.Run                    `json:"last_view,omitempty"`
+	LastPRs         []prs.PR                      `json:"last_prs,omitempty"`
+	LastNotifs      []notifs.Notification         `json:"last_notifs,omitempty"`
+	DismissedNotifs map[string]DismissEntry       `json:"dismissed_notifs,omitempty"`
+	Repos           []discovery.Repo              `json:"repos,omitempty"`
+	LastPoll        time.Time                     `json:"last_poll,omitempty"`
+	LastRateLimit   ghclient.RateLimit            `json:"last_rate_limit,omitempty"`
+	ViewerLogin     string                        `json:"viewer_login,omitempty"`
+	EtagCache       map[string]ghclient.EtagEntry `json:"etag_cache,omitempty"`
+	path            string
+}
+
+// DismissEntry remembers a notification the user dismissed locally so the
+// poll loop can suppress the "bounce-back" that occurs when GitHub's
+// notifications endpoint returns the just-dismissed thread for up to
+// ~60s before its server-side cache invalidates.
+//
+// UpdatedAt is the notification's updated_at at the moment of dismissal.
+// When a fresh poll yields a notification with the same ID whose
+// updated_at is not strictly newer, we suppress it. New activity on the
+// same thread (newer updated_at) bypasses the filter.
+//
+// DismissedAt is the local wall-clock time of the dismissal, used by
+// PruneDismissed to forget entries that GitHub has clearly forgotten too.
+type DismissEntry struct {
+	UpdatedAt   time.Time `json:"updated_at"`
+	DismissedAt time.Time `json:"dismissed_at"`
 }
 
 // Load reads state from disk; missing file returns an empty State.
@@ -112,6 +130,44 @@ func (s *State) Observe(r runs.Run) Transition {
 		return TransitionFailure
 	}
 	return TransitionNone
+}
+
+// RecordDismiss notes that the user dismissed a notification with the given
+// ID at the given updated_at. Used by IsDismissed to suppress GitHub's
+// cached bounce-back of the same thread version.
+func (s *State) RecordDismiss(id string, updatedAt time.Time) {
+	if s.DismissedNotifs == nil {
+		s.DismissedNotifs = make(map[string]DismissEntry)
+	}
+	s.DismissedNotifs[id] = DismissEntry{UpdatedAt: updatedAt, DismissedAt: time.Now()}
+}
+
+// IsDismissed reports whether the (id, updatedAt) pair has been dismissed.
+// Returns true only when an entry exists AND updatedAt is not newer than
+// the recorded UpdatedAt, so genuinely new activity on the same thread
+// (a fresh updated_at) passes through.
+func (s *State) IsDismissed(id string, updatedAt time.Time) bool {
+	e, ok := s.DismissedNotifs[id]
+	if !ok {
+		return false
+	}
+	return !updatedAt.After(e.UpdatedAt)
+}
+
+// PruneDismissed drops dismissal entries whose DismissedAt is older than
+// maxAge. By that point GitHub's server-side cache has invalidated and
+// the API itself will stop returning the dismissed item, so we don't
+// need a local record anymore.
+func (s *State) PruneDismissed(maxAge time.Duration) {
+	if s.DismissedNotifs == nil {
+		return
+	}
+	cutoff := time.Now().Add(-maxAge)
+	for id, e := range s.DismissedNotifs {
+		if e.DismissedAt.Before(cutoff) {
+			delete(s.DismissedNotifs, id)
+		}
+	}
 }
 
 // Prune removes records for runs that haven't been seen recently enough
