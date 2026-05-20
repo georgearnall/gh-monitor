@@ -48,6 +48,42 @@ const (
 	ansiDefaultFg = "\x1b[39m"
 )
 
+// Cell is a sequence of plain-text or colour-coded fragments. Render picks
+// the right colour closer based on whether the row will be wrapped in an
+// outer dim later, so callers no longer have to choose between color() and
+// colorInsideDim() when building cell content.
+type Cell struct {
+	parts []cellPart
+}
+
+type cellPart struct {
+	text  string
+	color string // empty == plain text
+}
+
+func NewCell() *Cell                              { return &Cell{} }
+func (c *Cell) Plain(s string) *Cell             { c.parts = append(c.parts, cellPart{text: s}); return c }
+func (c *Cell) Colored(code, s string) *Cell     { c.parts = append(c.parts, cellPart{text: s, color: code}); return c }
+
+// Render returns the ANSI-encoded string for this cell. insideDim picks the
+// dim-safe closer (\x1b[39m) so an outer ansiDim wrap survives the span end.
+// When tty is false, all colour codes are skipped.
+func (c *Cell) Render(tty, insideDim bool) string {
+	var b strings.Builder
+	for _, p := range c.parts {
+		if !tty || p.color == "" {
+			b.WriteString(p.text)
+			continue
+		}
+		if insideDim {
+			b.WriteString(colorInsideDim(p.color, p.text, true))
+		} else {
+			b.WriteString(color(p.color, p.text, true))
+		}
+	}
+	return b.String()
+}
+
 type Snapshot struct {
 	Runs           []runs.Run
 	PRs            []prs.PR
@@ -231,7 +267,7 @@ func writeNotifsTable(ns []notifs.Notification, focusedID string, tty bool, term
 		}
 		rows = append(rows, []string{
 			cursor,
-			reasonCell(n, tty),
+			reasonCell(n).Render(tty, !n.Unread),
 			title,
 			n.Repo, // kept plain so shrinkRepo can parse the slash
 			fmt.Sprintf("#%d", n.PRNumber),
@@ -258,45 +294,31 @@ func writeNotifsTable(ns []notifs.Notification, focusedID string, tty bool, term
 	printAligned(rows)
 }
 
-// reasonCell formats the notification reason. Unread items keep their colour;
-// read items return plain text so the caller can wrap the whole row in dim.
-func reasonCell(n notifs.Notification, tty bool) string {
-	// author/assign rows are usually the user's own PRs. Replace the
-	// uninformative "· own" with the PR state when we have it.
+// reasonCell builds a Cell for the notification reason column. The Render
+// call at the use site supplies tty and insideDim (= !n.Unread) so the
+// colour closer is chosen there rather than baked in here.
+func reasonCell(n notifs.Notification) *Cell {
 	if n.Reason == "author" || n.Reason == "assign" {
-		return stateCell(n.PRState, n.Unread, tty)
+		return stateCell(n.PRState)
 	}
-	// Choose the colour helper based on whether the row will be wrapped
-	// in outer dim later (read rows). colorInsideDim closes its colour
-	// span with default-fg so the wrap's dim attribute survives.
-	wrap := color
-	if !n.Unread {
-		wrap = colorInsideDim
-	}
+	c := NewCell()
 	switch n.Reason {
 	case "mention", "team_mention":
-		return wrap(ansiCyan, "@", tty) + " mention"
+		return c.Colored(ansiCyan, "@").Plain(" mention")
 	case "review_requested":
-		return wrap(ansiYellow, "◐", tty) + " review"
+		return c.Colored(ansiYellow, "◐").Plain(" review")
 	case "comment":
-		return wrap(ansiDim, "+", tty) + " comment"
+		return c.Colored(ansiDim, "+").Plain(" comment")
 	}
-	return wrap(ansiDim, "·", tty) + " " + n.Reason
+	return c.Colored(ansiDim, "·").Plain(" " + n.Reason)
 }
 
-// stateCell renders the PR state for an author/assign notification. The
-// icon is coloured for both read and unread rows; read rows use a
-// dim-safe colour closer so the outer row-dim wrap renders the icon as
-// a muted version of its colour and continues dimming the label text.
-func stateCell(state notifs.PRState, unread, tty bool) string {
+// stateCell builds a Cell for the PR state icon + label. The Render call
+// at the use site passes insideDim=!unread so read rows get the dim-safe
+// colour closer and unread rows get the full reset.
+func stateCell(state notifs.PRState) *Cell {
 	icon, label, col := stateGlyph(state)
-	if !tty {
-		return icon + " " + label
-	}
-	if unread {
-		return color(col, icon, tty) + " " + label
-	}
-	return colorInsideDim(col, icon, tty) + " " + label
+	return NewCell().Colored(col, icon).Plain(" " + label)
 }
 
 // stateGlyph maps a PR state to (icon, label, colour). Falls back to the
@@ -364,8 +386,8 @@ func buildPRRows(ps []prs.PR, focusedKey string, tty, includeBranch, compactStat
 		}
 		row := []string{
 			cursor,
-			prStatusCell(p, tty, compactStatus),
-			prReviewCell(p, tty),
+			prStatusCell(p, compactStatus).Render(tty, false),
+			prReviewCell(p).Render(tty, false),
 			title,
 			p.Repo,
 			fmt.Sprintf("#%d", p.Number),
@@ -379,34 +401,31 @@ func buildPRRows(ps []prs.PR, focusedKey string, tty, includeBranch, compactStat
 	return rows
 }
 
-func prReviewCell(p prs.PR, tty bool) string {
-	var label string
+func prReviewCell(p prs.PR) *Cell {
+	c := NewCell()
 	switch p.ReviewDecision {
 	case "APPROVED":
-		label = color(ansiGreen, "✓", tty) + " approved"
+		c.Colored(ansiGreen, "✓").Plain(" approved")
 	case "CHANGES_REQUESTED":
-		label = color(ansiRed, "✗", tty) + " changes"
+		c.Colored(ansiRed, "✗").Plain(" changes")
 	case "REVIEW_REQUIRED":
-		label = color(ansiDim, "·", tty) + " blocked"
+		c.Colored(ansiDim, "·").Plain(" blocked")
 	default:
 		if p.ReviewCount > 0 {
-			label = color(ansiYellow, "◐", tty) + " reviewed"
-		} else {
-			// No decision and no reviewers yet: render nothing rather
-			// than a "no review" placeholder that just wastes column.
-			label = ""
+			c.Colored(ansiYellow, "◐").Plain(" reviewed")
 		}
+		// No decision and no reviewers yet: empty cell (no placeholder).
 	}
 	if p.CommentCount > 0 {
-		if label != "" {
-			label += " "
+		if len(c.parts) > 0 {
+			c.Plain(" ")
 		}
-		label += dim(fmt.Sprintf("+%d", p.CommentCount), tty)
+		c.Colored(ansiDim, fmt.Sprintf("+%d", p.CommentCount))
 	}
-	return label
+	return c
 }
 
-func prStatusCell(p prs.PR, tty, compact bool) string {
+func prStatusCell(p prs.PR, compact bool) *Cell {
 	failed := func() string {
 		if compact {
 			return fmt.Sprintf(" %d/%d", p.Failing, p.Total)
@@ -426,20 +445,22 @@ func prStatusCell(p prs.PR, tty, compact bool) string {
 		return fmt.Sprintf(" %d/%d pass", p.Passing, p.Total)
 	}
 
+	c := NewCell()
 	switch {
 	case p.IsFailing():
-		return color(ansiRed, "✗", tty) + failed()
+		return c.Colored(ansiRed, "✗").Plain(failed())
 	case p.IsPending():
-		return color(ansiYellow, "◐", tty) + pending()
+		return c.Colored(ansiYellow, "◐").Plain(pending())
 	case p.IsPassing():
-		return color(ansiGreen, "✓", tty) + passed()
+		return c.Colored(ansiGreen, "✓").Plain(passed())
 	case p.Total == 0:
-		if compact {
-			return color(ansiDim, "·", tty)
+		c.Colored(ansiDim, "·")
+		if !compact {
+			c.Plain(" none")
 		}
-		return color(ansiDim, "·", tty) + " none"
+		return c
 	}
-	return color(ansiDim, "·", tty) + " " + p.State
+	return c.Colored(ansiDim, "·").Plain(" " + p.State)
 }
 
 // runsRepoCol is the column index of REPO inside writeTable's rows.
@@ -459,7 +480,7 @@ func writeTable(rows []runs.Run, focusedID string, tty bool, termWidth int) {
 		}
 		out = append(out, []string{
 			cursor,
-			statusCell(r, tty),
+			statusCell(r).Render(tty, false),
 			truncate(r.WorkflowName, 30),
 			r.Repo,
 			truncate(r.Branch, 30),
@@ -724,19 +745,20 @@ func countByOutcome(rs []runs.Run) (active, failed int) {
 	return
 }
 
-func statusCell(r runs.Run, tty bool) string {
+func statusCell(r runs.Run) *Cell {
+	c := NewCell()
 	if r.IsActive() {
-		return color(ansiYellow, "●", tty) + " " + r.Status
+		return c.Colored(ansiYellow, "●").Plain(" " + r.Status)
 	}
 	switch r.Conclusion {
 	case "success":
-		return color(ansiGreen, "✓", tty) + " success"
+		return c.Colored(ansiGreen, "✓").Plain(" success")
 	case "failure", "timed_out", "startup_failure":
-		return color(ansiRed, "✗", tty) + " " + r.Conclusion
+		return c.Colored(ansiRed, "✗").Plain(" " + r.Conclusion)
 	case "cancelled", "skipped":
-		return color(ansiDim, "·", tty) + " " + r.Conclusion
+		return c.Colored(ansiDim, "·").Plain(" " + r.Conclusion)
 	}
-	return r.Conclusion
+	return c.Plain(r.Conclusion)
 }
 
 func ageString(r runs.Run) string {

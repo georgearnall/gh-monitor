@@ -99,7 +99,7 @@ func TestStatusCell_PlainWhenNotTTY(t *testing.T) {
 		{runs.Run{Status: "completed", Conclusion: "cancelled"}, "· cancelled"},
 	}
 	for _, c := range cases {
-		got := statusCell(c.run, false)
+		got := statusCell(c.run).Render(false, false)
 		if got != c.want {
 			t.Errorf("statusCell(%+v, tty=false) = %q, want %q", c.run, got, c.want)
 		}
@@ -117,7 +117,7 @@ func TestPRStatusCell_PlainWhenNotTTY(t *testing.T) {
 		{prs.PR{State: "", Total: 0}, "· none"},
 	}
 	for _, c := range cases {
-		got := prStatusCell(c.pr, false, false)
+		got := prStatusCell(c.pr, false).Render(false, false)
 		if got != c.want {
 			t.Errorf("prStatusCell(%+v, tty=false, compact=false) = %q, want %q", c.pr, got, c.want)
 		}
@@ -135,7 +135,7 @@ func TestPRStatusCell_CompactDropsText(t *testing.T) {
 		{prs.PR{State: "", Total: 0}, "·"},
 	}
 	for _, c := range cases {
-		got := prStatusCell(c.pr, false, true)
+		got := prStatusCell(c.pr, true).Render(false, false)
 		if got != c.want {
 			t.Errorf("prStatusCell(%+v, compact=true) = %q, want %q", c.pr, got, c.want)
 		}
@@ -158,7 +158,7 @@ func TestPRReviewCell_PlainWhenNotTTY(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			got := prReviewCell(c.pr, false)
+			got := prReviewCell(c.pr).Render(false, false)
 			if got != c.want {
 				t.Errorf("prReviewCell = %q, want %q", got, c.want)
 			}
@@ -314,6 +314,32 @@ func TestVisibleRows_FilterAndCap(t *testing.T) {
 	})
 }
 
+func TestCell_Render_DimSafeInsideWrap(t *testing.T) {
+	c := NewCell().Colored(ansiCyan, "@").Plain(" mention")
+
+	// insideDim=false: full reset closer.
+	out := c.Render(true, false)
+	if !strings.Contains(out, ansiCyan+"@"+ansiReset) {
+		t.Errorf("insideDim=false should use full reset; got %q", out)
+	}
+	// insideDim=true: dim-safe closer so an outer dim wrap survives.
+	out = c.Render(true, true)
+	if !strings.Contains(out, ansiCyan+"@"+ansiDefaultFg) {
+		t.Errorf("insideDim=true should use default-fg closer; got %q", out)
+	}
+	// Visible width is the same regardless of insideDim.
+	wFalse := visibleWidth(c.Render(true, false))
+	wTrue := visibleWidth(c.Render(true, true))
+	if wFalse != wTrue {
+		t.Errorf("visible width differs: insideDim=false %d, insideDim=true %d", wFalse, wTrue)
+	}
+	// Non-tty: no ANSI codes.
+	out = c.Render(false, false)
+	if out != "@ mention" {
+		t.Errorf("non-tty got %q, want '@ mention'", out)
+	}
+}
+
 func TestReasonCell_PlainWhenNotTTY_Unread(t *testing.T) {
 	cases := []struct {
 		reason string
@@ -329,7 +355,7 @@ func TestReasonCell_PlainWhenNotTTY_Unread(t *testing.T) {
 		{"subscribed", "· subscribed"},
 	}
 	for _, c := range cases {
-		got := reasonCell(notifs.Notification{Reason: c.reason, Unread: true}, false)
+		got := reasonCell(notifs.Notification{Reason: c.reason, Unread: true}).Render(false, false)
 		if got != c.want {
 			t.Errorf("reasonCell(%q, unread=true, tty=false) = %q, want %q", c.reason, got, c.want)
 		}
@@ -349,12 +375,12 @@ func TestReasonCell_AuthorWithStateShowsState(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(string(c.state), func(t *testing.T) {
-			got := reasonCell(notifs.Notification{Reason: "author", Unread: true, PRState: c.state}, false)
+			got := reasonCell(notifs.Notification{Reason: "author", Unread: true, PRState: c.state}).Render(false, false)
 			if got != c.want {
 				t.Errorf("reasonCell(author, state=%q) = %q, want %q", c.state, got, c.want)
 			}
 			// assign reason behaves the same.
-			got = reasonCell(notifs.Notification{Reason: "assign", Unread: true, PRState: c.state}, false)
+			got = reasonCell(notifs.Notification{Reason: "assign", Unread: true, PRState: c.state}).Render(false, false)
 			if got != c.want {
 				t.Errorf("reasonCell(assign, state=%q) = %q, want %q", c.state, got, c.want)
 			}
@@ -363,29 +389,29 @@ func TestReasonCell_AuthorWithStateShowsState(t *testing.T) {
 }
 
 func TestStateCell_ColoursUnreadAndRead(t *testing.T) {
-	// Unread: full reset closer (icon stands fully bright).
-	got := stateCell(notifs.PRStateOpen, true, true)
+	// Unread (insideDim=false): full reset closer (icon stands fully bright).
+	got := stateCell(notifs.PRStateOpen).Render(true, false)
 	if !strings.Contains(got, ansiGreen+"●"+ansiReset) {
 		t.Errorf("unread OPEN should close with full reset; got %q", got)
 	}
-	got = stateCell(notifs.PRStateMerged, true, true)
+	got = stateCell(notifs.PRStateMerged).Render(true, false)
 	if !strings.Contains(got, ansiPurple+"●"+ansiReset) {
 		t.Errorf("unread MERGED should close with full reset; got %q", got)
 	}
 
-	// Read: dim-safe closer (default-fg). Icon stays coloured under the
-	// outer dim wrap; dim survives the span end so " open" continues dim.
-	got = stateCell(notifs.PRStateOpen, false, true)
+	// Read (insideDim=true): dim-safe closer (default-fg). Icon stays
+	// coloured under the outer dim wrap; dim survives the span end.
+	got = stateCell(notifs.PRStateOpen).Render(true, true)
 	if !strings.Contains(got, ansiGreen+"●"+ansiDefaultFg) {
 		t.Errorf("read OPEN should close with default-fg; got %q", got)
 	}
-	got = stateCell(notifs.PRStateMerged, false, true)
+	got = stateCell(notifs.PRStateMerged).Render(true, true)
 	if !strings.Contains(got, ansiPurple+"●"+ansiDefaultFg) {
 		t.Errorf("read MERGED should close with default-fg; got %q", got)
 	}
 
 	// Non-tty: plain regardless of read/unread.
-	got = stateCell(notifs.PRStateOpen, false, false)
+	got = stateCell(notifs.PRStateOpen).Render(false, true)
 	if got != "● open" {
 		t.Errorf("non-tty got %q, want '● open'", got)
 	}
@@ -437,15 +463,15 @@ func TestStateGlyph(t *testing.T) {
 }
 
 func TestReasonCell_ReadVariant_UsesDimSafeColour(t *testing.T) {
-	// Read rows still get a colour on the icon, but closed with default-fg
-	// instead of full reset so the row-level dim wrap survives.
-	got := reasonCell(notifs.Notification{Reason: "mention", Unread: false}, true)
+	// Read rows (insideDim=true) still get a colour on the icon, but closed
+	// with default-fg so the row-level dim wrap survives the span end.
+	got := reasonCell(notifs.Notification{Reason: "mention", Unread: false}).Render(true, true)
 	want := ansiCyan + "@" + ansiDefaultFg + " mention"
 	if got != want {
 		t.Errorf("read mention reasonCell = %q, want %q", got, want)
 	}
 	// Same shape for review_requested.
-	got = reasonCell(notifs.Notification{Reason: "review_requested", Unread: false}, true)
+	got = reasonCell(notifs.Notification{Reason: "review_requested", Unread: false}).Render(true, true)
 	want = ansiYellow + "◐" + ansiDefaultFg + " review"
 	if got != want {
 		t.Errorf("read review reasonCell = %q, want %q", got, want)
