@@ -7,11 +7,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/georgearnall/gha-monitor/internal/discovery"
-	"github.com/georgearnall/gha-monitor/internal/ghclient"
-	"github.com/georgearnall/gha-monitor/internal/notifs"
-	"github.com/georgearnall/gha-monitor/internal/prs"
-	"github.com/georgearnall/gha-monitor/internal/runs"
+	"github.com/georgearnall/gh-monitor/internal/discovery"
+	"github.com/georgearnall/gh-monitor/internal/ghclient"
+	"github.com/georgearnall/gh-monitor/internal/notifs"
+	"github.com/georgearnall/gh-monitor/internal/prs"
+	"github.com/georgearnall/gh-monitor/internal/runs"
 )
 
 // isolate redirects statePath() to a per-test tempdir.
@@ -19,7 +19,7 @@ func isolate(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", dir)
-	return filepath.Join(dir, "gha-monitor", "state.json")
+	return filepath.Join(dir, "gh-monitor", "state.json")
 }
 
 func TestLoad_Missing(t *testing.T) {
@@ -215,34 +215,42 @@ func TestRecordDismiss_AndIsDismissed(t *testing.T) {
 	}
 }
 
-func TestPruneDismissed(t *testing.T) {
+func TestPruneDismissedAbsent(t *testing.T) {
 	isolate(t)
 	s, _ := Load()
 	now := time.Now()
 
-	// Record one entry, then forge its DismissedAt to be far in the past
-	// so PruneDismissed sees it as stale.
-	s.RecordDismiss("old", now)
-	s.RecordDismiss("new", now)
-	old := s.DismissedNotifs["old"]
-	old.DismissedAt = now.Add(-1 * time.Hour)
-	s.DismissedNotifs["old"] = old
+	// Three entries: two old enough to be eligible for pruning, one fresh.
+	s.RecordDismiss("still-echoed", now)
+	s.RecordDismiss("gone", now)
+	s.RecordDismiss("fresh", now)
 
-	s.PruneDismissed(10 * time.Minute)
-
-	if _, ok := s.DismissedNotifs["old"]; ok {
-		t.Errorf("expected 'old' to be pruned")
+	// Force the first two past the minAge threshold; "fresh" stays recent.
+	for _, id := range []string{"still-echoed", "gone"} {
+		e := s.DismissedNotifs[id]
+		e.DismissedAt = now.Add(-5 * time.Minute)
+		s.DismissedNotifs[id] = e
 	}
-	if _, ok := s.DismissedNotifs["new"]; !ok {
-		t.Errorf("expected 'new' to be kept")
+
+	present := map[string]bool{"still-echoed": true}
+	s.PruneDismissedAbsent(present, 60*time.Second)
+
+	if _, ok := s.DismissedNotifs["still-echoed"]; !ok {
+		t.Errorf("entry still in poll response should be kept")
+	}
+	if _, ok := s.DismissedNotifs["gone"]; ok {
+		t.Errorf("entry absent from response and past minAge should be pruned")
+	}
+	if _, ok := s.DismissedNotifs["fresh"]; !ok {
+		t.Errorf("entry absent from response but inside minAge should be kept")
 	}
 }
 
-func TestPruneDismissed_NilMapIsNoOp(t *testing.T) {
+func TestPruneDismissedAbsent_NilMapIsNoOp(t *testing.T) {
 	isolate(t)
 	s, _ := Load()
 	// Should not panic.
-	s.PruneDismissed(5 * time.Minute)
+	s.PruneDismissedAbsent(nil, 60*time.Second)
 }
 
 func TestSaveLoad_PreservesDismissedNotifs(t *testing.T) {

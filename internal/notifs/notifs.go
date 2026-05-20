@@ -9,8 +9,18 @@ import (
 	"sync"
 	"time"
 
-	"github.com/georgearnall/gha-monitor/internal/ghclient"
+	"github.com/georgearnall/gh-monitor/internal/ghclient"
 	"golang.org/x/sync/errgroup"
+)
+
+// PRState is the lifecycle state of a pull request.
+type PRState string
+
+const (
+	PRStateOpen   PRState = "OPEN"
+	PRStateClosed PRState = "CLOSED"
+	PRStateMerged PRState = "MERGED"
+	PRStateDraft  PRState = "DRAFT"
 )
 
 // Notification is one GitHub notification, narrowed to PR threads we want to
@@ -25,9 +35,8 @@ type Notification struct {
 	URL       string    `json:"url"`
 	UpdatedAt time.Time `json:"updated_at"`
 	Unread    bool      `json:"unread"`
-	// PRState is the linked PR's state: "OPEN" | "CLOSED" | "MERGED" |
-	// "DRAFT". Empty when not yet fetched (best-effort enrichment).
-	PRState string `json:"pr_state,omitempty"`
+	// PRState is the linked PR's state. Empty when not yet fetched (best-effort enrichment).
+	PRState PRState `json:"pr_state,omitempty"`
 }
 
 // readWindow is how long a read notification stays visible before dropping.
@@ -109,10 +118,9 @@ func Poll(client *ghclient.Client) ([]Notification, error) {
 
 // FetchPRStates batches PR state lookups into one GraphQL request keyed
 // by per-notification alias (pr0, pr1, ...). Returns a map of
-// notification.ID -> PR state string ("OPEN" | "CLOSED" | "MERGED" |
-// "DRAFT"). Best-effort: notifications whose repo/PR can't be resolved
-// are simply absent from the result.
-func FetchPRStates(client *ghclient.Client, ns []Notification) (map[string]string, error) {
+// notification.ID -> PRState. Best-effort: notifications whose repo/PR
+// can't be resolved are simply absent from the result.
+func FetchPRStates(client *ghclient.Client, ns []Notification) (map[string]PRState, error) {
 	if len(ns) == 0 {
 		return nil, nil
 	}
@@ -156,15 +164,15 @@ func FetchPRStates(client *ghclient.Client, ns []Notification) (map[string]strin
 		return nil, err
 	}
 
-	out := make(map[string]string, len(indices))
+	out := make(map[string]PRState, len(indices))
 	for _, ix := range indices {
 		repo := data[ix.alias]
 		if repo == nil || repo.PullRequest == nil {
 			continue
 		}
-		state := repo.PullRequest.State
+		state := PRState(repo.PullRequest.State)
 		if repo.PullRequest.IsDraft {
-			state = "DRAFT"
+			state = PRStateDraft
 		}
 		out[ix.notif.ID] = state
 	}

@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/georgearnall/gha-monitor/internal/ghclient"
+	"github.com/georgearnall/gh-monitor/internal/ghclient"
 )
 
 func TestParsePRNumber(t *testing.T) {
@@ -333,14 +333,14 @@ func TestFetchPRStates_HappyPath(t *testing.T) {
 	if err != nil {
 		t.Fatalf("FetchPRStates: %v", err)
 	}
-	if states["n0"] != "OPEN" {
+	if states["n0"] != PRStateOpen {
 		t.Errorf("n0 = %q, want OPEN", states["n0"])
 	}
-	if states["n1"] != "MERGED" {
+	if states["n1"] != PRStateMerged {
 		t.Errorf("n1 = %q, want MERGED", states["n1"])
 	}
 	// isDraft=true overrides state -> DRAFT.
-	if states["n2"] != "DRAFT" {
+	if states["n2"] != PRStateDraft {
 		t.Errorf("n2 = %q, want DRAFT (isDraft override)", states["n2"])
 	}
 }
@@ -376,7 +376,7 @@ func TestFetchPRStates_PartialResolveLeavesMissingOut(t *testing.T) {
 	if err != nil {
 		t.Fatalf("FetchPRStates: %v", err)
 	}
-	if states["n0"] != "OPEN" {
+	if states["n0"] != PRStateOpen {
 		t.Errorf("n0 = %q, want OPEN", states["n0"])
 	}
 	if _, ok := states["n1"]; ok {

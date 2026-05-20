@@ -8,11 +8,11 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/georgearnall/gha-monitor/internal/discovery"
-	"github.com/georgearnall/gha-monitor/internal/ghclient"
-	"github.com/georgearnall/gha-monitor/internal/notifs"
-	"github.com/georgearnall/gha-monitor/internal/prs"
-	"github.com/georgearnall/gha-monitor/internal/runs"
+	"github.com/georgearnall/gh-monitor/internal/discovery"
+	"github.com/georgearnall/gh-monitor/internal/ghclient"
+	"github.com/georgearnall/gh-monitor/internal/notifs"
+	"github.com/georgearnall/gh-monitor/internal/prs"
+	"github.com/georgearnall/gh-monitor/internal/runs"
 )
 
 // Transition describes the change observed for a run between polls.
@@ -54,9 +54,9 @@ type State struct {
 }
 
 // DismissEntry remembers a notification the user dismissed locally so the
-// poll loop can suppress the "bounce-back" that occurs when GitHub's
-// notifications endpoint returns the just-dismissed thread for up to
-// ~60s before its server-side cache invalidates.
+// poll loop can suppress the "bounce-back" that occurs because GitHub's
+// /notifications endpoint with ?all=true keeps returning done threads
+// indefinitely (community bug #152852).
 //
 // UpdatedAt is the notification's updated_at at the moment of dismissal.
 // When a fresh poll yields a notification with the same ID whose
@@ -64,7 +64,8 @@ type State struct {
 // same thread (newer updated_at) bypasses the filter.
 //
 // DismissedAt is the local wall-clock time of the dismissal, used by
-// PruneDismissed to forget entries that GitHub has clearly forgotten too.
+// PruneDismissedAbsent as a minimum-age guard so a poll-just-after-dismiss
+// can't accidentally prune the entry before GitHub starts echoing it.
 type DismissEntry struct {
 	UpdatedAt   time.Time `json:"updated_at"`
 	DismissedAt time.Time `json:"dismissed_at"`
@@ -161,19 +162,27 @@ func (s *State) IsDismissed(id string, updatedAt time.Time) bool {
 	return !updatedAt.After(e.UpdatedAt)
 }
 
-// PruneDismissed drops dismissal entries whose DismissedAt is older than
-// maxAge. By that point GitHub's server-side cache has invalidated and
-// the API itself will stop returning the dismissed item, so we don't
-// need a local record anymore.
-func (s *State) PruneDismissed(maxAge time.Duration) {
+// PruneDismissedAbsent drops dismissal entries whose ID is no longer in
+// the latest poll response, gated by minAge so we don't race a dismiss
+// against its first poll. Once GitHub stops echoing the thread, the local
+// guard has nothing to do, so we remove it.
+//
+// Time-based pruning doesn't work here: GitHub's ?all=true listing keeps
+// returning done threads indefinitely (community bug #152852), so there's
+// no fixed window after which the guard becomes redundant.
+func (s *State) PruneDismissedAbsent(present map[string]bool, minAge time.Duration) {
 	if s.DismissedNotifs == nil {
 		return
 	}
-	cutoff := time.Now().Add(-maxAge)
+	cutoff := time.Now().Add(-minAge)
 	for id, e := range s.DismissedNotifs {
-		if e.DismissedAt.Before(cutoff) {
-			delete(s.DismissedNotifs, id)
+		if present[id] {
+			continue
 		}
+		if e.DismissedAt.After(cutoff) {
+			continue
+		}
+		delete(s.DismissedNotifs, id)
 	}
 }
 
@@ -193,11 +202,11 @@ func (s *State) Prune(seen map[int64]bool, olderThan time.Duration) {
 
 func statePath() (string, error) {
 	if x := os.Getenv("XDG_CONFIG_HOME"); x != "" {
-		return filepath.Join(x, "gha-monitor", "state.json"), nil
+		return filepath.Join(x, "gh-monitor", "state.json"), nil
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(home, ".config", "gha-monitor", "state.json"), nil
+	return filepath.Join(home, ".config", "gh-monitor", "state.json"), nil
 }

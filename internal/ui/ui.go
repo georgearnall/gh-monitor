@@ -11,9 +11,9 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/georgearnall/gha-monitor/internal/notifs"
-	"github.com/georgearnall/gha-monitor/internal/prs"
-	"github.com/georgearnall/gha-monitor/internal/runs"
+	"github.com/georgearnall/gh-monitor/internal/notifs"
+	"github.com/georgearnall/gh-monitor/internal/prs"
+	"github.com/georgearnall/gh-monitor/internal/runs"
 )
 
 const (
@@ -26,13 +26,13 @@ const (
 	// Appended to every printed line during in-place redraws so leftover
 	// characters from a previous, longer line don't dangle.
 	ansiClearEOL = "\x1b[K"
-	ansiReset      = "\x1b[0m"
-	ansiBold       = "\x1b[1m"
-	ansiDim    = "\x1b[2m"
-	ansiGreen  = "\x1b[32m"
-	ansiRed    = "\x1b[31m"
-	ansiYellow = "\x1b[33m"
-	ansiCyan   = "\x1b[36m"
+	ansiReset    = "\x1b[0m"
+	ansiBold     = "\x1b[1m"
+	ansiDim      = "\x1b[2m"
+	ansiGreen    = "\x1b[32m"
+	ansiRed      = "\x1b[31m"
+	ansiYellow   = "\x1b[33m"
+	ansiCyan     = "\x1b[36m"
 	// ansiPaleBlue is a 256-colour soft blue used for hyperlink labels,
 	// distinct from any of the status colours.
 	ansiPaleBlue = "\x1b[38;5;111m"
@@ -48,6 +48,93 @@ const (
 	ansiDefaultFg = "\x1b[39m"
 )
 
+// Cell is a sequence of plain-text or colour-coded fragments. Render picks
+// the right colour closer based on whether the row will be wrapped in an
+// outer dim later, so callers no longer have to choose between color() and
+// colorInsideDim() when building cell content.
+type Cell struct {
+	parts []cellPart
+}
+
+type cellPart struct {
+	text  string
+	color string // empty == plain text
+}
+
+func NewCell() *Cell                 { return &Cell{} }
+func (c *Cell) Plain(s string) *Cell { c.parts = append(c.parts, cellPart{text: s}); return c }
+func (c *Cell) Colored(code, s string) *Cell {
+	c.parts = append(c.parts, cellPart{text: s, color: code})
+	return c
+}
+
+// Render returns the ANSI-encoded string for this cell. insideDim picks the
+// dim-safe closer (\x1b[39m) so an outer ansiDim wrap survives the span end.
+// When tty is false, all colour codes are skipped.
+func (c *Cell) Render(tty, insideDim bool) string {
+	var b strings.Builder
+	for _, p := range c.parts {
+		if !tty || p.color == "" {
+			b.WriteString(p.text)
+			continue
+		}
+		if insideDim {
+			b.WriteString(colorInsideDim(p.color, p.text, true))
+		} else {
+			b.WriteString(color(p.color, p.text, true))
+		}
+	}
+	return b.String()
+}
+
+// tableRow is one data row in a rendered panel. The repo column must be plain
+// text (no ANSI) so fitRepoColumn can measure and shrink it before styling.
+type tableRow struct {
+	cells []string
+	dim   bool // if true: wrap cells[1:] in ansiDim+ansiReset post-fit; skip styleRepoCell
+}
+
+// panelTable is the shared rendering pipeline for all three panels:
+//  1. fitRepoColumn (if repoColIdx >= 0)
+//  2. for each data row: either outer-dim all non-cursor cells, or styleRepoCell
+//  3. printAligned
+type panelTable struct {
+	headers    []string // already dim-styled via dimRow()
+	rows       []tableRow
+	repoColIdx int // -1 if no repo column
+	termWidth  int
+	tty        bool
+}
+
+func newPanelTable(headers []string, repoColIdx, termWidth int, tty bool) *panelTable {
+	return &panelTable{headers: headers, repoColIdx: repoColIdx, termWidth: termWidth, tty: tty}
+}
+
+func (t *panelTable) addRow(cells []string, dim bool) {
+	t.rows = append(t.rows, tableRow{cells: cells, dim: dim})
+}
+
+func (t *panelTable) render() {
+	raw := make([][]string, 0, len(t.rows)+1)
+	raw = append(raw, t.headers)
+	for _, r := range t.rows {
+		raw = append(raw, r.cells)
+	}
+	if t.repoColIdx >= 0 {
+		fitRepoColumn(raw, t.repoColIdx, t.termWidth)
+	}
+	for i, r := range t.rows {
+		if r.dim {
+			for j := 1; j < len(raw[i+1]); j++ {
+				raw[i+1][j] = ansiDim + raw[i+1][j] + ansiReset
+			}
+		} else if t.repoColIdx >= 0 && t.repoColIdx < len(raw[i+1]) {
+			raw[i+1][t.repoColIdx] = styleRepoCell(raw[i+1][t.repoColIdx], t.tty)
+		}
+	}
+	printAligned(raw)
+}
+
 type Snapshot struct {
 	Runs           []runs.Run
 	PRs            []prs.PR
@@ -61,9 +148,9 @@ type Snapshot struct {
 	RateLimit      int
 	PolledAt       time.Time
 	NextPollIn     time.Duration
-	TermWidth      int  // 0 = unknown / unconstrained
-	Stale          bool // rendering from disk cache, not fresh
-	Refreshing     bool // a background refresh is in flight
+	TermWidth      int    // 0 = unknown / unconstrained
+	Stale          bool   // rendering from disk cache, not fresh
+	Refreshing     bool   // a background refresh is in flight
 	BgErr          string // recent background-task error to surface in the footer
 }
 
@@ -117,13 +204,13 @@ func Render(snap Snapshot) {
 
 func windowTitleString(unread, active, failed int) string {
 	if unread > 0 {
-		return fmt.Sprintf("gha-monitor · %d unread · %d active · %d recent failures", unread, active, failed)
+		return fmt.Sprintf("gh-monitor · %d unread · %d active · %d recent failures", unread, active, failed)
 	}
-	return fmt.Sprintf("gha-monitor · %d active · %d recent failures", active, failed)
+	return fmt.Sprintf("gh-monitor · %d active · %d recent failures", active, failed)
 }
 
 func header(_ Snapshot, tty bool) {
-	title := "gha-monitor"
+	title := "gh-monitor"
 	if tty {
 		title = ansiBold + title + ansiReset
 	}
@@ -209,10 +296,11 @@ func unreadCount(ns []notifs.Notification) int {
 const notifsRepoCol = 3
 
 func writeNotifsTable(ns []notifs.Notification, focusedID string, tty bool, termWidth int) {
-	rows := make([][]string, 0, len(ns)+1)
-	rows = append(rows, dimRow([]string{"  ", "REASON", "TITLE", "REPO", "#", "AGE", "LINK"}, tty))
-	dimMask := make([]bool, len(ns)) // which data row should be dimmed post-fit
-	for i, n := range ns {
+	t := newPanelTable(
+		dimRow([]string{"  ", "REASON", "TITLE", "REPO", "#", "AGE", "LINK"}, tty),
+		notifsRepoCol, termWidth, tty,
+	)
+	for _, n := range ns {
 		link := n.URL
 		title := truncate(n.Title, 50)
 		if tty {
@@ -221,7 +309,7 @@ func writeNotifsTable(ns []notifs.Notification, focusedID string, tty bool, term
 				title = styleTickets(title)
 			} else {
 				// Read row: avoid inner SGR codes that would break the
-				// outer dim wrap applied below.
+				// outer dim wrap applied by panelTable.render().
 				link = hyperlink(n.URL, "open ↗")
 			}
 		}
@@ -229,118 +317,60 @@ func writeNotifsTable(ns []notifs.Notification, focusedID string, tty bool, term
 		if n.ID == focusedID {
 			cursor = color(ansiYellow, "▶", tty) + " "
 		}
-		rows = append(rows, []string{
+		t.addRow([]string{
 			cursor,
-			reasonCell(n, tty),
+			reasonCell(n).Render(tty, !n.Unread),
 			title,
-			n.Repo, // kept plain so shrinkRepo can parse the slash
+			n.Repo, // plain so shrinkRepo can parse the slash
 			fmt.Sprintf("#%d", n.PRNumber),
 			relativeAge(n.UpdatedAt),
 			link,
-		})
-		if !n.Unread && tty {
-			dimMask[i] = true
-		}
+		}, !n.Unread && tty)
 	}
-	fitRepoColumn(rows, notifsRepoCol, termWidth)
-	// Apply per-row dimming AFTER shrinking so shrinkRepo sees raw repo
-	// strings. Cursor (col 0) stays bright on dimmed rows. Unread rows
-	// also get the owner-dim treatment so the repo name pops.
-	for i, d := range dimMask {
-		if d {
-			for j := 1; j < len(rows[i+1]); j++ {
-				rows[i+1][j] = ansiDim + rows[i+1][j] + ansiReset
-			}
-			continue
-		}
-		rows[i+1][notifsRepoCol] = styleRepoCell(rows[i+1][notifsRepoCol], tty)
-	}
-	printAligned(rows)
+	t.render()
 }
 
-// reasonCell formats the notification reason. Unread items keep their colour;
-// read items return plain text so the caller can wrap the whole row in dim.
-func reasonCell(n notifs.Notification, tty bool) string {
-	// author/assign rows are usually the user's own PRs. Replace the
-	// uninformative "· own" with the PR state when we have it.
+// reasonCell builds a Cell for the notification reason column. The Render
+// call at the use site supplies tty and insideDim (= !n.Unread) so the
+// colour closer is chosen there rather than baked in here.
+func reasonCell(n notifs.Notification) *Cell {
 	if n.Reason == "author" || n.Reason == "assign" {
-		return stateCell(n.PRState, n.Unread, tty)
+		return stateCell(n.PRState)
 	}
-	// Choose the colour helper based on whether the row will be wrapped
-	// in outer dim later (read rows). colorInsideDim closes its colour
-	// span with default-fg so the wrap's dim attribute survives.
-	wrap := color
-	if !n.Unread {
-		wrap = colorInsideDim
-	}
+	c := NewCell()
 	switch n.Reason {
 	case "mention", "team_mention":
-		return wrap(ansiCyan, "@", tty) + " mention"
+		return c.Colored(ansiCyan, "@").Plain(" mention")
 	case "review_requested":
-		return wrap(ansiYellow, "◐", tty) + " review"
+		return c.Colored(ansiYellow, "◐").Plain(" review")
 	case "comment":
-		return wrap(ansiDim, "+", tty) + " comment"
+		return c.Colored(ansiDim, "+").Plain(" comment")
 	}
-	return wrap(ansiDim, "·", tty) + " " + n.Reason
+	return c.Colored(ansiDim, "·").Plain(" " + n.Reason)
 }
 
-// stateCell renders the PR state for an author/assign notification. The
-// icon is coloured for both read and unread rows; read rows use a
-// dim-safe colour closer so the outer row-dim wrap renders the icon as
-// a muted version of its colour and continues dimming the label text.
-func stateCell(state string, unread, tty bool) string {
+// stateCell builds a Cell for the PR state icon + label. The Render call
+// at the use site passes insideDim=!unread so read rows get the dim-safe
+// colour closer and unread rows get the full reset.
+func stateCell(state notifs.PRState) *Cell {
 	icon, label, col := stateGlyph(state)
-	if !tty {
-		return icon + " " + label
-	}
-	if unread {
-		return color(col, icon, tty) + " " + label
-	}
-	return colorInsideDim(col, icon, tty) + " " + label
+	return NewCell().Colored(col, icon).Plain(" " + label)
 }
 
 // stateGlyph maps a PR state to (icon, label, colour). Falls back to the
 // dim "· own" tuple when the state is unknown / not yet fetched.
-func stateGlyph(state string) (icon, label, col string) {
+func stateGlyph(state notifs.PRState) (icon, label, col string) {
 	switch state {
-	case "OPEN":
+	case notifs.PRStateOpen:
 		return "●", "open", ansiGreen
-	case "MERGED":
+	case notifs.PRStateMerged:
 		return "●", "merged", ansiPurple
-	case "CLOSED":
+	case notifs.PRStateClosed:
 		return "●", "closed", ansiRed
-	case "DRAFT":
+	case notifs.PRStateDraft:
 		return "○", "draft", ansiDim
 	}
 	return "·", "own", ansiDim
-}
-
-func reasonGlyph(reason string) string {
-	switch reason {
-	case "mention", "team_mention":
-		return "@"
-	case "review_requested":
-		return "◐"
-	case "comment":
-		return "+"
-	case "author", "assign":
-		return "·"
-	}
-	return "·"
-}
-
-func reasonLabel(reason string) string {
-	switch reason {
-	case "mention", "team_mention":
-		return "mention"
-	case "review_requested":
-		return "review"
-	case "comment":
-		return "comment"
-	case "author", "assign":
-		return "own"
-	}
-	return reason
 }
 
 // prRepoCol is the column index of REPO inside writePRTable's rows.
@@ -353,21 +383,19 @@ const prTitleMax = 55
 func writePRTable(ps []prs.PR, focusedKey string, tty bool, termWidth int) {
 	// Adaptive fit: try full layout first; if it overflows, drop BRANCH;
 	// if it still overflows, also drop the trailing "pass"/"fail"/"wait"
-	// status word. The repo column is shrunk last by fitRepoColumn.
-	rows := buildPRRows(ps, focusedKey, tty, true /*branch*/, false /*compact status*/)
-	if termWidth > 0 && tableWidth(rows) > termWidth {
-		rows = buildPRRows(ps, focusedKey, tty, false, false)
-		if tableWidth(rows) > termWidth {
-			rows = buildPRRows(ps, focusedKey, tty, false, true)
+	// status word. The repo column is shrunk last by panelTable.render().
+	raw := buildPRRows(ps, focusedKey, tty, true /*branch*/, false /*compact status*/)
+	if termWidth > 0 && tableWidth(raw) > termWidth {
+		raw = buildPRRows(ps, focusedKey, tty, false, false)
+		if tableWidth(raw) > termWidth {
+			raw = buildPRRows(ps, focusedKey, tty, false, true)
 		}
 	}
-	fitRepoColumn(rows, prRepoCol, termWidth)
-	for r := 1; r < len(rows); r++ {
-		if prRepoCol < len(rows[r]) {
-			rows[r][prRepoCol] = styleRepoCell(rows[r][prRepoCol], tty)
-		}
+	t := newPanelTable(raw[0], prRepoCol, termWidth, tty)
+	for _, r := range raw[1:] {
+		t.addRow(r, false)
 	}
-	printAligned(rows)
+	t.render()
 }
 
 func buildPRRows(ps []prs.PR, focusedKey string, tty, includeBranch, compactStatus bool) [][]string {
@@ -392,8 +420,8 @@ func buildPRRows(ps []prs.PR, focusedKey string, tty, includeBranch, compactStat
 		}
 		row := []string{
 			cursor,
-			prStatusCell(p, tty, compactStatus),
-			prReviewCell(p, tty),
+			prStatusCell(p, compactStatus).Render(tty, false),
+			prReviewCell(p).Render(tty, false),
 			title,
 			p.Repo,
 			fmt.Sprintf("#%d", p.Number),
@@ -407,34 +435,31 @@ func buildPRRows(ps []prs.PR, focusedKey string, tty, includeBranch, compactStat
 	return rows
 }
 
-func prReviewCell(p prs.PR, tty bool) string {
-	var label string
+func prReviewCell(p prs.PR) *Cell {
+	c := NewCell()
 	switch p.ReviewDecision {
 	case "APPROVED":
-		label = color(ansiGreen, "✓", tty) + " approved"
+		c.Colored(ansiGreen, "✓").Plain(" approved")
 	case "CHANGES_REQUESTED":
-		label = color(ansiRed, "✗", tty) + " changes"
+		c.Colored(ansiRed, "✗").Plain(" changes")
 	case "REVIEW_REQUIRED":
-		label = color(ansiDim, "·", tty) + " blocked"
+		c.Colored(ansiDim, "·").Plain(" blocked")
 	default:
 		if p.ReviewCount > 0 {
-			label = color(ansiYellow, "◐", tty) + " reviewed"
-		} else {
-			// No decision and no reviewers yet: render nothing rather
-			// than a "no review" placeholder that just wastes column.
-			label = ""
+			c.Colored(ansiYellow, "◐").Plain(" reviewed")
 		}
+		// No decision and no reviewers yet: empty cell (no placeholder).
 	}
 	if p.CommentCount > 0 {
-		if label != "" {
-			label += " "
+		if len(c.parts) > 0 {
+			c.Plain(" ")
 		}
-		label += dim(fmt.Sprintf("+%d", p.CommentCount), tty)
+		c.Colored(ansiDim, fmt.Sprintf("+%d", p.CommentCount))
 	}
-	return label
+	return c
 }
 
-func prStatusCell(p prs.PR, tty, compact bool) string {
+func prStatusCell(p prs.PR, compact bool) *Cell {
 	failed := func() string {
 		if compact {
 			return fmt.Sprintf(" %d/%d", p.Failing, p.Total)
@@ -454,29 +479,33 @@ func prStatusCell(p prs.PR, tty, compact bool) string {
 		return fmt.Sprintf(" %d/%d pass", p.Passing, p.Total)
 	}
 
+	c := NewCell()
 	switch {
 	case p.IsFailing():
-		return color(ansiRed, "✗", tty) + failed()
+		return c.Colored(ansiRed, "✗").Plain(failed())
 	case p.IsPending():
-		return color(ansiYellow, "◐", tty) + pending()
+		return c.Colored(ansiYellow, "◐").Plain(pending())
 	case p.IsPassing():
-		return color(ansiGreen, "✓", tty) + passed()
+		return c.Colored(ansiGreen, "✓").Plain(passed())
 	case p.Total == 0:
-		if compact {
-			return color(ansiDim, "·", tty)
+		c.Colored(ansiDim, "·")
+		if !compact {
+			c.Plain(" none")
 		}
-		return color(ansiDim, "·", tty) + " none"
+		return c
 	}
-	return color(ansiDim, "·", tty) + " " + p.State
+	return c.Colored(ansiDim, "·").Plain(" " + p.State)
 }
 
 // runsRepoCol is the column index of REPO inside writeTable's rows.
 const runsRepoCol = 3
 
-func writeTable(rows []runs.Run, focusedID string, tty bool, termWidth int) {
-	out := make([][]string, 0, len(rows)+1)
-	out = append(out, dimRow([]string{"  ", "STATUS", "WORKFLOW", "REPO", "BRANCH", "AGE", "LINK"}, tty))
-	for _, r := range rows {
+func writeTable(rs []runs.Run, focusedID string, tty bool, termWidth int) {
+	t := newPanelTable(
+		dimRow([]string{"  ", "STATUS", "WORKFLOW", "REPO", "BRANCH", "AGE", "LINK"}, tty),
+		runsRepoCol, termWidth, tty,
+	)
+	for _, r := range rs {
 		link := r.URL
 		if tty {
 			link = coloredHyperlink(r.URL, "open ↗")
@@ -485,23 +514,17 @@ func writeTable(rows []runs.Run, focusedID string, tty bool, termWidth int) {
 		if focusedID != "" && strconv.FormatInt(r.ID, 10) == focusedID {
 			cursor = color(ansiYellow, "▶", tty) + " "
 		}
-		out = append(out, []string{
+		t.addRow([]string{
 			cursor,
-			statusCell(r, tty),
+			statusCell(r).Render(tty, false),
 			truncate(r.WorkflowName, 30),
 			r.Repo,
 			truncate(r.Branch, 30),
 			ageString(r),
 			link,
-		})
+		}, false)
 	}
-	fitRepoColumn(out, runsRepoCol, termWidth)
-	for r := 1; r < len(out); r++ {
-		if runsRepoCol < len(out[r]) {
-			out[r][runsRepoCol] = styleRepoCell(out[r][runsRepoCol], tty)
-		}
-	}
-	printAligned(out)
+	t.render()
 }
 
 // TermWidth returns the terminal's column count by shelling out to
@@ -752,19 +775,20 @@ func countByOutcome(rs []runs.Run) (active, failed int) {
 	return
 }
 
-func statusCell(r runs.Run, tty bool) string {
+func statusCell(r runs.Run) *Cell {
+	c := NewCell()
 	if r.IsActive() {
-		return color(ansiYellow, "●", tty) + " " + r.Status
+		return c.Colored(ansiYellow, "●").Plain(" " + r.Status)
 	}
 	switch r.Conclusion {
 	case "success":
-		return color(ansiGreen, "✓", tty) + " success"
+		return c.Colored(ansiGreen, "✓").Plain(" success")
 	case "failure", "timed_out", "startup_failure":
-		return color(ansiRed, "✗", tty) + " " + r.Conclusion
+		return c.Colored(ansiRed, "✗").Plain(" " + r.Conclusion)
 	case "cancelled", "skipped":
-		return color(ansiDim, "·", tty) + " " + r.Conclusion
+		return c.Colored(ansiDim, "·").Plain(" " + r.Conclusion)
 	}
-	return r.Conclusion
+	return c.Plain(r.Conclusion)
 }
 
 func ageString(r runs.Run) string {

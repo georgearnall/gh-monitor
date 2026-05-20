@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/georgearnall/gha-monitor/internal/ghclient"
+	"github.com/georgearnall/gh-monitor/internal/ghclient"
 )
 
 func TestPR_IsPredicates(t *testing.T) {

@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/georgearnall/gha-monitor/internal/discovery"
-	"github.com/georgearnall/gha-monitor/internal/ghclient"
+	"github.com/georgearnall/gh-monitor/internal/discovery"
+	"github.com/georgearnall/gh-monitor/internal/ghclient"
 )
 
 func TestRun_IsActive(t *testing.T) {

@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/georgearnall/gha-monitor/internal/ghclient"
+	"github.com/georgearnall/gh-monitor/internal/ghclient"
 )
 
 func TestMergeRepos(t *testing.T) {
