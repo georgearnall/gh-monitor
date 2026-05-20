@@ -8,9 +8,9 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/georgearnall/gha-monitor/internal/notifs"
-	"github.com/georgearnall/gha-monitor/internal/prs"
-	"github.com/georgearnall/gha-monitor/internal/runs"
+	"github.com/georgearnall/gh-monitor/internal/notifs"
+	"github.com/georgearnall/gh-monitor/internal/prs"
+	"github.com/georgearnall/gh-monitor/internal/runs"
 )
 
 func TestVisibleWidth(t *testing.T) {
@@ -505,9 +505,9 @@ func TestWindowTitleString(t *testing.T) {
 		unread, active, failed int
 		want                   string
 	}{
-		{0, 0, 0, "gha-monitor · 0 active · 0 recent failures"},
-		{0, 2, 1, "gha-monitor · 2 active · 1 recent failures"},
-		{3, 2, 1, "gha-monitor · 3 unread · 2 active · 1 recent failures"},
+		{0, 0, 0, "gh-monitor · 0 active · 0 recent failures"},
+		{0, 2, 1, "gh-monitor · 2 active · 1 recent failures"},
+		{3, 2, 1, "gh-monitor · 3 unread · 2 active · 1 recent failures"},
 	}
 	for _, c := range cases {
 		got := windowTitleString(c.unread, c.active, c.failed)

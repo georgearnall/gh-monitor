@@ -7,8 +7,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/georgearnall/gha-monitor/internal/discovery"
-	"github.com/georgearnall/gha-monitor/internal/ghclient"
+	"github.com/georgearnall/gh-monitor/internal/discovery"
+	"github.com/georgearnall/gh-monitor/internal/ghclient"
 )
 
 type stringSet map[string]bool
@@ -33,7 +33,7 @@ func (s *stringSet) Set(v string) error {
 }
 
 func main() {
-	fs := flag.NewFlagSet("gha-monitor", flag.ExitOnError)
+	fs := flag.NewFlagSet("gh-monitor", flag.ExitOnError)
 	cfg := watchConfig{
 		baseInterval:   60 * time.Second,
 		activeInterval: 20 * time.Second,

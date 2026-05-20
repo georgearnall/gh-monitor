@@ -1,4 +1,4 @@
-module github.com/georgearnall/gha-monitor
+module github.com/georgearnall/gh-monitor
 
 go 1.26.3
 

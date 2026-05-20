@@ -6,9 +6,9 @@ import (
 	"os"
 	"time"
 
-	"github.com/georgearnall/gha-monitor/internal/ghclient"
-	"github.com/georgearnall/gha-monitor/internal/notifs"
-	"github.com/georgearnall/gha-monitor/internal/state"
+	"github.com/georgearnall/gh-monitor/internal/ghclient"
+	"github.com/georgearnall/gh-monitor/internal/notifs"
+	"github.com/georgearnall/gh-monitor/internal/state"
 )
 
 // dismissReq is a request to DELETE /notifications/threads/{id}. We enqueue

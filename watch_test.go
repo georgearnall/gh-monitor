@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/georgearnall/gha-monitor/internal/discovery"
-	"github.com/georgearnall/gha-monitor/internal/ghclient"
+	"github.com/georgearnall/gh-monitor/internal/discovery"
+	"github.com/georgearnall/gh-monitor/internal/ghclient"
 )
 
 // discoveryServer returns a test HTTP server that handles the three discovery

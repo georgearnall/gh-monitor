@@ -6,10 +6,10 @@ import (
 	"os/exec"
 	"strconv"
 
-	"github.com/georgearnall/gha-monitor/internal/prs"
-	"github.com/georgearnall/gha-monitor/internal/runs"
-	"github.com/georgearnall/gha-monitor/internal/state"
-	"github.com/georgearnall/gha-monitor/internal/ui"
+	"github.com/georgearnall/gh-monitor/internal/prs"
+	"github.com/georgearnall/gh-monitor/internal/runs"
+	"github.com/georgearnall/gh-monitor/internal/state"
+	"github.com/georgearnall/gh-monitor/internal/ui"
 )
 
 // focusTarget identifies one focused row across any of the three panels.

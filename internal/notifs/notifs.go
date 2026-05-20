@@ -9,7 +9,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/georgearnall/gha-monitor/internal/ghclient"
+	"github.com/georgearnall/gh-monitor/internal/ghclient"
 	"golang.org/x/sync/errgroup"
 )
 

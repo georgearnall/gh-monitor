@@ -5,9 +5,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/georgearnall/gha-monitor/internal/discovery"
-	"github.com/georgearnall/gha-monitor/internal/ghclient"
-	"github.com/georgearnall/gha-monitor/internal/state"
+	"github.com/georgearnall/gh-monitor/internal/discovery"
+	"github.com/georgearnall/gh-monitor/internal/ghclient"
+	"github.com/georgearnall/gh-monitor/internal/state"
 )
 
 func mkState(t *testing.T) *state.State {

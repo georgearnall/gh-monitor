@@ -161,8 +161,8 @@ Discovery re-runs every 5 minutes (configurable via `--repo-refresh`).
 
 ## State
 
-Persisted to `$XDG_CONFIG_HOME/gha-monitor/state.json` (or
-`~/.config/gha-monitor/state.json`). Stores:
+Persisted to `$XDG_CONFIG_HOME/gh-monitor/state.json` (or
+`~/.config/gh-monitor/state.json`). Stores:
 
 - Last rendered tables (so warm starts paint instantly).
 - ETag cache (so warm cold starts mostly hit 304s and consume ~2

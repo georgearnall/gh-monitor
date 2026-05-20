@@ -8,14 +8,14 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/georgearnall/gha-monitor/internal/discovery"
-	"github.com/georgearnall/gha-monitor/internal/ghclient"
-	"github.com/georgearnall/gha-monitor/internal/notifs"
-	"github.com/georgearnall/gha-monitor/internal/notify"
-	"github.com/georgearnall/gha-monitor/internal/prs"
-	"github.com/georgearnall/gha-monitor/internal/runs"
-	"github.com/georgearnall/gha-monitor/internal/state"
-	"github.com/georgearnall/gha-monitor/internal/ui"
+	"github.com/georgearnall/gh-monitor/internal/discovery"
+	"github.com/georgearnall/gh-monitor/internal/ghclient"
+	"github.com/georgearnall/gh-monitor/internal/notifs"
+	"github.com/georgearnall/gh-monitor/internal/notify"
+	"github.com/georgearnall/gh-monitor/internal/prs"
+	"github.com/georgearnall/gh-monitor/internal/runs"
+	"github.com/georgearnall/gh-monitor/internal/state"
+	"github.com/georgearnall/gh-monitor/internal/ui"
 	"golang.org/x/sync/errgroup"
 )
 

@@ -11,9 +11,9 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/georgearnall/gha-monitor/internal/notifs"
-	"github.com/georgearnall/gha-monitor/internal/prs"
-	"github.com/georgearnall/gha-monitor/internal/runs"
+	"github.com/georgearnall/gh-monitor/internal/notifs"
+	"github.com/georgearnall/gh-monitor/internal/prs"
+	"github.com/georgearnall/gh-monitor/internal/runs"
 )
 
 const (
@@ -204,13 +204,13 @@ func Render(snap Snapshot) {
 
 func windowTitleString(unread, active, failed int) string {
 	if unread > 0 {
-		return fmt.Sprintf("gha-monitor · %d unread · %d active · %d recent failures", unread, active, failed)
+		return fmt.Sprintf("gh-monitor · %d unread · %d active · %d recent failures", unread, active, failed)
 	}
-	return fmt.Sprintf("gha-monitor · %d active · %d recent failures", active, failed)
+	return fmt.Sprintf("gh-monitor · %d active · %d recent failures", active, failed)
 }
 
 func header(_ Snapshot, tty bool) {
-	title := "gha-monitor"
+	title := "gh-monitor"
 	if tty {
 		title = ansiBold + title + ansiReset
 	}

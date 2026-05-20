@@ -4,7 +4,7 @@ import (
 	"sort"
 	"time"
 
-	"github.com/georgearnall/gha-monitor/internal/ghclient"
+	"github.com/georgearnall/gh-monitor/internal/ghclient"
 )
 
 type PR struct {
