@@ -84,6 +84,54 @@ func (c *Cell) Render(tty, insideDim bool) string {
 	return b.String()
 }
 
+// tableRow is one data row in a rendered panel. The repo column must be plain
+// text (no ANSI) so fitRepoColumn can measure and shrink it before styling.
+type tableRow struct {
+	cells []string
+	dim   bool // if true: wrap cells[1:] in ansiDim+ansiReset post-fit; skip styleRepoCell
+}
+
+// panelTable is the shared rendering pipeline for all three panels:
+//   1. fitRepoColumn (if repoColIdx >= 0)
+//   2. for each data row: either outer-dim all non-cursor cells, or styleRepoCell
+//   3. printAligned
+type panelTable struct {
+	headers    []string // already dim-styled via dimRow()
+	rows       []tableRow
+	repoColIdx int // -1 if no repo column
+	termWidth  int
+	tty        bool
+}
+
+func newPanelTable(headers []string, repoColIdx, termWidth int, tty bool) *panelTable {
+	return &panelTable{headers: headers, repoColIdx: repoColIdx, termWidth: termWidth, tty: tty}
+}
+
+func (t *panelTable) addRow(cells []string, dim bool) {
+	t.rows = append(t.rows, tableRow{cells: cells, dim: dim})
+}
+
+func (t *panelTable) render() {
+	raw := make([][]string, 0, len(t.rows)+1)
+	raw = append(raw, t.headers)
+	for _, r := range t.rows {
+		raw = append(raw, r.cells)
+	}
+	if t.repoColIdx >= 0 {
+		fitRepoColumn(raw, t.repoColIdx, t.termWidth)
+	}
+	for i, r := range t.rows {
+		if r.dim {
+			for j := 1; j < len(raw[i+1]); j++ {
+				raw[i+1][j] = ansiDim + raw[i+1][j] + ansiReset
+			}
+		} else if t.repoColIdx >= 0 && t.repoColIdx < len(raw[i+1]) {
+			raw[i+1][t.repoColIdx] = styleRepoCell(raw[i+1][t.repoColIdx], t.tty)
+		}
+	}
+	printAligned(raw)
+}
+
 type Snapshot struct {
 	Runs           []runs.Run
 	PRs            []prs.PR
@@ -245,10 +293,11 @@ func unreadCount(ns []notifs.Notification) int {
 const notifsRepoCol = 3
 
 func writeNotifsTable(ns []notifs.Notification, focusedID string, tty bool, termWidth int) {
-	rows := make([][]string, 0, len(ns)+1)
-	rows = append(rows, dimRow([]string{"  ", "REASON", "TITLE", "REPO", "#", "AGE", "LINK"}, tty))
-	dimMask := make([]bool, len(ns)) // which data row should be dimmed post-fit
-	for i, n := range ns {
+	t := newPanelTable(
+		dimRow([]string{"  ", "REASON", "TITLE", "REPO", "#", "AGE", "LINK"}, tty),
+		notifsRepoCol, termWidth, tty,
+	)
+	for _, n := range ns {
 		link := n.URL
 		title := truncate(n.Title, 50)
 		if tty {
@@ -257,7 +306,7 @@ func writeNotifsTable(ns []notifs.Notification, focusedID string, tty bool, term
 				title = styleTickets(title)
 			} else {
 				// Read row: avoid inner SGR codes that would break the
-				// outer dim wrap applied below.
+				// outer dim wrap applied by panelTable.render().
 				link = hyperlink(n.URL, "open ↗")
 			}
 		}
@@ -265,33 +314,17 @@ func writeNotifsTable(ns []notifs.Notification, focusedID string, tty bool, term
 		if n.ID == focusedID {
 			cursor = color(ansiYellow, "▶", tty) + " "
 		}
-		rows = append(rows, []string{
+		t.addRow([]string{
 			cursor,
 			reasonCell(n).Render(tty, !n.Unread),
 			title,
-			n.Repo, // kept plain so shrinkRepo can parse the slash
+			n.Repo, // plain so shrinkRepo can parse the slash
 			fmt.Sprintf("#%d", n.PRNumber),
 			relativeAge(n.UpdatedAt),
 			link,
-		})
-		if !n.Unread && tty {
-			dimMask[i] = true
-		}
+		}, !n.Unread && tty)
 	}
-	fitRepoColumn(rows, notifsRepoCol, termWidth)
-	// Apply per-row dimming AFTER shrinking so shrinkRepo sees raw repo
-	// strings. Cursor (col 0) stays bright on dimmed rows. Unread rows
-	// also get the owner-dim treatment so the repo name pops.
-	for i, d := range dimMask {
-		if d {
-			for j := 1; j < len(rows[i+1]); j++ {
-				rows[i+1][j] = ansiDim + rows[i+1][j] + ansiReset
-			}
-			continue
-		}
-		rows[i+1][notifsRepoCol] = styleRepoCell(rows[i+1][notifsRepoCol], tty)
-	}
-	printAligned(rows)
+	t.render()
 }
 
 // reasonCell builds a Cell for the notification reason column. The Render
@@ -347,21 +380,19 @@ const prTitleMax = 55
 func writePRTable(ps []prs.PR, focusedKey string, tty bool, termWidth int) {
 	// Adaptive fit: try full layout first; if it overflows, drop BRANCH;
 	// if it still overflows, also drop the trailing "pass"/"fail"/"wait"
-	// status word. The repo column is shrunk last by fitRepoColumn.
-	rows := buildPRRows(ps, focusedKey, tty, true /*branch*/, false /*compact status*/)
-	if termWidth > 0 && tableWidth(rows) > termWidth {
-		rows = buildPRRows(ps, focusedKey, tty, false, false)
-		if tableWidth(rows) > termWidth {
-			rows = buildPRRows(ps, focusedKey, tty, false, true)
+	// status word. The repo column is shrunk last by panelTable.render().
+	raw := buildPRRows(ps, focusedKey, tty, true /*branch*/, false /*compact status*/)
+	if termWidth > 0 && tableWidth(raw) > termWidth {
+		raw = buildPRRows(ps, focusedKey, tty, false, false)
+		if tableWidth(raw) > termWidth {
+			raw = buildPRRows(ps, focusedKey, tty, false, true)
 		}
 	}
-	fitRepoColumn(rows, prRepoCol, termWidth)
-	for r := 1; r < len(rows); r++ {
-		if prRepoCol < len(rows[r]) {
-			rows[r][prRepoCol] = styleRepoCell(rows[r][prRepoCol], tty)
-		}
+	t := newPanelTable(raw[0], prRepoCol, termWidth, tty)
+	for _, r := range raw[1:] {
+		t.addRow(r, false)
 	}
-	printAligned(rows)
+	t.render()
 }
 
 func buildPRRows(ps []prs.PR, focusedKey string, tty, includeBranch, compactStatus bool) [][]string {
@@ -466,10 +497,12 @@ func prStatusCell(p prs.PR, compact bool) *Cell {
 // runsRepoCol is the column index of REPO inside writeTable's rows.
 const runsRepoCol = 3
 
-func writeTable(rows []runs.Run, focusedID string, tty bool, termWidth int) {
-	out := make([][]string, 0, len(rows)+1)
-	out = append(out, dimRow([]string{"  ", "STATUS", "WORKFLOW", "REPO", "BRANCH", "AGE", "LINK"}, tty))
-	for _, r := range rows {
+func writeTable(rs []runs.Run, focusedID string, tty bool, termWidth int) {
+	t := newPanelTable(
+		dimRow([]string{"  ", "STATUS", "WORKFLOW", "REPO", "BRANCH", "AGE", "LINK"}, tty),
+		runsRepoCol, termWidth, tty,
+	)
+	for _, r := range rs {
 		link := r.URL
 		if tty {
 			link = coloredHyperlink(r.URL, "open ↗")
@@ -478,7 +511,7 @@ func writeTable(rows []runs.Run, focusedID string, tty bool, termWidth int) {
 		if focusedID != "" && strconv.FormatInt(r.ID, 10) == focusedID {
 			cursor = color(ansiYellow, "▶", tty) + " "
 		}
-		out = append(out, []string{
+		t.addRow([]string{
 			cursor,
 			statusCell(r).Render(tty, false),
 			truncate(r.WorkflowName, 30),
@@ -486,15 +519,9 @@ func writeTable(rows []runs.Run, focusedID string, tty bool, termWidth int) {
 			truncate(r.Branch, 30),
 			ageString(r),
 			link,
-		})
+		}, false)
 	}
-	fitRepoColumn(out, runsRepoCol, termWidth)
-	for r := 1; r < len(out); r++ {
-		if runsRepoCol < len(out[r]) {
-			out[r][runsRepoCol] = styleRepoCell(out[r][runsRepoCol], tty)
-		}
-	}
-	printAligned(out)
+	t.render()
 }
 
 // TermWidth returns the terminal's column count by shelling out to
