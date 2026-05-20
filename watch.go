@@ -307,7 +307,18 @@ func applyResult(st *state.State, cfg *watchConfig, res pollResult) {
 		st.LastPRs = res.PRs
 	}
 	if res.NotifErr == nil && res.Notifs != nil {
-		st.PruneDismissed(10 * time.Minute)
+		// Self-healing dismiss prune: drop guards whose ID is no longer
+		// in GitHub's response. GitHub keeps echoing done threads
+		// indefinitely via ?all=true (community bug #152852), so any
+		// fixed time window is wrong; "until GitHub stops echoing it"
+		// is the only reliable signal. The 60s floor protects entries
+		// just added from a poll that happened before GitHub started
+		// echoing them.
+		present := make(map[string]bool, len(res.Notifs))
+		for _, n := range res.Notifs {
+			present[n.ID] = true
+		}
+		st.PruneDismissedAbsent(present, 60*time.Second)
 		filtered := make([]notifs.Notification, 0, len(res.Notifs))
 		for _, n := range res.Notifs {
 			if st.IsDismissed(n.ID, n.UpdatedAt) {
