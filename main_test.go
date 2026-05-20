@@ -68,8 +68,7 @@ func TestFilterExcluded_NoExclusions(t *testing.T) {
 	}
 }
 
-func TestWatchConfig_NextInterval_PreservesRateLimitedAsErr(t *testing.T) {
-	// Sanity: ghclient.AsRateLimited does not recognise a plain error.
+func TestAsRateLimited_ReturnsFalseForPlainError(t *testing.T) {
 	err := errors.New("plain")
 	if _, ok := ghclient.AsRateLimited(err); ok {
 		t.Errorf("AsRateLimited returned true for non-RateLimitedError")

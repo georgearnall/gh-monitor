@@ -69,11 +69,13 @@ func dismissWithRetry(ctx context.Context, client *ghclient.Client, id string) e
 		if !shouldRetryDismiss(err) {
 			return err
 		}
-		wait := dismissBackoff(attempt, err)
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(wait):
+		if attempt < dismissMaxAttempts-1 {
+			wait := dismissBackoff(attempt, err)
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(wait):
+			}
 		}
 	}
 	return lastErr

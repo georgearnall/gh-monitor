@@ -26,13 +26,13 @@ const (
 	// Appended to every printed line during in-place redraws so leftover
 	// characters from a previous, longer line don't dangle.
 	ansiClearEOL = "\x1b[K"
-	ansiReset      = "\x1b[0m"
-	ansiBold       = "\x1b[1m"
-	ansiDim    = "\x1b[2m"
-	ansiGreen  = "\x1b[32m"
-	ansiRed    = "\x1b[31m"
-	ansiYellow = "\x1b[33m"
-	ansiCyan   = "\x1b[36m"
+	ansiReset    = "\x1b[0m"
+	ansiBold     = "\x1b[1m"
+	ansiDim      = "\x1b[2m"
+	ansiGreen    = "\x1b[32m"
+	ansiRed      = "\x1b[31m"
+	ansiYellow   = "\x1b[33m"
+	ansiCyan     = "\x1b[36m"
 	// ansiPaleBlue is a 256-colour soft blue used for hyperlink labels,
 	// distinct from any of the status colours.
 	ansiPaleBlue = "\x1b[38;5;111m"
@@ -61,9 +61,12 @@ type cellPart struct {
 	color string // empty == plain text
 }
 
-func NewCell() *Cell                              { return &Cell{} }
-func (c *Cell) Plain(s string) *Cell             { c.parts = append(c.parts, cellPart{text: s}); return c }
-func (c *Cell) Colored(code, s string) *Cell     { c.parts = append(c.parts, cellPart{text: s, color: code}); return c }
+func NewCell() *Cell                 { return &Cell{} }
+func (c *Cell) Plain(s string) *Cell { c.parts = append(c.parts, cellPart{text: s}); return c }
+func (c *Cell) Colored(code, s string) *Cell {
+	c.parts = append(c.parts, cellPart{text: s, color: code})
+	return c
+}
 
 // Render returns the ANSI-encoded string for this cell. insideDim picks the
 // dim-safe closer (\x1b[39m) so an outer ansiDim wrap survives the span end.
@@ -92,9 +95,9 @@ type tableRow struct {
 }
 
 // panelTable is the shared rendering pipeline for all three panels:
-//   1. fitRepoColumn (if repoColIdx >= 0)
-//   2. for each data row: either outer-dim all non-cursor cells, or styleRepoCell
-//   3. printAligned
+//  1. fitRepoColumn (if repoColIdx >= 0)
+//  2. for each data row: either outer-dim all non-cursor cells, or styleRepoCell
+//  3. printAligned
 type panelTable struct {
 	headers    []string // already dim-styled via dimRow()
 	rows       []tableRow
@@ -145,9 +148,9 @@ type Snapshot struct {
 	RateLimit      int
 	PolledAt       time.Time
 	NextPollIn     time.Duration
-	TermWidth      int  // 0 = unknown / unconstrained
-	Stale          bool // rendering from disk cache, not fresh
-	Refreshing     bool // a background refresh is in flight
+	TermWidth      int    // 0 = unknown / unconstrained
+	Stale          bool   // rendering from disk cache, not fresh
+	Refreshing     bool   // a background refresh is in flight
 	BgErr          string // recent background-task error to surface in the footer
 }
 
