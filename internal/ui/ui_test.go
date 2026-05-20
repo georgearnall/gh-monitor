@@ -338,17 +338,17 @@ func TestReasonCell_PlainWhenNotTTY_Unread(t *testing.T) {
 
 func TestReasonCell_AuthorWithStateShowsState(t *testing.T) {
 	cases := []struct {
-		state string
+		state notifs.PRState
 		want  string
 	}{
-		{"OPEN", "● open"},
-		{"MERGED", "● merged"},
-		{"CLOSED", "● closed"},
-		{"DRAFT", "○ draft"},
+		{notifs.PRStateOpen, "● open"},
+		{notifs.PRStateMerged, "● merged"},
+		{notifs.PRStateClosed, "● closed"},
+		{notifs.PRStateDraft, "○ draft"},
 		{"", "· own"}, // unknown / not yet fetched
 	}
 	for _, c := range cases {
-		t.Run(c.state, func(t *testing.T) {
+		t.Run(string(c.state), func(t *testing.T) {
 			got := reasonCell(notifs.Notification{Reason: "author", Unread: true, PRState: c.state}, false)
 			if got != c.want {
 				t.Errorf("reasonCell(author, state=%q) = %q, want %q", c.state, got, c.want)
@@ -364,28 +364,28 @@ func TestReasonCell_AuthorWithStateShowsState(t *testing.T) {
 
 func TestStateCell_ColoursUnreadAndRead(t *testing.T) {
 	// Unread: full reset closer (icon stands fully bright).
-	got := stateCell("OPEN", true, true)
+	got := stateCell(notifs.PRStateOpen, true, true)
 	if !strings.Contains(got, ansiGreen+"●"+ansiReset) {
 		t.Errorf("unread OPEN should close with full reset; got %q", got)
 	}
-	got = stateCell("MERGED", true, true)
+	got = stateCell(notifs.PRStateMerged, true, true)
 	if !strings.Contains(got, ansiPurple+"●"+ansiReset) {
 		t.Errorf("unread MERGED should close with full reset; got %q", got)
 	}
 
 	// Read: dim-safe closer (default-fg). Icon stays coloured under the
 	// outer dim wrap; dim survives the span end so " open" continues dim.
-	got = stateCell("OPEN", false, true)
+	got = stateCell(notifs.PRStateOpen, false, true)
 	if !strings.Contains(got, ansiGreen+"●"+ansiDefaultFg) {
 		t.Errorf("read OPEN should close with default-fg; got %q", got)
 	}
-	got = stateCell("MERGED", false, true)
+	got = stateCell(notifs.PRStateMerged, false, true)
 	if !strings.Contains(got, ansiPurple+"●"+ansiDefaultFg) {
 		t.Errorf("read MERGED should close with default-fg; got %q", got)
 	}
 
 	// Non-tty: plain regardless of read/unread.
-	got = stateCell("OPEN", false, false)
+	got = stateCell(notifs.PRStateOpen, false, false)
 	if got != "● open" {
 		t.Errorf("non-tty got %q, want '● open'", got)
 	}
@@ -415,17 +415,18 @@ func TestVisibleWidth_DefaultFgIsStripped(t *testing.T) {
 
 func TestStateGlyph(t *testing.T) {
 	cases := []struct {
-		state, wantIcon, wantLabel, wantColour string
+		state                        notifs.PRState
+		wantIcon, wantLabel, wantColour string
 	}{
-		{"OPEN", "●", "open", ansiGreen},
-		{"MERGED", "●", "merged", ansiPurple},
-		{"CLOSED", "●", "closed", ansiRed},
-		{"DRAFT", "○", "draft", ansiDim},
+		{notifs.PRStateOpen, "●", "open", ansiGreen},
+		{notifs.PRStateMerged, "●", "merged", ansiPurple},
+		{notifs.PRStateClosed, "●", "closed", ansiRed},
+		{notifs.PRStateDraft, "○", "draft", ansiDim},
 		{"unknown", "·", "own", ansiDim},
 		{"", "·", "own", ansiDim},
 	}
 	for _, c := range cases {
-		t.Run(c.state, func(t *testing.T) {
+		t.Run(string(c.state), func(t *testing.T) {
 			icon, label, col := stateGlyph(c.state)
 			if icon != c.wantIcon || label != c.wantLabel || col != c.wantColour {
 				t.Errorf("stateGlyph(%q) = (%q, %q, %q), want (%q, %q, %q)",

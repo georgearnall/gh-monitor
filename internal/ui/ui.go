@@ -288,7 +288,7 @@ func reasonCell(n notifs.Notification, tty bool) string {
 // icon is coloured for both read and unread rows; read rows use a
 // dim-safe colour closer so the outer row-dim wrap renders the icon as
 // a muted version of its colour and continues dimming the label text.
-func stateCell(state string, unread, tty bool) string {
+func stateCell(state notifs.PRState, unread, tty bool) string {
 	icon, label, col := stateGlyph(state)
 	if !tty {
 		return icon + " " + label
@@ -301,46 +301,18 @@ func stateCell(state string, unread, tty bool) string {
 
 // stateGlyph maps a PR state to (icon, label, colour). Falls back to the
 // dim "· own" tuple when the state is unknown / not yet fetched.
-func stateGlyph(state string) (icon, label, col string) {
+func stateGlyph(state notifs.PRState) (icon, label, col string) {
 	switch state {
-	case "OPEN":
+	case notifs.PRStateOpen:
 		return "●", "open", ansiGreen
-	case "MERGED":
+	case notifs.PRStateMerged:
 		return "●", "merged", ansiPurple
-	case "CLOSED":
+	case notifs.PRStateClosed:
 		return "●", "closed", ansiRed
-	case "DRAFT":
+	case notifs.PRStateDraft:
 		return "○", "draft", ansiDim
 	}
 	return "·", "own", ansiDim
-}
-
-func reasonGlyph(reason string) string {
-	switch reason {
-	case "mention", "team_mention":
-		return "@"
-	case "review_requested":
-		return "◐"
-	case "comment":
-		return "+"
-	case "author", "assign":
-		return "·"
-	}
-	return "·"
-}
-
-func reasonLabel(reason string) string {
-	switch reason {
-	case "mention", "team_mention":
-		return "mention"
-	case "review_requested":
-		return "review"
-	case "comment":
-		return "comment"
-	case "author", "assign":
-		return "own"
-	}
-	return reason
 }
 
 // prRepoCol is the column index of REPO inside writePRTable's rows.
