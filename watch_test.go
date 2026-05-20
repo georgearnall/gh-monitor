@@ -1,11 +1,95 @@
 package main
 
 import (
+	"context"
+	"net/http"
+	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/georgearnall/gha-monitor/internal/discovery"
 	"github.com/georgearnall/gha-monitor/internal/ghclient"
 )
+
+// discoveryServer returns a test HTTP server that handles the three discovery
+// endpoints (user/repos, search/issues, user, users/<login>/events) with empty
+// results, and counts how many times /user/repos is hit.
+func discoveryServer(t *testing.T) (*httptest.Server, *atomic.Int32) {
+	t.Helper()
+	var reposCalls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/user/repos":
+			reposCalls.Add(1)
+			w.Write([]byte(`[]`))
+		case r.URL.Path == "/search/issues":
+			w.Write([]byte(`{"items":[]}`))
+		case r.URL.Path == "/user":
+			w.Write([]byte(`{"login":"testuser"}`))
+		default:
+			// users/<login>/events and any other endpoints
+			w.Write([]byte(`[]`))
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return srv, &reposCalls
+}
+
+func TestDoRefresh_DiscoveryCacheHonorsRepoRefresh(t *testing.T) {
+	srv, reposCalls := discoveryServer(t)
+	c := ghclient.NewForTest(srv.Client(), srv.URL+"/")
+
+	cfg := &watchConfig{
+		maxRepos:    20,
+		repoRefresh: 5 * time.Minute,
+	}
+
+	ctx := context.Background()
+
+	// First call: cache is empty, discovery must run.
+	doRefresh(ctx, c, cfg)
+	if got := reposCalls.Load(); got != 1 {
+		t.Fatalf("first refresh: want 1 discovery call, got %d", got)
+	}
+	if cfg.lastDiscovery.IsZero() {
+		t.Fatal("lastDiscovery should be set after first refresh")
+	}
+
+	// Second call immediately after: cache is fresh, discovery must be skipped.
+	doRefresh(ctx, c, cfg)
+	if got := reposCalls.Load(); got != 1 {
+		t.Errorf("second refresh (cache fresh): want still 1 discovery call, got %d", got)
+	}
+
+	// Simulate cache expiry by backdating lastDiscovery.
+	cfg.lastDiscovery = time.Now().Add(-6 * time.Minute)
+	doRefresh(ctx, c, cfg)
+	if got := reposCalls.Load(); got != 2 {
+		t.Errorf("third refresh (cache expired): want 2 discovery calls, got %d", got)
+	}
+}
+
+func TestDoRefresh_ZeroRepoRefreshAlwaysDiscovers(t *testing.T) {
+	srv, reposCalls := discoveryServer(t)
+	c := ghclient.NewForTest(srv.Client(), srv.URL+"/")
+
+	// repoRefresh=0 disables caching: discovery should fire every time.
+	cfg := &watchConfig{
+		maxRepos:      20,
+		repoRefresh:   0,
+		cachedRepos:   []discovery.Repo{{FullName: "stale/repo"}},
+		lastDiscovery: time.Now(), // fresh-looking cache that should be ignored
+	}
+
+	ctx := context.Background()
+	doRefresh(ctx, c, cfg)
+	doRefresh(ctx, c, cfg)
+	if got := reposCalls.Load(); got != 2 {
+		t.Errorf("repoRefresh=0 should bypass cache; want 2 calls, got %d", got)
+	}
+}
 
 func TestWatchConfig_NextInterval(t *testing.T) {
 	cfg := watchConfig{

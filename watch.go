@@ -33,6 +33,10 @@ type watchConfig struct {
 	excluded stringSet
 	noNotify bool
 	sound    bool
+
+	// Discovery cache: populated by doRefresh, reused until repoRefresh elapses.
+	lastDiscovery time.Time
+	cachedRepos   []discovery.Repo
 }
 
 type pollResult struct {
@@ -197,11 +201,26 @@ func runOnce(ctx context.Context, client *ghclient.Client, cfg watchConfig, st *
 // and PR check polling fan out concurrently.
 func doRefresh(ctx context.Context, client *ghclient.Client, cfg *watchConfig) pollResult {
 	res := pollResult{}
-	repos, discErr := discovery.Discover(client, cfg.maxRepos)
-	if discErr != nil {
-		res.DiscErr = discErr
-		// Fall through. PR and notification polls are independent of the
-		// repo list, so a discovery hiccup should not blank those panels.
+
+	var (
+		repos   []discovery.Repo
+		discErr error
+	)
+	cacheValid := cfg.repoRefresh > 0 &&
+		!cfg.lastDiscovery.IsZero() &&
+		time.Since(cfg.lastDiscovery) < cfg.repoRefresh
+	if cacheValid {
+		repos = cfg.cachedRepos
+	} else {
+		repos, discErr = discovery.Discover(client, cfg.maxRepos)
+		if discErr != nil {
+			res.DiscErr = discErr
+			// Fall through. PR and notification polls are independent of the
+			// repo list, so a discovery hiccup should not blank those panels.
+		} else {
+			cfg.lastDiscovery = time.Now()
+			cfg.cachedRepos = repos
+		}
 	}
 	repos = filterExcluded(repos, cfg.excluded)
 	res.Repos = repos
