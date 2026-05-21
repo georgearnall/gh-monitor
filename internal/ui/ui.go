@@ -154,6 +154,8 @@ type Snapshot struct {
 	Stale          bool   // rendering from disk cache, not fresh
 	Refreshing     bool   // a background refresh is in flight
 	BgErr          string // recent background-task error to surface in the footer
+	JiraURL        string // base URL for clickable ticket refs (empty = no links)
+	PromptLine     string // non-empty: show an inline input prompt at the footer
 }
 
 // Render redraws the status table. Safe to call when stdout is not a tty;
@@ -176,7 +178,7 @@ func Render(snap Snapshot) {
 	pln(tty)
 	pln(tty, dim("NOTIFICATIONS", tty))
 	if len(notifRows) > 0 {
-		writeNotifsTable(notifRows, snap.FocusedNotifID, tty, snap.TermWidth)
+		writeNotifsTable(notifRows, snap.FocusedNotifID, tty, snap.TermWidth, snap.JiraURL)
 	} else {
 		pln(tty, dim("all caught up", tty))
 	}
@@ -184,7 +186,7 @@ func Render(snap Snapshot) {
 	pln(tty)
 	pln(tty, dim("PULL REQUESTS", tty))
 	if len(snap.PRs) > 0 {
-		writePRTable(snap.PRs, snap.FocusedPRKey, tty, snap.TermWidth)
+		writePRTable(snap.PRs, snap.FocusedPRKey, tty, snap.TermWidth, snap.JiraURL)
 	} else {
 		pln(tty, dim("no open pull requests", tty))
 	}
@@ -224,6 +226,7 @@ type ConfigSnapshot struct {
 	PRSince        time.Duration
 	RateRemaining  int
 	RateLimit      int
+	JiraURL        string
 	TermWidth      int
 }
 
@@ -244,6 +247,10 @@ func RenderConfig(snap ConfigSnapshot) {
 
 	pln(tty)
 	pln(tty, dim("SETTINGS", tty))
+	jiraURLVal := snap.JiraURL
+	if jiraURLVal == "" {
+		jiraURLVal = dim("not configured", tty)
+	}
 	settings := [][]string{
 		{"  " + dim("Active poll", tty), snap.ActiveInterval.String()},
 		{"  " + dim("Idle poll", tty), snap.BaseInterval.String()},
@@ -251,6 +258,7 @@ func RenderConfig(snap ConfigSnapshot) {
 		{"  " + dim("PR window", tty), prSinceLabel(snap.PRSince)},
 		{"  " + dim("Max repos", tty), strconv.Itoa(snap.MaxRepos)},
 		{"  " + dim("Viewer", tty), snap.ViewerLogin},
+		{"  " + dim("Jira URL", tty), jiraURLVal},
 	}
 	if snap.RateLimit > 0 {
 		settings = append(settings, []string{"  " + dim("Rate limit", tty), fmt.Sprintf("%d/%d", snap.RateRemaining, snap.RateLimit)})
@@ -344,8 +352,11 @@ func footer(snap Snapshot, tty bool) {
 	if snap.BgErr != "" {
 		pln(tty, color(ansiRed, "⚠ "+snap.BgErr, tty))
 	}
+	if snap.PromptLine != "" {
+		pln(tty, snap.PromptLine)
+	}
 	if tty {
-		pln(tty, dim("[↑↓] move  [↵] open  [m] read  [d] dismiss  [x] mute repo  [M] read all  [r] refresh  [?] config  [q] quit", tty))
+		pln(tty, dim("[↑↓] move  [↵] open  [m] read  [d] dismiss  [x] mute repo  [M] read all  [t] ticket  [r] refresh  [?] config  [q] quit", tty))
 	}
 }
 
@@ -400,7 +411,7 @@ func unreadCount(ns []notifs.Notification) int {
 // Kept as a const so fitRepoColumn can target it directly.
 const notifsRepoCol = 3
 
-func writeNotifsTable(ns []notifs.Notification, focusedID string, tty bool, termWidth int) {
+func writeNotifsTable(ns []notifs.Notification, focusedID string, tty bool, termWidth int, jiraURL string) {
 	t := newPanelTable(
 		dimRow([]string{"  ", "REASON", "TITLE", "REPO", "#", "AGE", "LINK"}, tty),
 		notifsRepoCol, termWidth, tty,
@@ -411,7 +422,7 @@ func writeNotifsTable(ns []notifs.Notification, focusedID string, tty bool, term
 		if tty {
 			if n.Unread {
 				link = coloredHyperlink(n.URL, "open ↗")
-				title = styleTickets(title)
+				title = styleTickets(title, jiraURL)
 			} else {
 				// Read row: avoid inner SGR codes that would break the
 				// outer dim wrap applied by panelTable.render().
@@ -485,15 +496,15 @@ const prRepoCol = 4
 // prTitleMax is the upper bound on title length before truncation.
 const prTitleMax = 55
 
-func writePRTable(ps []prs.PR, focusedKey string, tty bool, termWidth int) {
+func writePRTable(ps []prs.PR, focusedKey string, tty bool, termWidth int, jiraURL string) {
 	// Adaptive fit: try full layout first; if it overflows, drop BRANCH;
 	// if it still overflows, also drop the trailing "pass"/"fail"/"wait"
 	// status word. The repo column is shrunk last by panelTable.render().
-	raw := buildPRRows(ps, focusedKey, tty, true /*branch*/, false /*compact status*/)
+	raw := buildPRRows(ps, focusedKey, tty, true /*branch*/, false /*compact status*/, jiraURL)
 	if termWidth > 0 && tableWidth(raw) > termWidth {
-		raw = buildPRRows(ps, focusedKey, tty, false, false)
+		raw = buildPRRows(ps, focusedKey, tty, false, false, jiraURL)
 		if tableWidth(raw) > termWidth {
-			raw = buildPRRows(ps, focusedKey, tty, false, true)
+			raw = buildPRRows(ps, focusedKey, tty, false, true, jiraURL)
 		}
 	}
 	t := newPanelTable(raw[0], prRepoCol, termWidth, tty)
@@ -503,7 +514,7 @@ func writePRTable(ps []prs.PR, focusedKey string, tty bool, termWidth int) {
 	t.render()
 }
 
-func buildPRRows(ps []prs.PR, focusedKey string, tty, includeBranch, compactStatus bool) [][]string {
+func buildPRRows(ps []prs.PR, focusedKey string, tty, includeBranch, compactStatus bool, jiraURL string) [][]string {
 	header := []string{"  ", "CHECKS", "REVIEW", "TITLE", "REPO", "#"}
 	if includeBranch {
 		header = append(header, "BRANCH")
@@ -517,7 +528,7 @@ func buildPRRows(ps []prs.PR, focusedKey string, tty, includeBranch, compactStat
 		title := truncate(p.Title, prTitleMax)
 		if tty {
 			link = coloredHyperlink(p.URL, "open ↗")
-			title = styleTickets(title)
+			title = styleTickets(title, jiraURL)
 		}
 		cursor := "  "
 		if focusedKey != "" && fmt.Sprintf("%s#%d", p.Repo, p.Number) == focusedKey {
@@ -947,12 +958,31 @@ func coloredHyperlink(url, text string) string {
 // and an optional closing bracket. Covers [ECOM-9026], NB-1068, etc.
 var ticketRe = regexp.MustCompile(`\[?[A-Z]{2,}-\d+\]?`)
 
-// styleTickets wraps every ticket-like substring in ansiAmber so they're
-// visually distinct in a title. Same dim-wrap caveat as coloredHyperlink.
-func styleTickets(s string) string {
+// styleTickets wraps every ticket-like substring in amber. When jiraURL is
+// non-empty, each match also gets an OSC 8 hyperlink to jiraURL/browse/TICKET.
+// Same dim-wrap caveat as coloredHyperlink: callers must not use this for
+// cells wrapped in an outer row dim.
+func styleTickets(s, jiraURL string) string {
 	return ticketRe.ReplaceAllStringFunc(s, func(match string) string {
+		if jiraURL != "" {
+			ticketID := strings.Trim(match, "[]")
+			return ticketHyperlink(jiraURL+"/browse/"+ticketID, match)
+		}
 		return ansiAmber + match + ansiReset
 	})
+}
+
+// ticketHyperlink wraps text in an OSC 8 hyperlink with amber styling.
+// Same dim-wrap caveat as coloredHyperlink.
+func ticketHyperlink(url, text string) string {
+	return "\x1b]8;;" + url + "\x1b\\" + ansiAmber + text + ansiReset + "\x1b]8;;\x1b\\"
+}
+
+// FindTicket returns the first Jira-style ticket ID (brackets stripped) found
+// in s, or "" if none. Used by the watch loop to extract a ticket from a
+// focused row's title without a direct ticketRe dependency.
+func FindTicket(s string) string {
+	return strings.Trim(ticketRe.FindString(s), "[]")
 }
 
 func setWindowTitle(s string) {

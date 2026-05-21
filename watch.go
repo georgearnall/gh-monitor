@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/signal"
 	"sort"
+	"strings"
 	"syscall"
 	"time"
 
@@ -34,6 +35,7 @@ type watchConfig struct {
 	excluded stringSet
 	noNotify bool
 	sound    bool
+	jiraURL  string // session override; does not write to state
 
 	// Discovery cache: populated by doRefresh, reused until repoRefresh elapses.
 	lastDiscovery time.Time
@@ -80,7 +82,7 @@ func runWatch(client *ghclient.Client, cfg watchConfig) {
 	focused := pickFocus(st, focusTarget{})
 
 	// First paint: render whatever's in the cache. <100ms because no network.
-	renderFromState(st, cfg, true /*refreshing*/, focused)
+	renderFromState(st, cfg, true /*refreshing*/, focused, "")
 
 	trigger := make(chan struct{}, 1)
 	started := make(chan struct{}, 1)
@@ -104,12 +106,17 @@ func runWatch(client *ghclient.Client, cfg watchConfig) {
 		refreshing bool
 		nextTimer  *time.Timer
 		configMode bool
+		ps         promptState
 	)
 	render := func() {
 		if configMode {
 			renderConfig(st, cfg)
 		} else {
-			renderFromState(st, cfg, refreshing, focused)
+			var pl string
+			if ps.active {
+				pl = "Jira base URL: " + ps.buffer + "▌"
+			}
+			renderFromState(st, cfg, refreshing, focused, pl)
 		}
 	}
 
@@ -142,6 +149,32 @@ func runWatch(client *ghclient.Client, cfg watchConfig) {
 			nextTimer = time.AfterFunc(next, func() { enqueue(trigger) })
 
 		case k := <-keys:
+			if ps.active {
+				switch k {
+				case '\r', '\n':
+					input := strings.TrimSpace(ps.buffer)
+					cb := ps.onConfirm
+					ps = promptState{}
+					if cb != nil && input != "" {
+						cb(input)
+					}
+					render()
+				case 0x7F, 0x08: // backspace / ctrl-H
+					if runes := []rune(ps.buffer); len(runes) > 0 {
+						ps.buffer = string(runes[:len(runes)-1])
+					}
+					render()
+				case 0x1B: // escape
+					ps = promptState{}
+					render()
+				default:
+					if k >= 0x20 && k < 0x7F {
+						ps.buffer += string(k)
+						render()
+					}
+				}
+				continue
+			}
 			if configMode && k != '?' && k != 'q' && k != 'Q' {
 				continue
 			}
@@ -153,10 +186,10 @@ func runWatch(client *ghclient.Client, cfg watchConfig) {
 				enqueue(trigger)
 			case keyDown:
 				focused = moveFocus(st, focused, +1)
-				renderFromState(st, cfg, refreshing, focused)
+				render()
 			case keyUp:
 				focused = moveFocus(st, focused, -1)
-				renderFromState(st, cfg, refreshing, focused)
+				render()
 			case '\r', '\n':
 				openFocused(st, focused)
 				markFocusedRead(client, st, &cfg, focused)
@@ -174,6 +207,29 @@ func runWatch(client *ghclient.Client, cfg watchConfig) {
 				if focused.Panel == "runs" {
 					muteFocusedRunRepo(st, &cfg, focused)
 				}
+			case 't':
+				if focused.Panel != "runs" && focused.ID != "" {
+					ticket := findTicketInFocused(st, focused)
+					if ticket != "" {
+						jiraURL := effectiveJiraURLFor(cfg, st)
+						if jiraURL != "" {
+							openURL(jiraURL + "/browse/" + ticket)
+						} else {
+							ps = promptState{
+								active: true,
+								onConfirm: func(input string) {
+									input = strings.TrimRight(strings.TrimSpace(input), "/")
+									st.JiraURL = input
+									if err := st.Save(); err != nil {
+										fmt.Fprintf(os.Stderr, "save state: %v\n", err)
+									}
+									openURL(input + "/browse/" + ticket)
+								},
+							}
+							render()
+						}
+					}
+				}
 			case '?':
 				configMode = !configMode
 				render()
@@ -189,7 +245,7 @@ func runWatch(client *ghclient.Client, cfg watchConfig) {
 				delete(st.DismissedNotifs, out.ID)
 				st.BgErr = fmt.Sprintf("dismiss failed: %v", out.Err)
 				st.BgErrAt = time.Now()
-				renderFromState(st, cfg, refreshing, focused)
+				render()
 			}
 
 		case <-ctx.Done():
@@ -214,7 +270,7 @@ func runOnce(ctx context.Context, client *ghclient.Client, cfg watchConfig, st *
 	}
 	applyResult(st, &cfg, res)
 	st.EtagCache = client.Etags()
-	renderFromState(st, cfg, false, focusTarget{})
+	renderFromState(st, cfg, false, focusTarget{}, "")
 	if err := st.Save(); err != nil {
 		fmt.Fprintf(os.Stderr, "save state: %v\n", err)
 	}
@@ -376,7 +432,7 @@ func applyResult(st *state.State, cfg *watchConfig, res pollResult) {
 	}
 }
 
-func renderFromState(st *state.State, cfg watchConfig, refreshing bool, f focusTarget) {
+func renderFromState(st *state.State, cfg watchConfig, refreshing bool, f focusTarget, promptLine string) {
 	stale := refreshing && !st.LastPoll.IsZero()
 	var next time.Duration
 	if !refreshing {
@@ -401,6 +457,8 @@ func renderFromState(st *state.State, cfg watchConfig, refreshing bool, f focusT
 		Stale:         stale,
 		Refreshing:    refreshing,
 		BgErr:         bgErr,
+		JiraURL:       effectiveJiraURLFor(cfg, st),
+		PromptLine:    promptLine,
 	}
 	switch f.Panel {
 	case "notifs":
@@ -411,6 +469,14 @@ func renderFromState(st *state.State, cfg watchConfig, refreshing bool, f focusT
 		snap.FocusedRunID = f.ID
 	}
 	ui.Render(snap)
+}
+
+func effectiveJiraURLFor(cfg watchConfig, st *state.State) string {
+	u := cfg.jiraURL
+	if u == "" {
+		u = st.JiraURL
+	}
+	return strings.TrimRight(strings.TrimSpace(u), "/")
 }
 
 func activeCount(rs []runs.Run) int {
@@ -477,6 +543,37 @@ func producerLoop(
 	}
 }
 
+// promptState holds the state for the inline URL-input prompt. When active,
+// all keypresses are routed to the buffer; Enter calls onConfirm; Esc cancels.
+type promptState struct {
+	active    bool
+	buffer    string
+	onConfirm func(string)
+}
+
+// findTicketInFocused returns the first Jira ticket ID found in the focused
+// row's title (brackets stripped), or "" if none found or panel has no title.
+func findTicketInFocused(st *state.State, f focusTarget) string {
+	var title string
+	switch f.Panel {
+	case "notifs":
+		for _, n := range st.LastNotifs {
+			if n.ID == f.ID {
+				title = n.Title
+				break
+			}
+		}
+	case "prs":
+		for _, p := range st.LastPRs {
+			if prKey(p) == f.ID {
+				title = p.Title
+				break
+			}
+		}
+	}
+	return ui.FindTicket(title)
+}
+
 func renderConfig(st *state.State, cfg watchConfig) {
 	excl := make([]string, 0, len(cfg.excluded))
 	for r := range cfg.excluded {
@@ -505,6 +602,7 @@ func renderConfig(st *state.State, cfg watchConfig) {
 		PRSince:        cfg.prSince,
 		RateRemaining:  st.LastRateLimit.Remaining,
 		RateLimit:      st.LastRateLimit.Limit,
+		JiraURL:        effectiveJiraURLFor(cfg, st),
 		TermWidth:      ui.TermWidth(),
 	})
 }

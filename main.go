@@ -49,6 +49,7 @@ func main() {
 	fs.Var(&cfg.excluded, "exclude", "owner/repo to exclude from monitoring (repeatable)")
 	fs.BoolVar(&cfg.noNotify, "no-notify", false, "suppress desktop notifications")
 	fs.BoolVar(&cfg.sound, "sound", false, "also play an audible alert on failure")
+	fs.StringVar(&cfg.jiraURL, "jira-url", "", "Jira base URL for clickable ticket links (e.g. https://company.atlassian.net); overrides saved value")
 	fs.Usage = func() { fmt.Fprint(os.Stderr, helpText) }
 
 	args := os.Args[1:]
@@ -101,6 +102,9 @@ FLAGS
   --exclude owner/repo  Skip a noisy repo. Repeatable.
   --no-notify           Suppress desktop notifications on workflow failure
   --sound               Also play a system sound on failure
+  --jira-url URL        Jira base URL (e.g. https://company.atlassian.net).
+                        Overrides the value saved by the inline prompt.
+                        If omitted, the saved URL is used automatically.
 
 KEYBINDINGS (watch mode)
   ↑ / ↓                 Move cursor across all three panels (notifications,
@@ -114,6 +118,8 @@ KEYBINDINGS (watch mode)
                         hides the run locally until it falls off the poll
                         window (useful for in-progress runs you don't
                         care about).
+  t                     Open Jira ticket from the focused row's title. If no
+                        Jira URL is configured, prompts for it and saves it.
   r  /  R  /  space     Refresh now (don't wait for the next interval)
   q  /  Q  /  Ctrl-C    Quit cleanly, restore terminal, save state
 

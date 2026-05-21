@@ -47,6 +47,11 @@ type State struct {
 	EtagCache       map[string]ghclient.EtagEntry `json:"etag_cache,omitempty"`
 	path            string
 
+	// JiraURL is the base URL for the user's Jira instance, used to make
+	// ticket references in titles clickable. Set via the inline prompt or
+	// --jira-url flag. Persisted so it survives restarts.
+	JiraURL string `json:"jira_url,omitempty"`
+
 	// BgErr is the most recent error from a background task (dismiss
 	// queue, mark-read, etc.). Surfaced in the UI footer so the user can
 	// see failures the alt-screen would otherwise swallow.

@@ -522,7 +522,7 @@ func TestWriteNotifsTable_AlignsWithDimmedRows(t *testing.T) {
 		{ID: "1", Repo: "acme/billing", PRNumber: 88, Title: "Add VAT", Reason: "review_requested", URL: "https://github.com/acme/billing/pull/88", UpdatedAt: now.Add(-5 * time.Minute), Unread: true},
 		{ID: "2", Repo: "acme/legacy", PRNumber: 35, Title: "Tidy", Reason: "mention", URL: "https://github.com/acme/legacy/pull/35", UpdatedAt: now.Add(-2 * time.Hour), Unread: false},
 	}
-	out := captureStdout(t, func() { writeNotifsTable(ns, "", true, 0) })
+	out := captureStdout(t, func() { writeNotifsTable(ns, "", true, 0, "") })
 	lines := strings.Split(strings.TrimRight(out, "\n"), "\n")
 	if len(lines) != 3 {
 		t.Fatalf("got %d lines, want 3:\n%s", len(lines), out)
@@ -629,7 +629,7 @@ func TestColumnOrdering(t *testing.T) {
 	notifsOut := captureStdout(t, func() {
 		writeNotifsTable([]notifs.Notification{
 			{ID: "1", Repo: "a/b", PRNumber: 1, Title: "test", Reason: "mention", URL: "u", UpdatedAt: now, Unread: true},
-		}, "", true, 0)
+		}, "", true, 0, "")
 	})
 	if !columnOrderOK(notifsOut, []string{"TITLE", "REPO"}) {
 		t.Errorf("notifs: TITLE must come before REPO\n%s", notifsOut)
@@ -638,7 +638,7 @@ func TestColumnOrdering(t *testing.T) {
 	prOut := captureStdout(t, func() {
 		writePRTable([]prs.PR{
 			{Repo: "a/b", Number: 1, Title: "test", URL: "u", UpdatedAt: now},
-		}, "", true, 0)
+		}, "", true, 0, "")
 	})
 	if !columnOrderOK(prOut, []string{"TITLE", "REPO"}) {
 		t.Errorf("prs: TITLE must come before REPO\n%s", prOut)
@@ -673,7 +673,7 @@ func TestWriteNotifsTable_FocusCursor(t *testing.T) {
 		{ID: "1", Repo: "acme/a", PRNumber: 1, Title: "one", Reason: "mention", URL: "https://github.com/acme/a/pull/1", UpdatedAt: now, Unread: true},
 		{ID: "2", Repo: "acme/b", PRNumber: 2, Title: "two", Reason: "mention", URL: "https://github.com/acme/b/pull/2", UpdatedAt: now, Unread: true},
 	}
-	out := captureStdout(t, func() { writeNotifsTable(ns, "2", true, 0) })
+	out := captureStdout(t, func() { writeNotifsTable(ns, "2", true, 0, "") })
 	stripped := ansiRe.ReplaceAllString(out, "")
 	if !strings.Contains(stripped, "▶") {
 		t.Fatalf("expected cursor glyph in output:\n%s", stripped)
@@ -686,7 +686,7 @@ func TestWriteNotifsTable_FocusCursor(t *testing.T) {
 	}
 
 	// And no cursor when focusedID is empty.
-	out = captureStdout(t, func() { writeNotifsTable(ns, "", true, 0) })
+	out = captureStdout(t, func() { writeNotifsTable(ns, "", true, 0, "") })
 	if strings.Contains(ansiRe.ReplaceAllString(out, ""), "▶") {
 		t.Errorf("expected no cursor when focusedID empty:\n%s", out)
 	}
@@ -706,7 +706,7 @@ func TestWritePRTable_AdaptiveDropsBranchOnOverflow(t *testing.T) {
 	}
 
 	// At a generous width the natural table fits and BRANCH stays.
-	wide := captureStdout(t, func() { writePRTable(ps, "", true, 200) })
+	wide := captureStdout(t, func() { writePRTable(ps, "", true, 200, "") })
 	if !strings.Contains(wide, "BRANCH") {
 		t.Errorf("BRANCH header should remain at width=200:\n%s", wide)
 	}
@@ -716,7 +716,7 @@ func TestWritePRTable_AdaptiveDropsBranchOnOverflow(t *testing.T) {
 
 	// At a width that would force aggressive repo truncation, BRANCH is
 	// the first column to go.
-	narrow := captureStdout(t, func() { writePRTable(ps, "", true, 110) })
+	narrow := captureStdout(t, func() { writePRTable(ps, "", true, 110, "") })
 	if strings.Contains(narrow, "BRANCH") {
 		t.Errorf("BRANCH header should drop when too narrow:\n%s", narrow)
 	}
@@ -734,7 +734,7 @@ func TestWritePRTable_VeryNarrowAlsoCompactsStatus(t *testing.T) {
 		},
 	}
 	// Below the natural width even without BRANCH, status should compact.
-	out := captureStdout(t, func() { writePRTable(ps, "", true, 40) })
+	out := captureStdout(t, func() { writePRTable(ps, "", true, 40, "") })
 	stripped := ansiRe.ReplaceAllString(out, "")
 	if strings.Contains(stripped, "1/1 fail") {
 		t.Errorf("status word 'fail' should drop at width=40:\n%s", stripped)
@@ -843,7 +843,7 @@ func TestStyleTickets(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			got := styleTickets(c.in)
+			got := styleTickets(c.in, "")
 			if got != c.want {
 				t.Errorf("styleTickets(%q) = %q, want %q", c.in, got, c.want)
 			}
@@ -853,7 +853,7 @@ func TestStyleTickets(t *testing.T) {
 
 func TestStyleTickets_VisibleWidthPreserved(t *testing.T) {
 	in := "[ECOM-9026] Convert SQL statements"
-	styled := styleTickets(in)
+	styled := styleTickets(in, "")
 	if visibleWidth(in) != visibleWidth(styled) {
 		t.Errorf("visible width mismatch: raw=%d styled=%d", visibleWidth(in), visibleWidth(styled))
 	}
@@ -875,7 +875,7 @@ func TestWritePRTable_LinkUsesPaleBlue(t *testing.T) {
 	ps := []prs.PR{
 		{Repo: "x/y", Number: 1, Title: "t", URL: "https://x/y/pull/1", UpdatedAt: now},
 	}
-	out := captureStdout(t, func() { writePRTable(ps, "", true, 300) })
+	out := captureStdout(t, func() { writePRTable(ps, "", true, 300, "") })
 	if !strings.Contains(out, ansiPaleBlue+"open ↗"+ansiReset) {
 		t.Errorf("expected pale blue link in PR row:\n%q", out)
 	}
@@ -947,7 +947,7 @@ func TestWriteNotifsTable_UnreadGetsColoredLinkAndTickets_ReadDoesNot(t *testing
 		{ID: "1", Repo: "x/y", PRNumber: 1, Title: "[NB-1] unread", Reason: "mention", URL: "u", UpdatedAt: now, Unread: true},
 		{ID: "2", Repo: "x/y", PRNumber: 2, Title: "[NB-2] read", Reason: "mention", URL: "u", UpdatedAt: now, Unread: false},
 	}
-	out := captureStdout(t, func() { writeNotifsTable(ns, "", true, 300) })
+	out := captureStdout(t, func() { writeNotifsTable(ns, "", true, 300, "") })
 	if !strings.Contains(out, ansiPaleBlue+"open ↗"+ansiReset) {
 		t.Errorf("unread row should have pale blue link:\n%q", out)
 	}
@@ -997,7 +997,7 @@ func TestWritePRTable_DimsOrganisation(t *testing.T) {
 	ps := []prs.PR{
 		{Repo: "trainline-private/foo", Number: 1, Title: "test", URL: "u", UpdatedAt: now},
 	}
-	out := captureStdout(t, func() { writePRTable(ps, "", true, 300) })
+	out := captureStdout(t, func() { writePRTable(ps, "", true, 300, "") })
 	if !strings.Contains(out, ansiDim+"trainline-private/"+ansiReset+"foo") {
 		t.Errorf("expected owner+slash dimmed; output:\n%q", out)
 	}
@@ -1009,7 +1009,7 @@ func TestWriteNotifsTable_UnreadGetsDimOrg_ReadIsRowDim(t *testing.T) {
 		{ID: "1", Repo: "trainline-private/foo", PRNumber: 1, Title: "t", Reason: "mention", URL: "u", UpdatedAt: now, Unread: true},
 		{ID: "2", Repo: "trainline-private/bar", PRNumber: 2, Title: "t", Reason: "mention", URL: "u", UpdatedAt: now, Unread: false},
 	}
-	out := captureStdout(t, func() { writeNotifsTable(ns, "", true, 300) })
+	out := captureStdout(t, func() { writeNotifsTable(ns, "", true, 300, "") })
 	// Unread row: owner+slash wrapped in dim, rest bright.
 	if !strings.Contains(out, ansiDim+"trainline-private/"+ansiReset+"foo") {
 		t.Errorf("unread row should have owner dimmed; output:\n%q", out)
@@ -1038,7 +1038,7 @@ func TestWritePRTable_TitleTruncatedAt55(t *testing.T) {
 	ps := []prs.PR{
 		{Repo: "x/y", Number: 1, Title: title, URL: "u", UpdatedAt: now},
 	}
-	out := captureStdout(t, func() { writePRTable(ps, "", true, 300) })
+	out := captureStdout(t, func() { writePRTable(ps, "", true, 300, "") })
 	stripped := ansiRe.ReplaceAllString(out, "")
 	// 54 'a's + ellipsis = 55 visible runes.
 	wantTitle := strings.Repeat("a", 54) + "…"
@@ -1053,7 +1053,7 @@ func TestWritePRTable_FocusCursor(t *testing.T) {
 		{Repo: "acme/a", Number: 1, Title: "one", URL: "https://github.com/acme/a/pull/1", UpdatedAt: now},
 		{Repo: "acme/b", Number: 2, Title: "two", URL: "https://github.com/acme/b/pull/2", UpdatedAt: now},
 	}
-	out := captureStdout(t, func() { writePRTable(ps, "acme/b#2", true, 0) })
+	out := captureStdout(t, func() { writePRTable(ps, "acme/b#2", true, 0, "") })
 	stripped := ansiRe.ReplaceAllString(out, "")
 	if !strings.Contains(stripped, "▶") {
 		t.Fatalf("expected cursor glyph in output:\n%s", stripped)
@@ -1064,7 +1064,7 @@ func TestWritePRTable_FocusCursor(t *testing.T) {
 		}
 	}
 
-	out = captureStdout(t, func() { writePRTable(ps, "", true, 0) })
+	out = captureStdout(t, func() { writePRTable(ps, "", true, 0, "") })
 	if strings.Contains(ansiRe.ReplaceAllString(out, ""), "▶") {
 		t.Errorf("expected no PR cursor when focusedKey empty:\n%s", out)
 	}

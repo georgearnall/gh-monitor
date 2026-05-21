@@ -121,7 +121,7 @@ func dismissFocused(queue chan<- dismissReq, st *state.State, cfg *watchConfig, 
 	}
 	st.RecordDismiss(f.ID, updatedAt)
 
-	renderFromState(st, *cfg, false, newFocus)
+	renderFromState(st, *cfg, false, newFocus, "")
 	// Non-blocking enqueue. Buffer is generous; if it's somehow full,
 	// drop and the user will see the notification reappear on next
 	// poll (correctly reflecting GitHub state).
@@ -151,7 +151,7 @@ func dismissFocusedRun(st *state.State, cfg *watchConfig, f focusTarget) focusTa
 		return f
 	}
 	st.DismissRun(runID)
-	renderFromState(st, *cfg, false, newFocus)
+	renderFromState(st, *cfg, false, newFocus, "")
 	return newFocus
 }
 
@@ -191,7 +191,7 @@ func muteFocusedRunRepo(st *state.State, cfg *watchConfig, f focusTarget) {
 	if err := st.Save(); err != nil {
 		fmt.Fprintf(os.Stderr, "save state: %v\n", err)
 	}
-	renderFromState(st, *cfg, false, f)
+	renderFromState(st, *cfg, false, f, "")
 }
 
 // markFocusedRead marks the focused notification read. No-op if the focused
@@ -211,7 +211,7 @@ func markFocusedRead(client *ghclient.Client, st *state.State, cfg *watchConfig,
 	if matched == "" {
 		return
 	}
-	renderFromState(st, *cfg, false, f)
+	renderFromState(st, *cfg, false, f, "")
 	go func() {
 		if err := notifs.MarkAllRead(client, []string{matched}); err != nil {
 			fmt.Fprintf(os.Stderr, "mark read: %v\n", err)
@@ -232,7 +232,7 @@ func markAllVisibleRead(client *ghclient.Client, st *state.State, cfg *watchConf
 	if len(ids) == 0 {
 		return
 	}
-	renderFromState(st, *cfg, false, f)
+	renderFromState(st, *cfg, false, f, "")
 	go func() {
 		if err := notifs.MarkAllRead(client, ids); err != nil {
 			fmt.Fprintf(os.Stderr, "mark read: %v\n", err)

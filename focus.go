@@ -175,6 +175,11 @@ func openFocused(st *state.State, f focusTarget) {
 	if url == "" {
 		return
 	}
+	openURL(url)
+}
+
+// openURL launches url in the default browser. Non-blocking.
+func openURL(url string) {
 	if err := exec.Command("open", url).Start(); err != nil {
 		fmt.Fprintf(os.Stderr, "open: %v\n", err)
 	}
