@@ -242,7 +242,7 @@ func footer(snap Snapshot, tty bool) {
 		pln(tty, color(ansiRed, "⚠ "+snap.BgErr, tty))
 	}
 	if tty {
-		pln(tty, dim("[↑↓] move  [↵] open  [m] read  [d] dismiss  [M] read all  [r] refresh  [q] quit", tty))
+		pln(tty, dim("[↑↓] move  [↵] open  [m] read  [d] dismiss  [x] mute repo  [M] read all  [r] refresh  [q] quit", tty))
 	}
 }
 

@@ -155,6 +155,45 @@ func dismissFocusedRun(st *state.State, cfg *watchConfig, f focusTarget) focusTa
 	return newFocus
 }
 
+// muteFocusedRunRepo persistently mutes the repo of the focused run so that
+// only runs triggered by the viewer are shown from it. Immediate effect:
+// other actors' runs from that repo are removed from LastView inline.
+func muteFocusedRunRepo(st *state.State, cfg *watchConfig, f focusTarget) {
+	if f.Panel != "runs" || f.ID == "" {
+		return
+	}
+	runID, err := strconv.ParseInt(f.ID, 10, 64)
+	if err != nil {
+		return
+	}
+	var repo string
+	for _, r := range st.LastView {
+		if r.ID == runID {
+			repo = r.Repo
+			break
+		}
+	}
+	if repo == "" {
+		return
+	}
+	st.MuteRepo(repo)
+	// Scrub other actors' runs for the muted repo from LastView immediately
+	// so rows disappear without waiting for the next poll.
+	viewer := st.ViewerLogin
+	keep := st.LastView[:0]
+	for _, r := range st.LastView {
+		if r.Repo == repo && r.ActorLogin != viewer {
+			continue
+		}
+		keep = append(keep, r)
+	}
+	st.LastView = keep
+	if err := st.Save(); err != nil {
+		fmt.Fprintf(os.Stderr, "save state: %v\n", err)
+	}
+	renderFromState(st, *cfg, false, f)
+}
+
 // markFocusedRead marks the focused notification read. No-op if the focused
 // row is not in the notifications panel or is already read.
 func markFocusedRead(client *ghclient.Client, st *state.State, cfg *watchConfig, f focusTarget) {

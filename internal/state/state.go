@@ -39,6 +39,7 @@ type State struct {
 	LastNotifs      []notifs.Notification         `json:"last_notifs,omitempty"`
 	DismissedNotifs map[string]DismissEntry       `json:"dismissed_notifs,omitempty"`
 	DismissedRuns   map[int64]time.Time           `json:"dismissed_runs,omitempty"`
+	MutedRepos      map[string]bool               `json:"muted_repos,omitempty"`
 	Repos           []discovery.Repo              `json:"repos,omitempty"`
 	LastPoll        time.Time                     `json:"last_poll,omitempty"`
 	LastRateLimit   ghclient.RateLimit            `json:"last_rate_limit,omitempty"`
@@ -78,7 +79,7 @@ func Load() (*State, error) {
 	if err != nil {
 		return nil, err
 	}
-	s := &State{Runs: map[int64]RunRecord{}, DismissedRuns: map[int64]time.Time{}, path: p}
+	s := &State{Runs: map[int64]RunRecord{}, DismissedRuns: map[int64]time.Time{}, MutedRepos: map[string]bool{}, path: p}
 
 	data, err := os.ReadFile(p)
 	if err != nil {
@@ -218,6 +219,14 @@ func (s *State) PruneRunDismissals(present map[int64]bool, minAge time.Duration)
 		}
 		delete(s.DismissedRuns, id)
 	}
+}
+
+// MuteRepo records that the user wants to hide other actors' runs from repo.
+func (s *State) MuteRepo(repo string) {
+	if s.MutedRepos == nil {
+		s.MutedRepos = map[string]bool{}
+	}
+	s.MutedRepos[repo] = true
 }
 
 // Prune removes records for runs that haven't been seen recently enough

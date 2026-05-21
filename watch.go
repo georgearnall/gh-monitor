@@ -126,7 +126,7 @@ func runWatch(client *ghclient.Client, cfg watchConfig) {
 			if err := st.Save(); err != nil {
 				fmt.Fprintf(os.Stderr, "save state: %v\n", err)
 			}
-			next := cfg.nextInterval(activeCount(res.Runs), res.RateLimit, res.PollErr)
+			next := cfg.nextInterval(activeCount(st.LastView), res.RateLimit, res.PollErr)
 			if nextTimer != nil {
 				nextTimer.Stop()
 			}
@@ -157,6 +157,10 @@ func runWatch(client *ghclient.Client, cfg watchConfig) {
 					focused = dismissFocusedRun(st, &cfg, focused)
 				} else {
 					focused = dismissFocused(dismissQueue, st, &cfg, focused)
+				}
+			case 'x':
+				if focused.Panel == "runs" {
+					muteFocusedRunRepo(st, &cfg, focused)
 				}
 			case 'q', 'Q':
 				return
@@ -306,11 +310,19 @@ func applyResult(st *state.State, cfg *watchConfig, res pollResult) {
 	// (and keep the stale data visible) rather than blanking everything.
 	if res.DiscErr == nil && res.PollErr == nil {
 		st.PruneRunDismissals(seen, 60*time.Second)
+		viewer := res.ViewerLogin
+		if viewer == "" {
+			viewer = st.ViewerLogin
+		}
 		filtered := make([]runs.Run, 0, len(res.Runs))
 		for _, r := range res.Runs {
-			if !st.IsRunDismissed(r.ID) {
-				filtered = append(filtered, r)
+			if st.IsRunDismissed(r.ID) {
+				continue
 			}
+			if st.MutedRepos[r.Repo] && r.ActorLogin != viewer {
+				continue
+			}
+			filtered = append(filtered, r)
 		}
 		st.LastView = filtered
 	}
