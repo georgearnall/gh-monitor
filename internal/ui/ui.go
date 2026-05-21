@@ -156,6 +156,7 @@ type Snapshot struct {
 	BgErr          string // recent background-task error to surface in the footer
 	JiraURL        string // base URL for clickable ticket refs (empty = no links)
 	PromptLine     string // non-empty: show an inline input prompt at the footer
+	Links          bool   // whether the terminal supports OSC 8 hyperlinks; hides LINK column when false
 }
 
 // Render redraws the status table. Safe to call when stdout is not a tty;
@@ -178,7 +179,7 @@ func Render(snap Snapshot) {
 	pln(tty)
 	pln(tty, dim("NOTIFICATIONS", tty))
 	if len(notifRows) > 0 {
-		writeNotifsTable(notifRows, snap.FocusedNotifID, tty, snap.TermWidth, snap.JiraURL)
+		writeNotifsTable(notifRows, snap.FocusedNotifID, tty, snap.TermWidth, snap.JiraURL, snap.Links)
 	} else {
 		pln(tty, dim("all caught up", tty))
 	}
@@ -186,7 +187,7 @@ func Render(snap Snapshot) {
 	pln(tty)
 	pln(tty, dim("PULL REQUESTS", tty))
 	if len(snap.PRs) > 0 {
-		writePRTable(snap.PRs, snap.FocusedPRKey, tty, snap.TermWidth, snap.JiraURL)
+		writePRTable(snap.PRs, snap.FocusedPRKey, tty, snap.TermWidth, snap.JiraURL, snap.Links)
 	} else {
 		pln(tty, dim("no open pull requests", tty))
 	}
@@ -194,7 +195,7 @@ func Render(snap Snapshot) {
 	pln(tty)
 	pln(tty, dim("WORKFLOW RUNS", tty))
 	if len(rows) > 0 {
-		writeTable(rows, snap.FocusedRunID, tty, snap.TermWidth)
+		writeTable(rows, snap.FocusedRunID, tty, snap.TermWidth, snap.Links)
 	} else {
 		pln(tty, dim("no active runs or recent failures", tty))
 	}
@@ -332,15 +333,11 @@ func header(_ Snapshot, tty bool) {
 
 func footer(snap Snapshot, tty bool) {
 	parts := []string{polledLabel(snap)}
-	parts = append(parts, fmt.Sprintf("%d repos", snap.RepoCount))
 	if len(snap.Notifs) > 0 {
 		parts = append(parts, fmt.Sprintf("%d notifs", len(snap.Notifs)))
 	}
 	if len(snap.PRs) > 0 {
 		parts = append(parts, fmt.Sprintf("%d PRs", len(snap.PRs)))
-	}
-	if snap.RateLimit > 0 {
-		parts = append(parts, fmt.Sprintf("rate limit %d/%d", snap.RateRemaining, snap.RateLimit))
 	}
 	if snap.Refreshing {
 		parts = append(parts, "refreshing…")
@@ -356,7 +353,7 @@ func footer(snap Snapshot, tty bool) {
 		pln(tty, snap.PromptLine)
 	}
 	if tty {
-		pln(tty, dim("[↑↓] move  [↵] open  [m] read  [d] dismiss  [x] mute repo  [M] read all  [t] ticket  [r] refresh  [?] config  [q] quit", tty))
+		pln(tty, dim("[↑↓] move  [↵] open  [m] read  [d] dismiss  [x] mute repo  [t] ticket  [r] refresh  [?] config  [q] quit", tty))
 	}
 }
 
@@ -411,37 +408,41 @@ func unreadCount(ns []notifs.Notification) int {
 // Kept as a const so fitRepoColumn can target it directly.
 const notifsRepoCol = 3
 
-func writeNotifsTable(ns []notifs.Notification, focusedID string, tty bool, termWidth int, jiraURL string) {
-	t := newPanelTable(
-		dimRow([]string{"  ", "REASON", "TITLE", "REPO", "#", "AGE", "LINK"}, tty),
-		notifsRepoCol, termWidth, tty,
-	)
+func writeNotifsTable(ns []notifs.Notification, focusedID string, tty bool, termWidth int, jiraURL string, links bool) {
+	headers := []string{"  ", "REASON", "TITLE", "REPO", "#", "AGE"}
+	if links {
+		headers = append(headers, "LINK")
+	}
+	t := newPanelTable(dimRow(headers, tty), notifsRepoCol, termWidth, tty)
 	for _, n := range ns {
-		link := n.URL
 		title := truncate(n.Title, 50)
-		if tty {
-			if n.Unread {
-				link = coloredHyperlink(n.URL, "open ↗")
-				title = styleTickets(title, jiraURL)
-			} else {
-				// Read row: avoid inner SGR codes that would break the
-				// outer dim wrap applied by panelTable.render().
-				link = hyperlink(n.URL, "open ↗")
-			}
+		if tty && n.Unread {
+			title = styleTickets(title, jiraURL)
 		}
 		cursor := "  "
 		if n.ID == focusedID {
 			cursor = color(ansiYellow, "▶", tty) + " "
 		}
-		t.addRow([]string{
+		row := []string{
 			cursor,
 			reasonCell(n).Render(tty, !n.Unread),
 			title,
 			n.Repo, // plain so shrinkRepo can parse the slash
 			fmt.Sprintf("#%d", n.PRNumber),
 			relativeAge(n.UpdatedAt),
-			link,
-		}, !n.Unread && tty)
+		}
+		if links {
+			var link string
+			if n.Unread {
+				link = coloredHyperlink(n.URL, "open ↗")
+			} else {
+				// Read row: avoid inner SGR codes that would break the
+				// outer dim wrap applied by panelTable.render().
+				link = hyperlink(n.URL, "open ↗")
+			}
+			row = append(row, link)
+		}
+		t.addRow(row, !n.Unread && tty)
 	}
 	t.render()
 }
@@ -496,15 +497,15 @@ const prRepoCol = 4
 // prTitleMax is the upper bound on title length before truncation.
 const prTitleMax = 55
 
-func writePRTable(ps []prs.PR, focusedKey string, tty bool, termWidth int, jiraURL string) {
+func writePRTable(ps []prs.PR, focusedKey string, tty bool, termWidth int, jiraURL string, links bool) {
 	// Adaptive fit: try full layout first; if it overflows, drop BRANCH;
 	// if it still overflows, also drop the trailing "pass"/"fail"/"wait"
 	// status word. The repo column is shrunk last by panelTable.render().
-	raw := buildPRRows(ps, focusedKey, tty, true /*branch*/, false /*compact status*/, jiraURL)
+	raw := buildPRRows(ps, focusedKey, tty, true /*branch*/, false /*compact status*/, jiraURL, links)
 	if termWidth > 0 && tableWidth(raw) > termWidth {
-		raw = buildPRRows(ps, focusedKey, tty, false, false, jiraURL)
+		raw = buildPRRows(ps, focusedKey, tty, false, false, jiraURL, links)
 		if tableWidth(raw) > termWidth {
-			raw = buildPRRows(ps, focusedKey, tty, false, true, jiraURL)
+			raw = buildPRRows(ps, focusedKey, tty, false, true, jiraURL, links)
 		}
 	}
 	t := newPanelTable(raw[0], prRepoCol, termWidth, tty)
@@ -514,20 +515,21 @@ func writePRTable(ps []prs.PR, focusedKey string, tty bool, termWidth int, jiraU
 	t.render()
 }
 
-func buildPRRows(ps []prs.PR, focusedKey string, tty, includeBranch, compactStatus bool, jiraURL string) [][]string {
+func buildPRRows(ps []prs.PR, focusedKey string, tty, includeBranch, compactStatus bool, jiraURL string, links bool) [][]string {
 	header := []string{"  ", "CHECKS", "REVIEW", "TITLE", "REPO", "#"}
 	if includeBranch {
 		header = append(header, "BRANCH")
 	}
-	header = append(header, "AGE", "LINK")
+	header = append(header, "AGE")
+	if links {
+		header = append(header, "LINK")
+	}
 
 	rows := make([][]string, 0, len(ps)+1)
 	rows = append(rows, dimRow(header, tty))
 	for _, p := range ps {
-		link := p.URL
 		title := truncate(p.Title, prTitleMax)
 		if tty {
-			link = coloredHyperlink(p.URL, "open ↗")
 			title = styleTickets(title, jiraURL)
 		}
 		cursor := "  "
@@ -545,7 +547,10 @@ func buildPRRows(ps []prs.PR, focusedKey string, tty, includeBranch, compactStat
 		if includeBranch {
 			row = append(row, truncate(p.HeadBranch, 30))
 		}
-		row = append(row, relativeAge(p.UpdatedAt), link)
+		row = append(row, relativeAge(p.UpdatedAt))
+		if links {
+			row = append(row, coloredHyperlink(p.URL, "open ↗"))
+		}
 		rows = append(rows, row)
 	}
 	return rows
@@ -616,35 +621,37 @@ func prStatusCell(p prs.PR, compact bool) *Cell {
 // runsRepoCol is the column index of REPO inside writeTable's rows.
 const runsRepoCol = 3
 
-func writeTable(rs []runs.Run, focusedID string, tty bool, termWidth int) {
-	t := newPanelTable(
-		dimRow([]string{"  ", "STATUS", "WORKFLOW", "REPO", "BRANCH", "AGE", "LINK"}, tty),
-		runsRepoCol, termWidth, tty,
-	)
+func writeTable(rs []runs.Run, focusedID string, tty bool, termWidth int, links bool) {
+	headers := []string{"  ", "STATUS", "WORKFLOW", "REPO", "BRANCH", "AGE"}
+	if links {
+		headers = append(headers, "LINK")
+	}
+	t := newPanelTable(dimRow(headers, tty), runsRepoCol, termWidth, tty)
 	today := startOfToday()
 	for _, r := range rs {
 		dim := !r.IsActive() && r.UpdatedAt.Before(today)
-		link := r.URL
-		if tty {
-			if dim {
-				link = hyperlink(r.URL, "open ↗")
-			} else {
-				link = coloredHyperlink(r.URL, "open ↗")
-			}
-		}
 		cursor := "  "
 		if focusedID != "" && strconv.FormatInt(r.ID, 10) == focusedID {
 			cursor = color(ansiYellow, "▶", tty) + " "
 		}
-		t.addRow([]string{
+		row := []string{
 			cursor,
 			statusCell(r).Render(tty, dim),
 			truncate(r.WorkflowName, 30),
 			r.Repo,
 			truncate(r.Branch, 30),
 			ageString(r),
-			link,
-		}, dim && tty)
+		}
+		if links {
+			var link string
+			if dim {
+				link = hyperlink(r.URL, "open ↗")
+			} else {
+				link = coloredHyperlink(r.URL, "open ↗")
+			}
+			row = append(row, link)
+		}
+		t.addRow(row, dim && tty)
 	}
 	t.render()
 }
@@ -1108,4 +1115,27 @@ func isTTY(f *os.File) bool {
 		return false
 	}
 	return (fi.Mode() & os.ModeCharDevice) != 0
+}
+
+// SupportsLinks reports whether the current terminal is known to support OSC 8
+// hyperlinks. When false, callers should omit the LINK column since the text
+// would be inert. Conservative: defaults to false for unknown terminals.
+func SupportsLinks() bool {
+	if !isTTY(os.Stdout) {
+		return false
+	}
+	switch os.Getenv("TERM_PROGRAM") {
+	case "iTerm.app", "WezTerm", "kitty":
+		return true
+	}
+	if os.Getenv("VTE_VERSION") != "" { // GNOME Terminal / Tilix / etc.
+		return true
+	}
+	if os.Getenv("WT_SESSION") != "" { // Windows Terminal
+		return true
+	}
+	if os.Getenv("TERM") == "xterm-kitty" {
+		return true
+	}
+	return false
 }

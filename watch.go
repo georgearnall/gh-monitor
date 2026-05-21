@@ -195,8 +195,6 @@ func runWatch(client *ghclient.Client, cfg watchConfig) {
 				markFocusedRead(client, st, &cfg, focused)
 			case 'm':
 				markFocusedRead(client, st, &cfg, focused)
-			case 'M':
-				markAllVisibleRead(client, st, &cfg, focused)
 			case 'd':
 				if focused.Panel == "runs" {
 					focused = dismissFocusedRun(st, &cfg, focused)
@@ -459,6 +457,7 @@ func renderFromState(st *state.State, cfg watchConfig, refreshing bool, f focusT
 		BgErr:         bgErr,
 		JiraURL:       effectiveJiraURLFor(cfg, st),
 		PromptLine:    promptLine,
+		Links:         ui.SupportsLinks(),
 	}
 	switch f.Panel {
 	case "notifs":

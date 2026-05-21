@@ -219,23 +219,3 @@ func markFocusedRead(client *ghclient.Client, st *state.State, cfg *watchConfig,
 	}()
 }
 
-// markAllVisibleRead optimistically flips every unread notification in the
-// cached snapshot to read, repaints, then fires PATCH calls in background.
-func markAllVisibleRead(client *ghclient.Client, st *state.State, cfg *watchConfig, f focusTarget) {
-	ids := make([]string, 0, len(st.LastNotifs))
-	for i := range st.LastNotifs {
-		if st.LastNotifs[i].Unread {
-			ids = append(ids, st.LastNotifs[i].ID)
-			st.LastNotifs[i].Unread = false
-		}
-	}
-	if len(ids) == 0 {
-		return
-	}
-	renderFromState(st, *cfg, false, f, "")
-	go func() {
-		if err := notifs.MarkAllRead(client, ids); err != nil {
-			fmt.Fprintf(os.Stderr, "mark read: %v\n", err)
-		}
-	}()
-}
