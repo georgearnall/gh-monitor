@@ -270,6 +270,79 @@ func TestSaveLoad_PreservesDismissedNotifs(t *testing.T) {
 	}
 }
 
+func TestDismissRun_AndIsRunDismissed(t *testing.T) {
+	isolate(t)
+	s, _ := Load()
+
+	if s.IsRunDismissed(1) {
+		t.Errorf("expected IsRunDismissed=false for unknown id")
+	}
+
+	s.DismissRun(1)
+
+	if !s.IsRunDismissed(1) {
+		t.Errorf("expected IsRunDismissed=true after DismissRun")
+	}
+	if s.IsRunDismissed(2) {
+		t.Errorf("expected IsRunDismissed=false for unrelated id")
+	}
+}
+
+func TestPruneRunDismissals(t *testing.T) {
+	isolate(t)
+	s, _ := Load()
+	now := time.Now()
+
+	s.DismissRun(1) // still in poll results
+	s.DismissRun(2) // absent from poll results, old enough → drop
+	s.DismissRun(3) // absent from poll results, too fresh → keep
+
+	// Force ids 1 and 2 past the minAge threshold; id 3 stays recent.
+	for _, id := range []int64{1, 2} {
+		s.DismissedRuns[id] = now.Add(-5 * time.Minute)
+	}
+
+	present := map[int64]bool{1: true}
+	s.PruneRunDismissals(present, 60*time.Second)
+
+	if !s.IsRunDismissed(1) {
+		t.Errorf("id 1 still in poll results: should be kept")
+	}
+	if s.IsRunDismissed(2) {
+		t.Errorf("id 2 absent and past minAge: should be pruned")
+	}
+	if !s.IsRunDismissed(3) {
+		t.Errorf("id 3 absent but inside minAge: should be kept")
+	}
+}
+
+func TestSaveLoad_PreservesDismissedRuns(t *testing.T) {
+	isolate(t)
+	original, _ := Load()
+	original.DismissRun(42)
+	if err := original.Save(); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	reloaded, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !reloaded.IsRunDismissed(42) {
+		t.Errorf("expected dismissed run to survive save/load")
+	}
+	if reloaded.IsRunDismissed(99) {
+		t.Errorf("undismissed run should not appear after reload")
+	}
+}
+
+func TestLoad_InitializesDismissedRuns(t *testing.T) {
+	isolate(t)
+	s, _ := Load()
+	if s.DismissedRuns == nil {
+		t.Errorf("DismissedRuns should be non-nil after Load")
+	}
+}
+
 func TestPrune(t *testing.T) {
 	isolate(t)
 	s, _ := Load()

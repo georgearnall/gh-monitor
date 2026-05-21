@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strconv"
 	"time"
 
 	"github.com/georgearnall/gh-monitor/internal/ghclient"
@@ -131,6 +132,26 @@ func dismissFocused(queue chan<- dismissReq, st *state.State, cfg *watchConfig, 
 		// the notif return honestly instead of staying hidden.
 		delete(st.DismissedNotifs, f.ID)
 	}
+	return newFocus
+}
+
+// dismissFocusedRun hides the focused workflow run from the table. Pure local
+// operation -- no GitHub API call. The run is recorded in DismissedRuns so it
+// stays hidden across subsequent polls until it ages out of the poll window.
+func dismissFocusedRun(st *state.State, cfg *watchConfig, f focusTarget) focusTarget {
+	if f.Panel != "runs" || f.ID == "" {
+		return f
+	}
+	runID, err := strconv.ParseInt(f.ID, 10, 64)
+	if err != nil {
+		return f
+	}
+	newFocus, ok := applyRunDismiss(st, f.ID)
+	if !ok {
+		return f
+	}
+	st.DismissRun(runID)
+	renderFromState(st, *cfg, false, newFocus)
 	return newFocus
 }
 

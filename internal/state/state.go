@@ -38,6 +38,7 @@ type State struct {
 	LastPRs         []prs.PR                      `json:"last_prs,omitempty"`
 	LastNotifs      []notifs.Notification         `json:"last_notifs,omitempty"`
 	DismissedNotifs map[string]DismissEntry       `json:"dismissed_notifs,omitempty"`
+	DismissedRuns   map[int64]time.Time           `json:"dismissed_runs,omitempty"`
 	Repos           []discovery.Repo              `json:"repos,omitempty"`
 	LastPoll        time.Time                     `json:"last_poll,omitempty"`
 	LastRateLimit   ghclient.RateLimit            `json:"last_rate_limit,omitempty"`
@@ -77,7 +78,7 @@ func Load() (*State, error) {
 	if err != nil {
 		return nil, err
 	}
-	s := &State{Runs: map[int64]RunRecord{}, path: p}
+	s := &State{Runs: map[int64]RunRecord{}, DismissedRuns: map[int64]time.Time{}, path: p}
 
 	data, err := os.ReadFile(p)
 	if err != nil {
@@ -91,6 +92,9 @@ func Load() (*State, error) {
 	}
 	if s.Runs == nil {
 		s.Runs = map[int64]RunRecord{}
+	}
+	if s.DismissedRuns == nil {
+		s.DismissedRuns = map[int64]time.Time{}
 	}
 	return s, nil
 }
@@ -183,6 +187,36 @@ func (s *State) PruneDismissedAbsent(present map[string]bool, minAge time.Durati
 			continue
 		}
 		delete(s.DismissedNotifs, id)
+	}
+}
+
+// DismissRun records that the user dismissed a workflow run by ID.
+func (s *State) DismissRun(id int64) {
+	if s.DismissedRuns == nil {
+		s.DismissedRuns = map[int64]time.Time{}
+	}
+	s.DismissedRuns[id] = time.Now()
+}
+
+// IsRunDismissed reports whether a run has been dismissed by the user.
+func (s *State) IsRunDismissed(id int64) bool {
+	_, ok := s.DismissedRuns[id]
+	return ok
+}
+
+// PruneRunDismissals drops dismissal entries whose run ID is no longer
+// present in the latest poll, gated by minAge to avoid racing a dismiss
+// against its immediately-following poll.
+func (s *State) PruneRunDismissals(present map[int64]bool, minAge time.Duration) {
+	cutoff := time.Now().Add(-minAge)
+	for id, dismissedAt := range s.DismissedRuns {
+		if present[id] {
+			continue
+		}
+		if dismissedAt.After(cutoff) {
+			continue
+		}
+		delete(s.DismissedRuns, id)
 	}
 }
 

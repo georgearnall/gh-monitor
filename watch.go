@@ -153,7 +153,11 @@ func runWatch(client *ghclient.Client, cfg watchConfig) {
 			case 'M':
 				markAllVisibleRead(client, st, &cfg, focused)
 			case 'd':
-				focused = dismissFocused(dismissQueue, st, &cfg, focused)
+				if focused.Panel == "runs" {
+					focused = dismissFocusedRun(st, &cfg, focused)
+				} else {
+					focused = dismissFocused(dismissQueue, st, &cfg, focused)
+				}
 			case 'q', 'Q':
 				return
 			}
@@ -285,7 +289,7 @@ func applyResult(st *state.State, cfg *watchConfig, res pollResult) {
 	seen := make(map[int64]bool, len(res.Runs))
 	for _, r := range res.Runs {
 		seen[r.ID] = true
-		if st.Observe(r) == state.TransitionFailure {
+		if st.Observe(r) == state.TransitionFailure && !st.IsRunDismissed(r.ID) {
 			if !cfg.noNotify {
 				if err := notify.Failure(r.Repo, r.WorkflowName, r.Branch, r.URL); err != nil {
 					fmt.Fprintf(os.Stderr, "notify: %v\n", err)
@@ -301,7 +305,14 @@ func applyResult(st *state.State, cfg *watchConfig, res pollResult) {
 	// A transient failure in one branch should leave the other panels alone
 	// (and keep the stale data visible) rather than blanking everything.
 	if res.DiscErr == nil && res.PollErr == nil {
-		st.LastView = res.Runs
+		st.PruneRunDismissals(seen, 60*time.Second)
+		filtered := make([]runs.Run, 0, len(res.Runs))
+		for _, r := range res.Runs {
+			if !st.IsRunDismissed(r.ID) {
+				filtered = append(filtered, r)
+			}
+		}
+		st.LastView = filtered
 	}
 	if res.PRErr == nil && res.PRs != nil {
 		st.LastPRs = res.PRs

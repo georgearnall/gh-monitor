@@ -102,6 +102,45 @@ func moveFocus(st *state.State, current focusTarget, delta int) focusTarget {
 	return targets[next]
 }
 
+// applyRunDismiss removes the run with the given string ID from LastView and
+// returns the focus that should take its place. Mirrors applyDismiss but
+// operates on the runs panel. The bool reports whether the run was present.
+// Pure: no I/O, no goroutines.
+func applyRunDismiss(st *state.State, id string) (focusTarget, bool) {
+	runID, err := strconv.ParseInt(id, 10, 64)
+	if err != nil {
+		return focusTarget{}, false
+	}
+	// Determine current visible position for next-focus calculation.
+	visibleBefore := ui.VisibleRows(st.LastView, st.ViewerLogin)
+	visIdx := -1
+	for i, r := range visibleBefore {
+		if r.ID == runID {
+			visIdx = i
+			break
+		}
+	}
+	if visIdx < 0 {
+		return focusTarget{}, false
+	}
+	// Remove from raw LastView.
+	for i, r := range st.LastView {
+		if r.ID == runID {
+			st.LastView = append(st.LastView[:i], st.LastView[i+1:]...)
+			break
+		}
+	}
+	visibleAfter := ui.VisibleRows(st.LastView, st.ViewerLogin)
+	if len(visibleAfter) == 0 {
+		return pickFocus(st, focusTarget{}), true
+	}
+	ni := visIdx
+	if ni >= len(visibleAfter) {
+		ni = len(visibleAfter) - 1
+	}
+	return focusTarget{"runs", runKey(visibleAfter[ni])}, true
+}
+
 // applyDismiss removes the notification with id from local state and
 // returns the focus that should take its place: the next row in the
 // notifications list (clamped at the end), or pickFocus's fallback when

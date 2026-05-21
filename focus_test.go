@@ -161,6 +161,84 @@ func TestCursorTargets_HonoursVisibilityFilter(t *testing.T) {
 	}
 }
 
+func TestApplyRunDismiss_RemovesAndAdvancesToNext(t *testing.T) {
+	st := mkState(t)
+	st.ViewerLogin = "me"
+	now := time.Now()
+	// Three active runs visible in order 1, 2, 3 (UpdatedAt desc).
+	st.LastView = []runs.Run{
+		{ID: 1, Status: "in_progress", ActorLogin: "me", UpdatedAt: now, CreatedAt: now},
+		{ID: 2, Status: "in_progress", ActorLogin: "me", UpdatedAt: now.Add(-time.Second), CreatedAt: now.Add(-time.Second)},
+		{ID: 3, Status: "in_progress", ActorLogin: "me", UpdatedAt: now.Add(-2 * time.Second), CreatedAt: now.Add(-2 * time.Second)},
+	}
+	// Dismiss the middle run; focus should advance to the same position (ID 3).
+	got, ok := applyRunDismiss(st, "2")
+	if !ok {
+		t.Fatalf("expected ok=true for present ID")
+	}
+	if got != (focusTarget{"runs", "3"}) {
+		t.Errorf("focus = %+v, want runs:3 (next row at same index)", got)
+	}
+	if len(st.LastView) != 2 {
+		t.Errorf("expected 2 runs left in LastView, got %d", len(st.LastView))
+	}
+}
+
+func TestApplyRunDismiss_ClampsAtEnd(t *testing.T) {
+	st := mkState(t)
+	st.ViewerLogin = "me"
+	now := time.Now()
+	st.LastView = []runs.Run{
+		{ID: 1, Status: "in_progress", ActorLogin: "me", UpdatedAt: now, CreatedAt: now},
+		{ID: 2, Status: "in_progress", ActorLogin: "me", UpdatedAt: now.Add(-time.Second), CreatedAt: now.Add(-time.Second)},
+	}
+	// Dismiss the last visible run; focus should clamp to the new last.
+	got, ok := applyRunDismiss(st, "2")
+	if !ok {
+		t.Fatalf("expected ok=true")
+	}
+	if got != (focusTarget{"runs", "1"}) {
+		t.Errorf("focus = %+v, want runs:1 (clamped to new last)", got)
+	}
+}
+
+func TestApplyRunDismiss_FallsBackWhenEmpty(t *testing.T) {
+	st := mkState(t)
+	st.ViewerLogin = "me"
+	now := time.Now()
+	st.LastView = []runs.Run{
+		{ID: 1, Status: "in_progress", ActorLogin: "me", UpdatedAt: now, CreatedAt: now},
+	}
+	st.LastPRs = []prs.PR{{Repo: "a/b", Number: 7}}
+	// Dismiss the only run; focus should fall back to the PRs panel.
+	got, ok := applyRunDismiss(st, "1")
+	if !ok {
+		t.Fatalf("expected ok=true")
+	}
+	if got != (focusTarget{"prs", "a/b#7"}) {
+		t.Errorf("focus = %+v, want prs:a/b#7 (fallback when runs empty)", got)
+	}
+}
+
+func TestApplyRunDismiss_NotPresent(t *testing.T) {
+	st := mkState(t)
+	st.ViewerLogin = "me"
+	now := time.Now()
+	st.LastView = []runs.Run{
+		{ID: 1, Status: "in_progress", ActorLogin: "me", UpdatedAt: now, CreatedAt: now},
+	}
+	got, ok := applyRunDismiss(st, "999")
+	if ok {
+		t.Errorf("expected ok=false for missing ID")
+	}
+	if got != (focusTarget{}) {
+		t.Errorf("focus = %+v, want zero", got)
+	}
+	if len(st.LastView) != 1 {
+		t.Errorf("state should be unchanged when ID not found; got %d runs", len(st.LastView))
+	}
+}
+
 func TestApplyDismiss_RemovesAndAdvancesToNext(t *testing.T) {
 	st := mkState(t)
 	st.LastNotifs = []notifs.Notification{

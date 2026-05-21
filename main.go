@@ -109,8 +109,11 @@ KEYBINDINGS (watch mode)
                         also mark it read.
   m                     Mark focused notification read (no-op on PRs/runs)
   M                     Mark every visible unread notification read
-  d                     Dismiss (mark as done) the focused notification.
-                        Removes it from the inbox entirely.
+  d                     Dismiss the focused row. For notifications: marks
+                        done and removes from inbox. For workflow runs:
+                        hides the run locally until it falls off the poll
+                        window (useful for in-progress runs you don't
+                        care about).
   r  /  R  /  space     Refresh now (don't wait for the next interval)
   q  /  Q  /  Ctrl-C    Quit cleanly, restore terminal, save state
 
