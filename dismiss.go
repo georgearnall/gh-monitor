@@ -194,6 +194,21 @@ func muteFocusedRunRepo(st *state.State, cfg *watchConfig, f focusTarget) {
 	renderFromState(st, *cfg, false, f, "")
 }
 
+// markFocusedRunRead dims the focused workflow run by recording it as read in
+// state. Pure local operation -- no GitHub API call. The run stays visible but
+// is rendered dimmed until it ages out of the poll window.
+func markFocusedRunRead(st *state.State, cfg *watchConfig, f focusTarget) {
+	if f.Panel != "runs" || f.ID == "" {
+		return
+	}
+	runID, err := strconv.ParseInt(f.ID, 10, 64)
+	if err != nil {
+		return
+	}
+	st.MarkRunRead(runID)
+	renderFromState(st, *cfg, false, f, "")
+}
+
 // markFocusedRead marks the focused notification read. No-op if the focused
 // row is not in the notifications panel or is already read.
 func markFocusedRead(client *ghclient.Client, st *state.State, cfg *watchConfig, f focusTarget) {

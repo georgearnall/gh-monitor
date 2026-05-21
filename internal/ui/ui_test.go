@@ -647,7 +647,7 @@ func TestColumnOrdering(t *testing.T) {
 	runsOut := captureStdout(t, func() {
 		writeTable([]runs.Run{
 			{ID: 1, Repo: "a/b", WorkflowName: "CI", Status: "in_progress", URL: "u", CreatedAt: now, UpdatedAt: now},
-		}, "", true, 0, true)
+		}, "", true, 0, true, nil)
 	})
 	if !columnOrderOK(runsOut, []string{"WORKFLOW", "REPO"}) {
 		t.Errorf("runs: WORKFLOW must come before REPO\n%s", runsOut)
@@ -886,7 +886,7 @@ func TestWriteTable_LinkUsesPaleBlue(t *testing.T) {
 	rs := []runs.Run{
 		{ID: 1, Repo: "x/y", WorkflowName: "CI", Status: "in_progress", URL: "u", CreatedAt: now, UpdatedAt: now},
 	}
-	out := captureStdout(t, func() { writeTable(rs, "", true, 300, true) })
+	out := captureStdout(t, func() { writeTable(rs, "", true, 300, true, nil) })
 	if !strings.Contains(out, ansiPaleBlue+"open ↗"+ansiReset) {
 		t.Errorf("expected pale blue link in workflow runs row:\n%q", out)
 	}
@@ -898,7 +898,7 @@ func TestWriteTable_DimsOldCompletedRun(t *testing.T) {
 	rs := []runs.Run{
 		{ID: 1, Repo: "x/y", WorkflowName: "CI", Status: "completed", Conclusion: "success", URL: "u", CreatedAt: old, UpdatedAt: old},
 	}
-	out := captureStdout(t, func() { writeTable(rs, "", true, 300, true) })
+	out := captureStdout(t, func() { writeTable(rs, "", true, 300, true, nil) })
 	// Row-level dim wraps the status cell: ansiDim immediately precedes the colour code.
 	if !strings.Contains(out, ansiDim+ansiGreen) {
 		t.Errorf("old completed run status cell should be wrapped in dim+colour; output:\n%q", out)
@@ -914,7 +914,7 @@ func TestWriteTable_DoesNotDimActiveRun(t *testing.T) {
 	rs := []runs.Run{
 		{ID: 1, Repo: "x/y", WorkflowName: "CI", Status: "in_progress", URL: "u", CreatedAt: now, UpdatedAt: now},
 	}
-	out := captureStdout(t, func() { writeTable(rs, "", true, 300, true) })
+	out := captureStdout(t, func() { writeTable(rs, "", true, 300, true, nil) })
 	// Active run: coloured link (pale blue).
 	if !strings.Contains(out, ansiPaleBlue) {
 		t.Errorf("active run should have pale blue link; output:\n%q", out)
@@ -930,7 +930,7 @@ func TestWriteTable_DoesNotDimRecentCompletedRun(t *testing.T) {
 	rs := []runs.Run{
 		{ID: 1, Repo: "x/y", WorkflowName: "CI", Status: "completed", Conclusion: "success", URL: "u", CreatedAt: now, UpdatedAt: now},
 	}
-	out := captureStdout(t, func() { writeTable(rs, "", true, 300, true) })
+	out := captureStdout(t, func() { writeTable(rs, "", true, 300, true, nil) })
 	// Recent run: coloured link (pale blue).
 	if !strings.Contains(out, ansiPaleBlue) {
 		t.Errorf("recent completed run should have pale blue link; output:\n%q", out)
@@ -1026,7 +1026,7 @@ func TestWriteTable_DimsOrganisation(t *testing.T) {
 	rs := []runs.Run{
 		{ID: 1, Repo: "trainline-private/foo", WorkflowName: "CI", Status: "in_progress", URL: "u", CreatedAt: now, UpdatedAt: now},
 	}
-	out := captureStdout(t, func() { writeTable(rs, "", true, 300, true) })
+	out := captureStdout(t, func() { writeTable(rs, "", true, 300, true, nil) })
 	if !strings.Contains(out, ansiDim+"trainline-private/"+ansiReset+"foo") {
 		t.Errorf("expected owner+slash dimmed in workflow runs table; output:\n%q", out)
 	}
@@ -1076,7 +1076,7 @@ func TestWriteTable_FocusCursor(t *testing.T) {
 		{ID: 9001, Repo: "acme/a", WorkflowName: "CI", Status: "in_progress", URL: "https://github.com/acme/a/runs/9001", CreatedAt: now, UpdatedAt: now},
 		{ID: 9002, Repo: "acme/b", WorkflowName: "Deploy", Status: "in_progress", URL: "https://github.com/acme/b/runs/9002", CreatedAt: now, UpdatedAt: now},
 	}
-	out := captureStdout(t, func() { writeTable(rs, "9002", true, 0, true) })
+	out := captureStdout(t, func() { writeTable(rs, "9002", true, 0, true, nil) })
 	stripped := ansiRe.ReplaceAllString(out, "")
 	if !strings.Contains(stripped, "▶") {
 		t.Fatalf("expected cursor glyph in output:\n%s", stripped)
@@ -1087,7 +1087,7 @@ func TestWriteTable_FocusCursor(t *testing.T) {
 		}
 	}
 
-	out = captureStdout(t, func() { writeTable(rs, "", true, 0, true) })
+	out = captureStdout(t, func() { writeTable(rs, "", true, 0, true, nil) })
 	if strings.Contains(ansiRe.ReplaceAllString(out, ""), "▶") {
 		t.Errorf("expected no run cursor when focusedID empty:\n%s", out)
 	}

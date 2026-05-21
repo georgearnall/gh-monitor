@@ -156,7 +156,8 @@ type Snapshot struct {
 	BgErr          string // recent background-task error to surface in the footer
 	JiraURL        string // base URL for clickable ticket refs (empty = no links)
 	PromptLine     string // non-empty: show an inline input prompt at the footer
-	Links          bool   // whether the terminal supports OSC 8 hyperlinks; hides LINK column when false
+	Links          bool             // whether the terminal supports OSC 8 hyperlinks; hides LINK column when false
+	ReadRunIDs     map[int64]bool   // run IDs the user has marked read; rendered dimmed
 }
 
 // Render redraws the status table. Safe to call when stdout is not a tty;
@@ -195,7 +196,7 @@ func Render(snap Snapshot) {
 	pln(tty)
 	pln(tty, dim("WORKFLOW RUNS", tty))
 	if len(rows) > 0 {
-		writeTable(rows, snap.FocusedRunID, tty, snap.TermWidth, snap.Links)
+		writeTable(rows, snap.FocusedRunID, tty, snap.TermWidth, snap.Links, snap.ReadRunIDs)
 	} else {
 		pln(tty, dim("no active runs or recent failures", tty))
 	}
@@ -621,7 +622,7 @@ func prStatusCell(p prs.PR, compact bool) *Cell {
 // runsRepoCol is the column index of REPO inside writeTable's rows.
 const runsRepoCol = 3
 
-func writeTable(rs []runs.Run, focusedID string, tty bool, termWidth int, links bool) {
+func writeTable(rs []runs.Run, focusedID string, tty bool, termWidth int, links bool, readIDs map[int64]bool) {
 	headers := []string{"  ", "STATUS", "WORKFLOW", "REPO", "BRANCH", "AGE"}
 	if links {
 		headers = append(headers, "LINK")
@@ -629,7 +630,7 @@ func writeTable(rs []runs.Run, focusedID string, tty bool, termWidth int, links 
 	t := newPanelTable(dimRow(headers, tty), runsRepoCol, termWidth, tty)
 	today := startOfToday()
 	for _, r := range rs {
-		dim := !r.IsActive() && r.UpdatedAt.Before(today)
+		dim := (!r.IsActive() && r.UpdatedAt.Before(today)) || readIDs[r.ID]
 		cursor := "  "
 		if focusedID != "" && strconv.FormatInt(r.ID, 10) == focusedID {
 			cursor = color(ansiYellow, "▶", tty) + " "

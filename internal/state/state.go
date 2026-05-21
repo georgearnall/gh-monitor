@@ -39,6 +39,7 @@ type State struct {
 	LastNotifs      []notifs.Notification         `json:"last_notifs,omitempty"`
 	DismissedNotifs map[string]DismissEntry       `json:"dismissed_notifs,omitempty"`
 	DismissedRuns   map[int64]time.Time           `json:"dismissed_runs,omitempty"`
+	MarkedReadRuns  map[int64]time.Time           `json:"marked_read_runs,omitempty"`
 	MutedRepos      map[string]bool               `json:"muted_repos,omitempty"`
 	Repos           []discovery.Repo              `json:"repos,omitempty"`
 	LastPoll        time.Time                     `json:"last_poll,omitempty"`
@@ -84,7 +85,7 @@ func Load() (*State, error) {
 	if err != nil {
 		return nil, err
 	}
-	s := &State{Runs: map[int64]RunRecord{}, DismissedRuns: map[int64]time.Time{}, MutedRepos: map[string]bool{}, path: p}
+	s := &State{Runs: map[int64]RunRecord{}, DismissedRuns: map[int64]time.Time{}, MarkedReadRuns: map[int64]time.Time{}, MutedRepos: map[string]bool{}, path: p}
 
 	data, err := os.ReadFile(p)
 	if err != nil {
@@ -101,6 +102,9 @@ func Load() (*State, error) {
 	}
 	if s.DismissedRuns == nil {
 		s.DismissedRuns = map[int64]time.Time{}
+	}
+	if s.MarkedReadRuns == nil {
+		s.MarkedReadRuns = map[int64]time.Time{}
 	}
 	return s, nil
 }
@@ -223,6 +227,36 @@ func (s *State) PruneRunDismissals(present map[int64]bool, minAge time.Duration)
 			continue
 		}
 		delete(s.DismissedRuns, id)
+	}
+}
+
+// MarkRunRead records that the user has marked a workflow run as read (dimmed).
+func (s *State) MarkRunRead(id int64) {
+	if s.MarkedReadRuns == nil {
+		s.MarkedReadRuns = map[int64]time.Time{}
+	}
+	s.MarkedReadRuns[id] = time.Now()
+}
+
+// IsRunRead reports whether a run has been marked read by the user.
+func (s *State) IsRunRead(id int64) bool {
+	_, ok := s.MarkedReadRuns[id]
+	return ok
+}
+
+// PruneReadRuns drops read-run entries whose run ID is no longer present in
+// the latest poll, gated by minAge to avoid racing a mark-read against its
+// immediately-following poll.
+func (s *State) PruneReadRuns(present map[int64]bool, minAge time.Duration) {
+	cutoff := time.Now().Add(-minAge)
+	for id, markedAt := range s.MarkedReadRuns {
+		if present[id] {
+			continue
+		}
+		if markedAt.After(cutoff) {
+			continue
+		}
+		delete(s.MarkedReadRuns, id)
 	}
 }
 

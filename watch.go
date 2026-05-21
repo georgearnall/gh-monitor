@@ -195,6 +195,7 @@ func runWatch(client *ghclient.Client, cfg watchConfig) {
 				markFocusedRead(client, st, &cfg, focused)
 			case 'm':
 				markFocusedRead(client, st, &cfg, focused)
+				markFocusedRunRead(st, &cfg, focused)
 			case 'd':
 				if focused.Panel == "runs" {
 					focused = dismissFocusedRun(st, &cfg, focused)
@@ -379,6 +380,7 @@ func applyResult(st *state.State, cfg *watchConfig, res pollResult) {
 	// (and keep the stale data visible) rather than blanking everything.
 	if res.DiscErr == nil && res.PollErr == nil {
 		st.PruneRunDismissals(seen, 60*time.Second)
+		st.PruneReadRuns(seen, 60*time.Second)
 		viewer := res.ViewerLogin
 		if viewer == "" {
 			viewer = st.ViewerLogin
@@ -458,6 +460,7 @@ func renderFromState(st *state.State, cfg watchConfig, refreshing bool, f focusT
 		JiraURL:       effectiveJiraURLFor(cfg, st),
 		PromptLine:    promptLine,
 		Links:         ui.SupportsLinks(),
+		ReadRunIDs:    readRunIDs(st),
 	}
 	switch f.Panel {
 	case "notifs":
@@ -468,6 +471,17 @@ func renderFromState(st *state.State, cfg watchConfig, refreshing bool, f focusT
 		snap.FocusedRunID = f.ID
 	}
 	ui.Render(snap)
+}
+
+func readRunIDs(st *state.State) map[int64]bool {
+	if len(st.MarkedReadRuns) == 0 {
+		return nil
+	}
+	out := make(map[int64]bool, len(st.MarkedReadRuns))
+	for id := range st.MarkedReadRuns {
+		out[id] = true
+	}
+	return out
 }
 
 func effectiveJiraURLFor(cfg watchConfig, st *state.State) string {
