@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"sort"
 	"syscall"
 	"time"
 
@@ -102,27 +103,35 @@ func runWatch(client *ghclient.Client, cfg watchConfig) {
 	var (
 		refreshing bool
 		nextTimer  *time.Timer
+		configMode bool
 	)
+	render := func() {
+		if configMode {
+			renderConfig(st, cfg)
+		} else {
+			renderFromState(st, cfg, refreshing, focused)
+		}
+	}
 
 	for {
 		select {
 		case <-started:
 			refreshing = true
-			renderFromState(st, cfg, refreshing, focused)
+			render()
 
 		case <-winch:
 			// On resize the alternate screen often retains wrapped
 			// fragments of the previous render that the in-place
 			// overwrite path won't touch. One-off full clear here.
 			fmt.Print("\x1b[H\x1b[2J")
-			renderFromState(st, cfg, refreshing, focused)
+			render()
 
 		case res := <-results:
 			refreshing = false
 			applyResult(st, &cfg, res)
 			st.EtagCache = client.Etags()
 			focused = pickFocus(st, focused)
-			renderFromState(st, cfg, false, focused)
+			render()
 			if err := st.Save(); err != nil {
 				fmt.Fprintf(os.Stderr, "save state: %v\n", err)
 			}
@@ -133,6 +142,9 @@ func runWatch(client *ghclient.Client, cfg watchConfig) {
 			nextTimer = time.AfterFunc(next, func() { enqueue(trigger) })
 
 		case k := <-keys:
+			if configMode && k != '?' && k != 'q' && k != 'Q' {
+				continue
+			}
 			switch k {
 			case 'r', 'R', ' ':
 				if nextTimer != nil {
@@ -162,6 +174,9 @@ func runWatch(client *ghclient.Client, cfg watchConfig) {
 				if focused.Panel == "runs" {
 					muteFocusedRunRepo(st, &cfg, focused)
 				}
+			case '?':
+				configMode = !configMode
+				render()
 			case 'q', 'Q':
 				return
 			}
@@ -460,4 +475,36 @@ func producerLoop(
 			return
 		}
 	}
+}
+
+func renderConfig(st *state.State, cfg watchConfig) {
+	excl := make([]string, 0, len(cfg.excluded))
+	for r := range cfg.excluded {
+		excl = append(excl, r)
+	}
+	sort.Strings(excl)
+	repos := make([]ui.RepoStatus, 0, len(st.Repos))
+	for _, r := range st.Repos {
+		repos = append(repos, ui.RepoStatus{
+			Name:     r.FullName,
+			Activity: r.Activity,
+			Muted:    st.MutedRepos[r.FullName],
+		})
+	}
+	sort.Slice(repos, func(i, j int) bool {
+		return repos[i].Activity.After(repos[j].Activity)
+	})
+	ui.RenderConfig(ui.ConfigSnapshot{
+		Repos:          repos,
+		ExcludedRepos:  excl,
+		ViewerLogin:    st.ViewerLogin,
+		BaseInterval:   cfg.baseInterval,
+		ActiveInterval: cfg.activeInterval,
+		RepoRefresh:    cfg.repoRefresh,
+		MaxRepos:       cfg.maxRepos,
+		PRSince:        cfg.prSince,
+		RateRemaining:  st.LastRateLimit.Remaining,
+		RateLimit:      st.LastRateLimit.Limit,
+		TermWidth:      ui.TermWidth(),
+	})
 }

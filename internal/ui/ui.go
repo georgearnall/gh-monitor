@@ -204,6 +204,109 @@ func Render(snap Snapshot) {
 	}
 }
 
+// RepoStatus is a flattened view of one discovered repository for the config
+// screen. Callers build it from state.Repos + state.MutedRepos.
+type RepoStatus struct {
+	Name     string    // "owner/repo"
+	Activity time.Time
+	Muted    bool
+}
+
+// ConfigSnapshot is the input to RenderConfig.
+type ConfigSnapshot struct {
+	Repos          []RepoStatus
+	ExcludedRepos  []string // sorted, from --exclude flag
+	ViewerLogin    string
+	BaseInterval   time.Duration
+	ActiveInterval time.Duration
+	RepoRefresh    time.Duration
+	MaxRepos       int
+	PRSince        time.Duration
+	RateRemaining  int
+	RateLimit      int
+	TermWidth      int
+}
+
+// RenderConfig redraws the config screen, which entirely replaces the main
+// view while active. Shows settings, monitored repos with muted status, and
+// any statically excluded repos.
+func RenderConfig(snap ConfigSnapshot) {
+	tty := isTTY(os.Stdout)
+	if tty {
+		fmt.Print(ansiHome)
+	}
+
+	title := "gh-monitor"
+	if tty {
+		title = ansiBold + title + ansiReset
+	}
+	pln(tty, title+" - config")
+
+	pln(tty)
+	pln(tty, dim("SETTINGS", tty))
+	settings := [][]string{
+		{"  " + dim("Active poll", tty), snap.ActiveInterval.String()},
+		{"  " + dim("Idle poll", tty), snap.BaseInterval.String()},
+		{"  " + dim("Repo refresh", tty), snap.RepoRefresh.String()},
+		{"  " + dim("PR window", tty), prSinceLabel(snap.PRSince)},
+		{"  " + dim("Max repos", tty), strconv.Itoa(snap.MaxRepos)},
+		{"  " + dim("Viewer", tty), snap.ViewerLogin},
+	}
+	if snap.RateLimit > 0 {
+		settings = append(settings, []string{"  " + dim("Rate limit", tty), fmt.Sprintf("%d/%d", snap.RateRemaining, snap.RateLimit)})
+	}
+	printAligned(settings)
+
+	pln(tty)
+	pln(tty, dim(fmt.Sprintf("MONITORED REPOS (%d)", len(snap.Repos)), tty))
+	if len(snap.Repos) == 0 {
+		pln(tty, "  "+dim("none discovered yet", tty))
+	} else {
+		writeConfigRepoTable(snap.Repos, tty, snap.TermWidth)
+	}
+
+	if len(snap.ExcludedRepos) > 0 {
+		pln(tty)
+		pln(tty, dim(fmt.Sprintf("EXCLUDED REPOS (%d)", len(snap.ExcludedRepos)), tty))
+		for _, r := range snap.ExcludedRepos {
+			pln(tty, "  "+r)
+		}
+	}
+
+	pln(tty)
+	if tty {
+		pln(tty, dim("[?] close  [q] quit", tty))
+	}
+	if tty {
+		fmt.Print(ansiClearBelow)
+	}
+}
+
+func prSinceLabel(d time.Duration) string {
+	if d == 0 {
+		return "disabled"
+	}
+	if d%(24*time.Hour) == 0 {
+		return fmt.Sprintf("%dd", int(d/(24*time.Hour)))
+	}
+	return d.String()
+}
+
+func writeConfigRepoTable(repos []RepoStatus, tty bool, termWidth int) {
+	t := newPanelTable(
+		dimRow([]string{"REPO", "LAST ACTIVITY", "STATUS"}, tty),
+		0, termWidth, tty,
+	)
+	for _, r := range repos {
+		status := ""
+		if r.Muted {
+			status = dim("muted", tty)
+		}
+		t.addRow([]string{r.Name, relativeAge(r.Activity), status}, false)
+	}
+	t.render()
+}
+
 func windowTitleString(unread, active, failed int) string {
 	if unread > 0 {
 		return fmt.Sprintf("gh-monitor · %d unread · %d active · %d recent failures", unread, active, failed)
@@ -242,7 +345,7 @@ func footer(snap Snapshot, tty bool) {
 		pln(tty, color(ansiRed, "⚠ "+snap.BgErr, tty))
 	}
 	if tty {
-		pln(tty, dim("[↑↓] move  [↵] open  [m] read  [d] dismiss  [x] mute repo  [M] read all  [r] refresh  [q] quit", tty))
+		pln(tty, dim("[↑↓] move  [↵] open  [m] read  [d] dismiss  [x] mute repo  [M] read all  [r] refresh  [?] config  [q] quit", tty))
 	}
 }
 
