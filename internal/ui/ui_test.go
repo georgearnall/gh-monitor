@@ -238,24 +238,25 @@ func TestVisibleRows_FilterAndCap(t *testing.T) {
 		}
 	})
 
-	t.Run("completed by me kept for up to 24h", func(t *testing.T) {
+	t.Run("completed by me kept for up to 48h", func(t *testing.T) {
 		rs := []runs.Run{
-			mk(1, "completed", "success", "me", -10*time.Minute),  // recent — keep
-			mk(2, "completed", "failure", "me", -23*time.Hour),     // within 24h — keep
-			mk(3, "completed", "success", "me", -25*time.Hour),     // outside 24h — drop
+			mk(1, "completed", "success", "me", -10*time.Minute), // recent — keep
+			mk(2, "completed", "failure", "me", -23*time.Hour),   // within 48h — keep
+			mk(3, "completed", "success", "me", -25*time.Hour),   // also within 48h — keep
+			mk(4, "completed", "success", "me", -49*time.Hour),   // outside 48h — drop
 		}
 		out := VisibleRows(rs, viewer)
-		if len(out) != 2 {
-			t.Errorf("got %d, want 2: %+v", len(out), out)
+		if len(out) != 3 {
+			t.Errorf("got %d, want 3: %+v", len(out), out)
 		}
 		for _, r := range out {
-			if r.ID == 3 {
-				t.Errorf(">24h run leaked through")
+			if r.ID == 4 {
+				t.Errorf(">48h run leaked through")
 			}
 		}
 	})
 
-	t.Run("active sorted first, then by UpdatedAt desc", func(t *testing.T) {
+	t.Run("sorted purely by UpdatedAt desc", func(t *testing.T) {
 		rs := []runs.Run{
 			mk(1, "completed", "success", "me", -1*time.Minute),
 			mk(2, "in_progress", "", "someone-else", -5*time.Hour),
@@ -265,11 +266,9 @@ func TestVisibleRows_FilterAndCap(t *testing.T) {
 		if len(out) != 3 {
 			t.Fatalf("got %d, want 3", len(out))
 		}
-		if out[0].ID != 2 {
-			t.Errorf("active should be first, got id=%d", out[0].ID)
-		}
-		if out[1].ID != 1 || out[2].ID != 3 {
-			t.Errorf("completed should sort by UpdatedAt desc, got [%d, %d, %d]", out[0].ID, out[1].ID, out[2].ID)
+		// Pure UpdatedAt desc: -1m, -30m, -5h
+		if out[0].ID != 1 || out[1].ID != 3 || out[2].ID != 2 {
+			t.Errorf("want order [1,3,2] (UpdatedAt desc), got [%d,%d,%d]", out[0].ID, out[1].ID, out[2].ID)
 		}
 	})
 
@@ -890,6 +889,55 @@ func TestWriteTable_LinkUsesPaleBlue(t *testing.T) {
 	out := captureStdout(t, func() { writeTable(rs, "", true, 300) })
 	if !strings.Contains(out, ansiPaleBlue+"open ↗"+ansiReset) {
 		t.Errorf("expected pale blue link in workflow runs row:\n%q", out)
+	}
+}
+
+func TestWriteTable_DimsOldCompletedRun(t *testing.T) {
+	// A run completed 2 days ago is before startOfToday() so should be dimmed.
+	old := time.Now().AddDate(0, 0, -2)
+	rs := []runs.Run{
+		{ID: 1, Repo: "x/y", WorkflowName: "CI", Status: "completed", Conclusion: "success", URL: "u", CreatedAt: old, UpdatedAt: old},
+	}
+	out := captureStdout(t, func() { writeTable(rs, "", true, 300) })
+	// Row-level dim wraps the status cell: ansiDim immediately precedes the colour code.
+	if !strings.Contains(out, ansiDim+ansiGreen) {
+		t.Errorf("old completed run status cell should be wrapped in dim+colour; output:\n%q", out)
+	}
+	// Dimmed rows use plain hyperlink, not coloredHyperlink (no pale blue).
+	if strings.Contains(out, ansiPaleBlue) {
+		t.Errorf("old completed run link should not use pale blue (would break dim wrap); output:\n%q", out)
+	}
+}
+
+func TestWriteTable_DoesNotDimActiveRun(t *testing.T) {
+	now := time.Now()
+	rs := []runs.Run{
+		{ID: 1, Repo: "x/y", WorkflowName: "CI", Status: "in_progress", URL: "u", CreatedAt: now, UpdatedAt: now},
+	}
+	out := captureStdout(t, func() { writeTable(rs, "", true, 300) })
+	// Active run: coloured link (pale blue).
+	if !strings.Contains(out, ansiPaleBlue) {
+		t.Errorf("active run should have pale blue link; output:\n%q", out)
+	}
+	// Active run status uses yellow (not dim+yellow).
+	if strings.Contains(out, ansiDim+ansiYellow) {
+		t.Errorf("active run status should not be wrapped in dim; output:\n%q", out)
+	}
+}
+
+func TestWriteTable_DoesNotDimRecentCompletedRun(t *testing.T) {
+	now := time.Now()
+	rs := []runs.Run{
+		{ID: 1, Repo: "x/y", WorkflowName: "CI", Status: "completed", Conclusion: "success", URL: "u", CreatedAt: now, UpdatedAt: now},
+	}
+	out := captureStdout(t, func() { writeTable(rs, "", true, 300) })
+	// Recent run: coloured link (pale blue).
+	if !strings.Contains(out, ansiPaleBlue) {
+		t.Errorf("recent completed run should have pale blue link; output:\n%q", out)
+	}
+	// Recent completed run status: green check closed with full reset, not dim.
+	if strings.Contains(out, ansiDim+ansiGreen) {
+		t.Errorf("recent completed run status should not be wrapped in dim; output:\n%q", out)
 	}
 }
 

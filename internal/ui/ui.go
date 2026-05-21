@@ -16,6 +16,8 @@ import (
 	"github.com/georgearnall/gh-monitor/internal/runs"
 )
 
+const runsWindow = 48 * time.Hour
+
 const (
 	// ansiHome moves the cursor to (1,1) without clearing. The render uses
 	// it together with ansiClearBelow so each redraw overwrites content in
@@ -505,10 +507,16 @@ func writeTable(rs []runs.Run, focusedID string, tty bool, termWidth int) {
 		dimRow([]string{"  ", "STATUS", "WORKFLOW", "REPO", "BRANCH", "AGE", "LINK"}, tty),
 		runsRepoCol, termWidth, tty,
 	)
+	today := startOfToday()
 	for _, r := range rs {
+		dim := !r.IsActive() && r.UpdatedAt.Before(today)
 		link := r.URL
 		if tty {
-			link = coloredHyperlink(r.URL, "open ↗")
+			if dim {
+				link = hyperlink(r.URL, "open ↗")
+			} else {
+				link = coloredHyperlink(r.URL, "open ↗")
+			}
 		}
 		cursor := "  "
 		if focusedID != "" && strconv.FormatInt(r.ID, 10) == focusedID {
@@ -516,13 +524,13 @@ func writeTable(rs []runs.Run, focusedID string, tty bool, termWidth int) {
 		}
 		t.addRow([]string{
 			cursor,
-			statusCell(r).Render(tty, false),
+			statusCell(r).Render(tty, dim),
 			truncate(r.WorkflowName, 30),
 			r.Repo,
 			truncate(r.Branch, 30),
 			ageString(r),
 			link,
-		}, false)
+		}, dim && tty)
 	}
 	t.render()
 }
@@ -730,11 +738,11 @@ const maxVisibleRuns = 10
 
 // VisibleRows filters runs for the workflow table:
 //   - All currently-active runs are kept (any actor).
-//   - Completed runs are kept only if triggered by the viewer themselves
-//     AND within the last 24 hours.
+//   - Completed runs triggered by the viewer are kept for runsWindow (7 days);
+//     runs from before today are dimmed by writeTable, older ones drop off.
 //   - Anything else drops as soon as it finishes.
 //
-// Result is sorted active-first, then by UpdatedAt desc, then truncated to
+// Result is sorted by UpdatedAt desc (newest first) then truncated to
 // maxVisibleRuns. Exported so the watch loop can mirror the same filter
 // when building its cursor target list.
 func VisibleRows(rs []runs.Run, viewerLogin string) []runs.Run {
@@ -746,15 +754,11 @@ func VisibleRows(rs []runs.Run, viewerLogin string) []runs.Run {
 		switch {
 		case r.IsActive():
 			out = append(out, r)
-		case viewerLogin != "" && r.ActorLogin == viewerLogin && time.Since(r.UpdatedAt) < 24*time.Hour:
+		case viewerLogin != "" && r.ActorLogin == viewerLogin && time.Since(r.UpdatedAt) < runsWindow:
 			out = append(out, r)
 		}
 	}
 	sort.Slice(out, func(i, j int) bool {
-		ai, aj := out[i].IsActive(), out[j].IsActive()
-		if ai != aj {
-			return ai
-		}
 		return out[i].UpdatedAt.After(out[j].UpdatedAt)
 	})
 	if len(out) > maxVisibleRuns {
@@ -806,6 +810,11 @@ func ageString(r runs.Run) string {
 		return fmt.Sprintf("%dh", int(d.Hours()))
 	}
 	return fmt.Sprintf("%dd", int(d.Hours()/24))
+}
+
+func startOfToday() time.Time {
+	now := time.Now()
+	return time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
 }
 
 func truncate(s string, n int) string {
