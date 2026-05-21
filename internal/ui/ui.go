@@ -346,15 +346,15 @@ func footer(snap Snapshot, tty bool) {
 		parts = append(parts, fmt.Sprintf("next poll in %s", snap.NextPollIn.Round(time.Second)))
 	}
 	pln(tty)
+	if tty {
+		pln(tty, dim("[↑↓] move  [↵] open  [m] read  [d] dismiss  [x] mute repo  [t] ticket  [r] refresh  [?] config  [q] quit", tty))
+	}
 	pln(tty, dim(join(parts, " · "), tty))
 	if snap.BgErr != "" {
 		pln(tty, color(ansiRed, "⚠ "+snap.BgErr, tty))
 	}
 	if snap.PromptLine != "" {
 		pln(tty, snap.PromptLine)
-	}
-	if tty {
-		pln(tty, dim("[↑↓] move  [↵] open  [m] read  [d] dismiss  [x] mute repo  [t] ticket  [r] refresh  [?] config  [q] quit", tty))
 	}
 }
 
