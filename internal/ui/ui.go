@@ -1126,7 +1126,7 @@ func SupportsLinks() bool {
 		return false
 	}
 	switch os.Getenv("TERM_PROGRAM") {
-	case "iTerm.app", "WezTerm", "kitty":
+	case "iTerm.app", "WezTerm", "kitty", "ghostty":
 		return true
 	}
 	if os.Getenv("VTE_VERSION") != "" { // GNOME Terminal / Tilix / etc.
