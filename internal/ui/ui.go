@@ -140,6 +140,7 @@ func (t *panelTable) render() {
 type Snapshot struct {
 	Runs           []runs.Run
 	PRs            []prs.PR
+	AssignedPRs    []prs.PR
 	Notifs         []notifs.Notification
 	FocusedNotifID string // notification ID to highlight, or "" for none
 	FocusedPRKey   string // PR key "owner/repo#number" to highlight, or "" for none
@@ -191,6 +192,12 @@ func Render(snap Snapshot) {
 		writePRTable(snap.PRs, snap.FocusedPRKey, tty, snap.TermWidth, snap.JiraURL, snap.Links)
 	} else {
 		pln(tty, dim("no open pull requests", tty))
+	}
+
+	if len(snap.AssignedPRs) > 0 {
+		pln(tty)
+		pln(tty, dim("ASSIGNED PULL REQUESTS", tty))
+		writePRTable(snap.AssignedPRs, snap.FocusedPRKey, tty, snap.TermWidth, snap.JiraURL, snap.Links)
 	}
 
 	pln(tty)

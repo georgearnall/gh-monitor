@@ -82,6 +82,39 @@ const query = `
       }
     }
   }
+  assignedPRs: search(query: "is:pr is:open assignee:@me -author:@me", type: ISSUE, first: 50) {
+    nodes {
+      ... on PullRequest {
+        number
+        title
+        url
+        isDraft
+        updatedAt
+        headRefName
+        reviewDecision
+        reviews(first: 1) { totalCount }
+        comments(first: 1) { totalCount }
+        repository { nameWithOwner }
+        commits(last: 1) {
+          nodes {
+            commit {
+              statusCheckRollup {
+                state
+                contexts(first: 100) {
+                  totalCount
+                  nodes {
+                    __typename
+                    ... on CheckRun { conclusion status }
+                    ... on StatusContext { state }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
 }`
 
 type response struct {
@@ -90,6 +123,9 @@ type response struct {
 			Nodes []prNode `json:"nodes"`
 		} `json:"pullRequests"`
 	} `json:"viewer"`
+	AssignedPRs struct {
+		Nodes []prNode `json:"nodes"`
+	} `json:"assignedPRs"`
 }
 
 type prNode struct {
@@ -134,17 +170,26 @@ type contextNode struct {
 }
 
 // Poll returns the authenticated user's open, non-draft pull requests with
-// aggregated status-check counts. PRs whose UpdatedAt is before `since` are
-// dropped; a zero `since` disables the filter and returns everything.
-func Poll(client *ghclient.Client, since time.Time) ([]PR, error) {
+// aggregated status-check counts. The first slice is PRs authored by the
+// viewer; the second is PRs assigned to the viewer by others.
+// PRs whose UpdatedAt is before `since` are dropped; a zero `since` disables
+// the filter and returns everything.
+func Poll(client *ghclient.Client, since time.Time) (authored []PR, assigned []PR, err error) {
 	var resp response
 	if err := client.GraphQL(query, nil, &resp); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
+	authored = parseNodes(resp.Viewer.PullRequests.Nodes, since)
+	assigned = parseNodes(resp.AssignedPRs.Nodes, since)
+	prSort(authored)
+	prSort(assigned)
+	return authored, assigned, nil
+}
 
-	out := make([]PR, 0, len(resp.Viewer.PullRequests.Nodes))
-	for _, n := range resp.Viewer.PullRequests.Nodes {
-		if n.IsDraft {
+func parseNodes(nodes []prNode, since time.Time) []PR {
+	out := make([]PR, 0, len(nodes))
+	for _, n := range nodes {
+		if n.IsDraft || n.Number == 0 {
 			continue
 		}
 		if !since.IsZero() && n.UpdatedAt.Before(since) {
@@ -172,18 +217,19 @@ func Poll(client *ghclient.Client, since time.Time) ([]PR, error) {
 		}
 		out = append(out, pr)
 	}
+	return out
+}
 
-	sort.Slice(out, func(i, j int) bool {
-		if out[i].IsFailing() != out[j].IsFailing() {
-			return out[i].IsFailing()
+func prSort(ps []PR) {
+	sort.Slice(ps, func(i, j int) bool {
+		if ps[i].IsFailing() != ps[j].IsFailing() {
+			return ps[i].IsFailing()
 		}
-		if out[i].IsPending() != out[j].IsPending() {
-			return out[i].IsPending()
+		if ps[i].IsPending() != ps[j].IsPending() {
+			return ps[i].IsPending()
 		}
-		return out[i].UpdatedAt.After(out[j].UpdatedAt)
+		return ps[i].UpdatedAt.After(ps[j].UpdatedAt)
 	})
-
-	return out, nil
 }
 
 func bucket(c contextNode, pr *PR) {
