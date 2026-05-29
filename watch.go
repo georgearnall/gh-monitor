@@ -46,6 +46,7 @@ type pollResult struct {
 	Repos       []discovery.Repo
 	Runs        []runs.Run
 	PRs         []prs.PR
+	AssignedPRs []prs.PR
 	Notifs      []notifs.Notification
 	ViewerLogin string
 	RateLimit   ghclient.RateLimit
@@ -318,8 +319,9 @@ func doRefresh(ctx context.Context, client *ghclient.Client, cfg *watchConfig) p
 		if cfg.prSince > 0 {
 			since = time.Now().Add(-cfg.prSince)
 		}
-		pulled, prErr := prs.Poll(client, since)
-		res.PRs = pulled
+		authored, assigned, prErr := prs.Poll(client, since)
+		res.PRs = authored
+		res.AssignedPRs = assigned
 		res.PRErr = prErr
 		return nil
 	})
@@ -399,6 +401,7 @@ func applyResult(st *state.State, cfg *watchConfig, res pollResult) {
 	}
 	if res.PRErr == nil && res.PRs != nil {
 		st.LastPRs = res.PRs
+		st.LastAssignedPRs = res.AssignedPRs
 	}
 	if res.NotifErr == nil && res.Notifs != nil {
 		// Self-healing dismiss prune: drop guards whose ID is no longer
@@ -446,6 +449,7 @@ func renderFromState(st *state.State, cfg watchConfig, refreshing bool, f focusT
 	snap := ui.Snapshot{
 		Runs:          st.LastView,
 		PRs:           st.LastPRs,
+		AssignedPRs:   st.LastAssignedPRs,
 		Notifs:        st.LastNotifs,
 		ViewerLogin:   st.ViewerLogin,
 		RepoCount:     len(st.Repos),
@@ -581,6 +585,14 @@ func findTicketInFocused(st *state.State, f focusTarget) string {
 			if prKey(p) == f.ID {
 				title = p.Title
 				break
+			}
+		}
+		if title == "" {
+			for _, p := range st.LastAssignedPRs {
+				if prKey(p) == f.ID {
+					title = p.Title
+					break
+				}
 			}
 		}
 	}

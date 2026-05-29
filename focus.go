@@ -38,11 +38,14 @@ func runKey(r runs.Run) string {
 func cursorTargets(st *state.State) []focusTarget {
 	notifRows := ui.VisibleNotifs(st.LastNotifs)
 	runRows := ui.VisibleRows(st.LastView, st.ViewerLogin)
-	out := make([]focusTarget, 0, len(notifRows)+len(st.LastPRs)+len(runRows))
+	out := make([]focusTarget, 0, len(notifRows)+len(st.LastPRs)+len(st.LastAssignedPRs)+len(runRows))
 	for _, n := range notifRows {
 		out = append(out, focusTarget{"notifs", n.ID})
 	}
 	for _, p := range st.LastPRs {
+		out = append(out, focusTarget{"prs", prKey(p)})
+	}
+	for _, p := range st.LastAssignedPRs {
 		out = append(out, focusTarget{"prs", prKey(p)})
 	}
 	for _, r := range runRows {
@@ -195,6 +198,11 @@ func focusedURL(st *state.State, f focusTarget) string {
 		}
 	case "prs":
 		for _, p := range st.LastPRs {
+			if prKey(p) == f.ID {
+				return p.URL
+			}
+		}
+		for _, p := range st.LastAssignedPRs {
 			if prKey(p) == f.ID {
 				return p.URL
 			}

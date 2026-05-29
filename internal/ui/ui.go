@@ -14,6 +14,7 @@ import (
 	"github.com/georgearnall/gh-monitor/internal/notifs"
 	"github.com/georgearnall/gh-monitor/internal/prs"
 	"github.com/georgearnall/gh-monitor/internal/runs"
+	"golang.org/x/term"
 )
 
 const runsWindow = 48 * time.Hour
@@ -140,6 +141,7 @@ func (t *panelTable) render() {
 type Snapshot struct {
 	Runs           []runs.Run
 	PRs            []prs.PR
+	AssignedPRs    []prs.PR
 	Notifs         []notifs.Notification
 	FocusedNotifID string // notification ID to highlight, or "" for none
 	FocusedPRKey   string // PR key "owner/repo#number" to highlight, or "" for none
@@ -191,6 +193,12 @@ func Render(snap Snapshot) {
 		writePRTable(snap.PRs, snap.FocusedPRKey, tty, snap.TermWidth, snap.JiraURL, snap.Links)
 	} else {
 		pln(tty, dim("no open pull requests", tty))
+	}
+
+	if len(snap.AssignedPRs) > 0 {
+		pln(tty)
+		pln(tty, dim("ASSIGNED PULL REQUESTS", tty))
+		writePRTable(snap.AssignedPRs, snap.FocusedPRKey, tty, snap.TermWidth, snap.JiraURL, snap.Links)
 	}
 
 	pln(tty)
@@ -454,6 +462,11 @@ func writeNotifsTable(ns []notifs.Notification, focusedID string, tty bool, term
 func reasonCell(n notifs.Notification) *Cell {
 	if n.Reason == "author" || n.Reason == "assign" {
 		return stateCell(n.PRState)
+	}
+	// For terminal states, lead with the state so the user knows the PR is done.
+	if n.PRState == notifs.PRStateMerged || n.PRState == notifs.PRStateClosed {
+		icon, label, col := stateGlyph(n.PRState)
+		return NewCell().Colored(col, icon).Plain(" " + label)
 	}
 	c := NewCell()
 	switch n.Reason {
@@ -1008,48 +1021,30 @@ func ClearWindowTitle() {
 
 // EnterAltScreen swaps the terminal to its alternate screen buffer, puts stdin
 // in cbreak mode (-echo -icanon) so keypresses arrive byte-by-byte without
-// being echoed, and hides the cursor. Returns an opaque token to pass to
-// ExitAltScreen to restore the previous terminal state exactly.
-func EnterAltScreen() (saved string) {
+// being echoed, and hides the cursor. Returns the saved terminal state to pass
+// to ExitAltScreen.
+func EnterAltScreen() *term.State {
 	if !isTTY(os.Stdout) {
-		return ""
+		return nil
 	}
-	saved = sttySaveState()
+	saved, _ := term.GetState(int(os.Stdin.Fd()))
 	sttyApply("-echo", "-icanon")
 	fmt.Fprint(os.Stdout, "\x1b[?1049h\x1b[H\x1b[?25l")
 	return saved
 }
 
 // ExitAltScreen restores the primary screen buffer, restores the cursor, and
-// restores the terminal mode captured by EnterAltScreen.
-func ExitAltScreen(saved string) {
+// restores the terminal mode captured by EnterAltScreen. The restore is a
+// direct ioctl (not a subprocess) so it completes atomically before the
+// process exits.
+func ExitAltScreen(saved *term.State) {
 	if !isTTY(os.Stdout) {
 		return
 	}
 	fmt.Fprint(os.Stdout, "\x1b[?25h\x1b[?1049l")
-	sttyRestore(saved)
-}
-
-func sttySaveState() string {
-	if !isTTY(os.Stdin) {
-		return ""
+	if saved != nil {
+		_ = term.Restore(int(os.Stdin.Fd()), saved)
 	}
-	cmd := exec.Command("stty", "-g")
-	cmd.Stdin = os.Stdin
-	out, err := cmd.Output()
-	if err != nil {
-		return ""
-	}
-	return strings.TrimSpace(string(out))
-}
-
-func sttyRestore(saved string) {
-	if saved == "" || !isTTY(os.Stdin) {
-		return
-	}
-	cmd := exec.Command("stty", saved)
-	cmd.Stdin = os.Stdin
-	_ = cmd.Run()
 }
 
 func sttyApply(args ...string) {

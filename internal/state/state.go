@@ -36,6 +36,7 @@ type State struct {
 	Runs            map[int64]RunRecord           `json:"runs"`
 	LastView        []runs.Run                    `json:"last_view,omitempty"`
 	LastPRs         []prs.PR                      `json:"last_prs,omitempty"`
+	LastAssignedPRs []prs.PR                      `json:"last_assigned_prs,omitempty"`
 	LastNotifs      []notifs.Notification         `json:"last_notifs,omitempty"`
 	DismissedNotifs map[string]DismissEntry       `json:"dismissed_notifs,omitempty"`
 	DismissedRuns   map[int64]time.Time           `json:"dismissed_runs,omitempty"`
