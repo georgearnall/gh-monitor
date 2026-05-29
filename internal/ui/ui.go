@@ -463,6 +463,11 @@ func reasonCell(n notifs.Notification) *Cell {
 	if n.Reason == "author" || n.Reason == "assign" {
 		return stateCell(n.PRState)
 	}
+	// For terminal states, lead with the state so the user knows the PR is done.
+	if n.PRState == notifs.PRStateMerged || n.PRState == notifs.PRStateClosed {
+		icon, label, col := stateGlyph(n.PRState)
+		return NewCell().Colored(col, icon).Plain(" " + label)
+	}
 	c := NewCell()
 	switch n.Reason {
 	case "mention", "team_mention":
