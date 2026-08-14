@@ -54,6 +54,34 @@ type State struct {
 	// --jira-url flag. Persisted so it survives restarts.
 	JiraURL string `json:"jira_url,omitempty"`
 
+	// NotifyFailedBuilds toggles the desktop alert for a workflow run
+	// transitioning active→failure. Pointer so Load can distinguish "never
+	// set" (nil → migrate to true, preserving pre-toggle behavior for both
+	// fresh installs and state.json files that predate this field) from an
+	// explicit false the user chose in the settings pane. Use
+	// FailedBuildAlertsEnabled/SetFailedBuildAlerts rather than touching
+	// this field directly.
+	NotifyFailedBuilds *bool `json:"notify_failed_builds,omitempty"`
+
+	// NotifyAllGitHub toggles a desktop alert for any new item in the
+	// GitHub Notifications feed (any allowedReasons entry). Off by
+	// default; the zero value is already correct, no migration needed.
+	NotifyAllGitHub bool `json:"notify_all_github,omitempty"`
+
+	// NotifyOwnPRComments toggles a desktop alert specifically for a new
+	// top-level conversation comment or inline review comment on a PR the
+	// viewer authored. Off by default; zero value already correct.
+	NotifyOwnPRComments bool `json:"notify_own_pr_comments,omitempty"`
+
+	// AlertedNotifs dedups notification-triggered desktop alerts. Shared by
+	// NotifyAllGitHub and NotifyOwnPRComments so a notification that
+	// qualifies for both only ever alerts once. Same shape as DismissEntry
+	// deliberately: UpdatedAt is the notification's updated_at at last
+	// consideration (so a fresh comment on an existing thread — same ID,
+	// bumped updated_at — is detected as new); AlertedAt is local
+	// wall-clock time for the prune minAge guard.
+	AlertedNotifs map[string]NotifAlertRecord `json:"alerted_notifs,omitempty"`
+
 	// BgErr is the most recent error from a background task (dismiss
 	// queue, mark-read, etc.). Surfaced in the UI footer so the user can
 	// see failures the alt-screen would otherwise swallow.
@@ -80,6 +108,15 @@ type DismissEntry struct {
 	DismissedAt time.Time `json:"dismissed_at"`
 }
 
+// NotifAlertRecord remembers the last state of a notification considered for
+// a desktop alert (toggles NotifyAllGitHub / NotifyOwnPRComments), so a
+// repeat poll of the same unread notification doesn't re-alert every cycle.
+// See ObserveNotifAlert.
+type NotifAlertRecord struct {
+	UpdatedAt time.Time `json:"updated_at"`
+	AlertedAt time.Time `json:"alerted_at"`
+}
+
 // Load reads state from disk; missing file returns an empty State.
 func Load() (*State, error) {
 	p, err := statePath()
@@ -91,6 +128,7 @@ func Load() (*State, error) {
 	data, err := os.ReadFile(p)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
+			s.SetFailedBuildAlerts(true)
 			return s, nil
 		}
 		return nil, err
@@ -106,6 +144,13 @@ func Load() (*State, error) {
 	}
 	if s.MarkedReadRuns == nil {
 		s.MarkedReadRuns = map[int64]time.Time{}
+	}
+	if s.NotifyFailedBuilds == nil {
+		// Either a brand-new state.json or one saved before this field
+		// existed. Either way, default to true: fresh installs should
+		// alert on build failures, and existing users shouldn't lose the
+		// alert they already had just by upgrading.
+		s.SetFailedBuildAlerts(true)
 	}
 	return s, nil
 }
@@ -153,6 +198,54 @@ func (s *State) Observe(r runs.Run) Transition {
 		return TransitionFailure
 	}
 	return TransitionNone
+}
+
+// FailedBuildAlertsEnabled reports whether desktop alerts fire for a workflow
+// run transitioning to failure. Unset (nil, e.g. a state.json predating this
+// field) is treated as enabled, matching the tool's original behavior.
+func (s *State) FailedBuildAlertsEnabled() bool {
+	return s.NotifyFailedBuilds == nil || *s.NotifyFailedBuilds
+}
+
+// SetFailedBuildAlerts sets the failed-build alert toggle explicitly.
+func (s *State) SetFailedBuildAlerts(v bool) {
+	s.NotifyFailedBuilds = &v
+}
+
+// ObserveNotifAlert records notification id's current updated_at in the
+// AlertedNotifs ledger and reports whether this is alert-worthy: true only
+// when the ID was already known AND updatedAt has moved forward since it was
+// last recorded. First sight of any ID is recorded silently with no alert —
+// mirrors Observe's handling of runs that are already failed before
+// gh-monitor starts watching, applied here so turning a notification toggle
+// on doesn't storm-alert every pre-existing inbox item.
+func (s *State) ObserveNotifAlert(id string, updatedAt time.Time) bool {
+	if s.AlertedNotifs == nil {
+		s.AlertedNotifs = map[string]NotifAlertRecord{}
+	}
+	prev, known := s.AlertedNotifs[id]
+	fire := known && updatedAt.After(prev.UpdatedAt)
+	s.AlertedNotifs[id] = NotifAlertRecord{UpdatedAt: updatedAt, AlertedAt: time.Now()}
+	return fire
+}
+
+// PruneAlertedNotifsAbsent drops AlertedNotifs entries whose ID is no longer
+// present in the latest poll, gated by minAge so we don't race a fresh alert
+// against its first poll. Mirrors PruneDismissedAbsent.
+func (s *State) PruneAlertedNotifsAbsent(present map[string]bool, minAge time.Duration) {
+	if s.AlertedNotifs == nil {
+		return
+	}
+	cutoff := time.Now().Add(-minAge)
+	for id, rec := range s.AlertedNotifs {
+		if present[id] {
+			continue
+		}
+		if rec.AlertedAt.After(cutoff) {
+			continue
+		}
+		delete(s.AlertedNotifs, id)
+	}
 }
 
 // RecordDismiss notes that the user dismissed a notification with the given

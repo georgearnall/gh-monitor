@@ -73,6 +73,11 @@ func TestSaveLoad_Roundtrip(t *testing.T) {
 		"repos/x/y/actions/runs?per_page=10": {ETag: `"abc123"`, Body: []byte(`{"workflow_runs":[]}`)},
 		"user/repos?sort=pushed":              {ETag: `"def456"`, Body: []byte(`[]`)},
 	}
+	original.SetFailedBuildAlerts(false)
+	original.NotifyAllGitHub = true
+	original.NotifyOwnPRComments = true
+	original.ObserveNotifAlert("seed", now) // first-sight record, no fire
+	original.ObserveNotifAlert("seed", now.Add(time.Minute))
 
 	if err := original.Save(); err != nil {
 		t.Fatalf("Save: %v", err)
@@ -105,6 +110,25 @@ func TestSaveLoad_Roundtrip(t *testing.T) {
 	}
 	if !reflect.DeepEqual(reloaded.EtagCache, original.EtagCache) {
 		t.Errorf("EtagCache differs:\n  got %+v\n  want %+v", reloaded.EtagCache, original.EtagCache)
+	}
+	if reloaded.FailedBuildAlertsEnabled() {
+		t.Errorf("NotifyFailedBuilds=false should survive save/load")
+	}
+	if !reloaded.NotifyAllGitHub || !reloaded.NotifyOwnPRComments {
+		t.Errorf("NotifyAllGitHub/NotifyOwnPRComments should survive save/load")
+	}
+	// Compare via UpdatedAt.Equal rather than reflect.DeepEqual on the whole
+	// map: AlertedAt is stamped with a local time.Now() inside
+	// ObserveNotifAlert, and a JSON round-trip can change a time.Time's
+	// internal representation (monotonic reading, *Location) without
+	// changing the instant it represents, which would make DeepEqual an
+	// unreliable comparison here (see how LastPoll is compared above).
+	seed, ok := reloaded.AlertedNotifs["seed"]
+	if !ok {
+		t.Fatalf("AlertedNotifs[\"seed\"] missing after reload")
+	}
+	if !seed.UpdatedAt.Equal(now.Add(time.Minute)) {
+		t.Errorf("AlertedNotifs[\"seed\"].UpdatedAt = %v, want %v", seed.UpdatedAt, now.Add(time.Minute))
 	}
 }
 
@@ -341,6 +365,120 @@ func TestLoad_InitializesDismissedRuns(t *testing.T) {
 	if s.DismissedRuns == nil {
 		t.Errorf("DismissedRuns should be non-nil after Load")
 	}
+}
+
+func TestLoad_Missing_DefaultsFailedBuildAlertsOn(t *testing.T) {
+	isolate(t)
+	s, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !s.FailedBuildAlertsEnabled() {
+		t.Errorf("fresh install should default failed-build alerts to on")
+	}
+}
+
+func TestLoad_UpgradedStateWithoutField_DefaultsFailedBuildAlertsOn(t *testing.T) {
+	path := isolate(t)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Simulate a state.json saved before NotifyFailedBuilds existed.
+	if err := os.WriteFile(path, []byte(`{"runs":{}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !s.FailedBuildAlertsEnabled() {
+		t.Errorf("state.json predating the field should default failed-build alerts to on")
+	}
+}
+
+func TestLoad_PreservesExplicitFailedBuildAlertsFalse(t *testing.T) {
+	isolate(t)
+	original, _ := Load()
+	original.SetFailedBuildAlerts(false)
+	if err := original.Save(); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	reloaded, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if reloaded.FailedBuildAlertsEnabled() {
+		t.Errorf("explicit false should survive save/load, got enabled=true")
+	}
+}
+
+func TestObserveNotifAlert_FirstSeen_NoFire(t *testing.T) {
+	isolate(t)
+	s, _ := Load()
+	now := time.Now()
+	if got := s.ObserveNotifAlert("n1", now); got {
+		t.Errorf("first observation got fire=true, want false")
+	}
+	if _, ok := s.AlertedNotifs["n1"]; !ok {
+		t.Errorf("ObserveNotifAlert should record the id")
+	}
+}
+
+func TestObserveNotifAlert_UnchangedUpdatedAt_NoRefire(t *testing.T) {
+	isolate(t)
+	s, _ := Load()
+	now := time.Now()
+	s.ObserveNotifAlert("n1", now)
+	if got := s.ObserveNotifAlert("n1", now); got {
+		t.Errorf("unchanged updated_at got fire=true, want false (dedup)")
+	}
+}
+
+func TestObserveNotifAlert_NewerUpdatedAt_Fires(t *testing.T) {
+	isolate(t)
+	s, _ := Load()
+	now := time.Now()
+	s.ObserveNotifAlert("n1", now)
+	if got := s.ObserveNotifAlert("n1", now.Add(1*time.Minute)); !got {
+		t.Errorf("newer updated_at got fire=false, want true")
+	}
+}
+
+func TestPruneAlertedNotifsAbsent(t *testing.T) {
+	isolate(t)
+	s, _ := Load()
+	now := time.Now()
+
+	s.ObserveNotifAlert("still-present", now)
+	s.ObserveNotifAlert("gone", now)
+	s.ObserveNotifAlert("fresh", now)
+
+	// Force the first two past the minAge threshold; "fresh" stays recent.
+	for _, id := range []string{"still-present", "gone"} {
+		e := s.AlertedNotifs[id]
+		e.AlertedAt = now.Add(-5 * time.Minute)
+		s.AlertedNotifs[id] = e
+	}
+
+	present := map[string]bool{"still-present": true}
+	s.PruneAlertedNotifsAbsent(present, 60*time.Second)
+
+	if _, ok := s.AlertedNotifs["still-present"]; !ok {
+		t.Errorf("entry still in poll response should be kept")
+	}
+	if _, ok := s.AlertedNotifs["gone"]; ok {
+		t.Errorf("entry absent from response and past minAge should be pruned")
+	}
+	if _, ok := s.AlertedNotifs["fresh"]; !ok {
+		t.Errorf("entry absent from response but inside minAge should be kept")
+	}
+}
+
+func TestPruneAlertedNotifsAbsent_NilMapIsNoOp(t *testing.T) {
+	isolate(t)
+	s, _ := Load()
+	// Should not panic.
+	s.PruneAlertedNotifsAbsent(nil, 60*time.Second)
 }
 
 func TestPrune(t *testing.T) {
