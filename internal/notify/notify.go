@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"runtime"
 	"strings"
 )
 
@@ -12,7 +13,16 @@ import (
 // In Ghostty (and other terminals that honour OSC 9) we send the notification
 // via an escape sequence — no fork, no system permission prompt. Otherwise we
 // fall back to `osascript` for macOS native notifications.
+//
+// Desktop notifications are not supported on Windows: there's no OSC 9
+// terminal to fall back on and no equivalent of `osascript` to shell out to.
+// Rather than fail noisily on every workflow failure, this is a no-op there.
+// See WINDOWS.md.
 func Failure(repo, workflow, branch, url string) error {
+	if runtime.GOOS == "windows" {
+		return nil
+	}
+
 	title := "GHA failed: " + repo
 	body := fmt.Sprintf("%s on %s", workflow, branch)
 
@@ -62,7 +72,11 @@ func sendOsascript(title, body, url string) error {
 }
 
 // PlayAlert plays a short system sound. Best-effort, errors are ignored.
+// No-op on Windows: see the comment on Failure above.
 func PlayAlert() {
+	if runtime.GOOS == "windows" {
+		return
+	}
 	const sound = "/System/Library/Sounds/Sosumi.aiff"
 	_ = exec.Command("afplay", sound).Start()
 }

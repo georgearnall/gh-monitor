@@ -42,7 +42,8 @@ polled 11:44:53 · 20 repos · 3 notifs · 2 PRs · rate limit 4823/5000 · next
 - **Polls in parallel** with per-call ETag conditional GETs. Most cycles
   cost a handful of rate-limit units against the 5000/hr budget.
 - **Desktop notification** on workflow failure via OSC 9 (Ghostty /
-  iTerm2) or `osascript` (other macOS terminals).
+  iTerm2) or `osascript` (other macOS terminals). Not supported on
+  Windows (no-op there; see [WINDOWS.md](WINDOWS.md)).
 - **Adaptive layout**. Narrow terminals shed the PR branch column and
   use shorter status labels; the repo cell trims the organisation part
   with a leading ellipsis and drops the org entirely when too tight,
@@ -74,6 +75,14 @@ go build -o gh-monitor .
 Requires Go 1.21+ and the `gh` CLI authenticated (`gh auth login`).
 The token needs the `notifications` scope to populate the notifications
 panel; everything else uses default `gh` scopes.
+
+### Windows
+
+Developed and tested on macOS/Linux. It builds and runs on Windows,
+but the interactive keybindings (arrow keys, `q`, `m`, `M`, `d`, `r`)
+are currently unreliable there — see [WINDOWS.md](WINDOWS.md) for
+why and what's involved in fixing it. Desktop notifications and the
+`--sound` flag are unsupported on Windows and silently no-op.
 
 ## Usage
 
