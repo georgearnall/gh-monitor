@@ -213,18 +213,40 @@ func (s *State) SetFailedBuildAlerts(v bool) {
 }
 
 // ObserveNotifAlert records notification id's current updated_at in the
-// AlertedNotifs ledger and reports whether this is alert-worthy: true only
-// when the ID was already known AND updatedAt has moved forward since it was
-// last recorded. First sight of any ID is recorded silently with no alert —
-// mirrors Observe's handling of runs that are already failed before
-// gh-monitor starts watching, applied here so turning a notification toggle
-// on doesn't storm-alert every pre-existing inbox item.
-func (s *State) ObserveNotifAlert(id string, updatedAt time.Time) bool {
+// AlertedNotifs ledger and reports whether this is alert-worthy.
+//
+// Unlike a workflow run (a fresh, never-reused ID per run, so "first sight"
+// safely means "just started"), GitHub reuses one notification ID for an
+// entire PR thread across every comment on it, only bumping updated_at each
+// time. So "first sight of this ID" does not reliably mean "just happened" —
+// it's exactly as likely to mean "this thread's very first comment, which
+// just happened while we were already watching" as "an old thread that
+// existed before this ID was ever recorded." Naively mirroring Observe's
+// unknown-on-first-sight rule here would mean a PR's first-ever comment
+// never alerts (only a *second* comment on the same thread would, once the
+// ID is already known) — silently defeating the most common case.
+//
+// coldStart resolves the ambiguity: pass true only for the very first poll
+// against an empty ledger (a fresh install, or the first poll after this
+// notification type has never been observed at all), which is the one
+// situation where every currently-present ID really could be pre-existing
+// inbox noise. In that case, first sight is recorded silently with no alert,
+// same rationale as Observe's startup-quiet behavior. On every later poll,
+// once the ledger is warm, an unknown ID is a genuinely new thread and fires
+// immediately; an already-known ID only fires again if updatedAt has moved
+// forward since it was last recorded.
+func (s *State) ObserveNotifAlert(id string, updatedAt time.Time, coldStart bool) bool {
 	if s.AlertedNotifs == nil {
 		s.AlertedNotifs = map[string]NotifAlertRecord{}
 	}
 	prev, known := s.AlertedNotifs[id]
-	fire := known && updatedAt.After(prev.UpdatedAt)
+	var fire bool
+	switch {
+	case known:
+		fire = updatedAt.After(prev.UpdatedAt)
+	case !coldStart:
+		fire = true
+	}
 	s.AlertedNotifs[id] = NotifAlertRecord{UpdatedAt: updatedAt, AlertedAt: time.Now()}
 	return fire
 }

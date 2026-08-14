@@ -76,8 +76,8 @@ func TestSaveLoad_Roundtrip(t *testing.T) {
 	original.SetFailedBuildAlerts(false)
 	original.NotifyAllGitHub = true
 	original.NotifyOwnPRComments = true
-	original.ObserveNotifAlert("seed", now) // first-sight record, no fire
-	original.ObserveNotifAlert("seed", now.Add(time.Minute))
+	original.ObserveNotifAlert("seed", now, true)                   // cold start: record, no fire
+	original.ObserveNotifAlert("seed", now.Add(time.Minute), false) // warm: fires, irrelevant here
 
 	if err := original.Save(); err != nil {
 		t.Fatalf("Save: %v", err)
@@ -412,15 +412,29 @@ func TestLoad_PreservesExplicitFailedBuildAlertsFalse(t *testing.T) {
 	}
 }
 
-func TestObserveNotifAlert_FirstSeen_NoFire(t *testing.T) {
+func TestObserveNotifAlert_ColdStart_FirstSeen_NoFire(t *testing.T) {
 	isolate(t)
 	s, _ := Load()
 	now := time.Now()
-	if got := s.ObserveNotifAlert("n1", now); got {
-		t.Errorf("first observation got fire=true, want false")
+	if got := s.ObserveNotifAlert("n1", now, true); got {
+		t.Errorf("cold-start first observation got fire=true, want false")
 	}
 	if _, ok := s.AlertedNotifs["n1"]; !ok {
 		t.Errorf("ObserveNotifAlert should record the id")
+	}
+}
+
+// TestObserveNotifAlert_WarmLedger_NewIDFires is the fix for the case a
+// naive mirror of Observe would miss: once the ledger is warm (not a cold
+// start), a brand-new notification ID — e.g. the very first comment ever on
+// a PR thread — must fire immediately, not wait for a second event on the
+// same thread.
+func TestObserveNotifAlert_WarmLedger_NewIDFires(t *testing.T) {
+	isolate(t)
+	s, _ := Load()
+	now := time.Now()
+	if got := s.ObserveNotifAlert("n1", now, false); !got {
+		t.Errorf("warm ledger, unknown id got fire=false, want true")
 	}
 }
 
@@ -428,8 +442,8 @@ func TestObserveNotifAlert_UnchangedUpdatedAt_NoRefire(t *testing.T) {
 	isolate(t)
 	s, _ := Load()
 	now := time.Now()
-	s.ObserveNotifAlert("n1", now)
-	if got := s.ObserveNotifAlert("n1", now); got {
+	s.ObserveNotifAlert("n1", now, true)
+	if got := s.ObserveNotifAlert("n1", now, false); got {
 		t.Errorf("unchanged updated_at got fire=true, want false (dedup)")
 	}
 }
@@ -438,8 +452,8 @@ func TestObserveNotifAlert_NewerUpdatedAt_Fires(t *testing.T) {
 	isolate(t)
 	s, _ := Load()
 	now := time.Now()
-	s.ObserveNotifAlert("n1", now)
-	if got := s.ObserveNotifAlert("n1", now.Add(1*time.Minute)); !got {
+	s.ObserveNotifAlert("n1", now, true)
+	if got := s.ObserveNotifAlert("n1", now.Add(1*time.Minute), false); !got {
 		t.Errorf("newer updated_at got fire=false, want true")
 	}
 }
@@ -449,9 +463,9 @@ func TestPruneAlertedNotifsAbsent(t *testing.T) {
 	s, _ := Load()
 	now := time.Now()
 
-	s.ObserveNotifAlert("still-present", now)
-	s.ObserveNotifAlert("gone", now)
-	s.ObserveNotifAlert("fresh", now)
+	s.ObserveNotifAlert("still-present", now, true)
+	s.ObserveNotifAlert("gone", now, true)
+	s.ObserveNotifAlert("fresh", now, true)
 
 	// Force the first two past the minAge threshold; "fresh" stays recent.
 	for _, id := range []string{"still-present", "gone"} {
