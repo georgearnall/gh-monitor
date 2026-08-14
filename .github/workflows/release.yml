@@ -17,7 +17,7 @@ jobs:
       # go.sum. The precompile action picks up the already-installed Go,
       # so each release run skips the dependency downloads after the
       # first cache fill.
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
           cache: true
