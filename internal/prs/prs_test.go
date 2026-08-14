@@ -165,7 +165,7 @@ func TestPoll_FiltersDraftsAndBucketsChecks(t *testing.T) {
 	defer srv.Close()
 
 	c := ghclient.NewForTest(srv.Client(), srv.URL+"/")
-	got, err := Poll(c, time.Time{})
+	got, _, err := Poll(c, time.Time{})
 	if err != nil {
 		t.Fatalf("Poll: %v", err)
 	}
@@ -229,7 +229,7 @@ func TestPoll_FiltersBySince(t *testing.T) {
 	c := ghclient.NewForTest(srv.Client(), srv.URL+"/")
 
 	// Zero since: both kept.
-	got, err := Poll(c, time.Time{})
+	got, _, err := Poll(c, time.Time{})
 	if err != nil {
 		t.Fatalf("Poll(zero since): %v", err)
 	}
@@ -238,7 +238,7 @@ func TestPoll_FiltersBySince(t *testing.T) {
 	}
 
 	// since = now - 60 days: drops the 200d-old PR.
-	got, err = Poll(c, now.Add(-60*24*time.Hour))
+	got, _, err = Poll(c, now.Add(-60*24*time.Hour))
 	if err != nil {
 		t.Fatalf("Poll(60d since): %v", err)
 	}
@@ -257,7 +257,7 @@ func TestPoll_GraphQLError(t *testing.T) {
 	defer srv.Close()
 
 	c := ghclient.NewForTest(srv.Client(), srv.URL+"/")
-	if _, err := Poll(c, time.Time{}); err == nil {
+	if _, _, err := Poll(c, time.Time{}); err == nil {
 		t.Error("expected error from graphql errors[], got nil")
 	}
 }
