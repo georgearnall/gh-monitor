@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"runtime"
 	"strconv"
 
 	"github.com/georgearnall/gh-monitor/internal/prs"
@@ -183,7 +184,20 @@ func openFocused(st *state.State, f focusTarget) {
 
 // openURL launches url in the default browser. Non-blocking.
 func openURL(url string) {
-	if err := exec.Command("open", url).Start(); err != nil {
+	var cmd *exec.Cmd
+	switch runtime.GOOS {
+	case "darwin":
+		cmd = exec.Command("open", url)
+	case "windows":
+		// `start` is a cmd.exe builtin, not a binary, so it must be run via
+		// cmd /c. The empty title argument is required: without it, `start`
+		// treats a URL containing `&` as its (quoted) window title instead
+		// of the target to open.
+		cmd = exec.Command("cmd", "/c", "start", "", url)
+	default:
+		cmd = exec.Command("xdg-open", url)
+	}
+	if err := cmd.Start(); err != nil {
 		fmt.Fprintf(os.Stderr, "open: %v\n", err)
 	}
 }
