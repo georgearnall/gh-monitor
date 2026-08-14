@@ -186,7 +186,7 @@ func runWatch(client *ghclient.Client, cfg watchConfig) {
 				}
 				continue
 			}
-			if configMode && k != '?' && k != 'q' && k != 'Q' {
+			if configMode && k != '?' && k != 'q' && k != 'Q' && k != '1' && k != '2' && k != '3' {
 				continue
 			}
 			switch k {
@@ -243,6 +243,30 @@ func runWatch(client *ghclient.Client, cfg watchConfig) {
 			case '?':
 				configMode = !configMode
 				render()
+			case '1':
+				if configMode {
+					st.SetFailedBuildAlerts(!st.FailedBuildAlertsEnabled())
+					if err := st.Save(); err != nil {
+						fmt.Fprintf(os.Stderr, "save state: %v\n", err)
+					}
+					render()
+				}
+			case '2':
+				if configMode {
+					st.NotifyAllGitHub = !st.NotifyAllGitHub
+					if err := st.Save(); err != nil {
+						fmt.Fprintf(os.Stderr, "save state: %v\n", err)
+					}
+					render()
+				}
+			case '3':
+				if configMode {
+					st.NotifyOwnPRComments = !st.NotifyOwnPRComments
+					if err := st.Save(); err != nil {
+						fmt.Fprintf(os.Stderr, "save state: %v\n", err)
+					}
+					render()
+				}
 			case 'q', 'Q':
 				return
 			}
@@ -694,5 +718,9 @@ func renderConfig(st *state.State, cfg watchConfig) {
 		RateLimit:      st.LastRateLimit.Limit,
 		JiraURL:        effectiveJiraURLFor(cfg, st),
 		TermWidth:      ui.TermWidth(),
+
+		NotifyFailedBuilds:  st.FailedBuildAlertsEnabled(),
+		NotifyAllGitHub:     st.NotifyAllGitHub,
+		NotifyOwnPRComments: st.NotifyOwnPRComments,
 	})
 }

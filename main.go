@@ -100,8 +100,10 @@ FLAGS
                         1440h = 60 days). Use 0 to disable the filter.
   --once                Single poll cycle then exit (no TUI, script-friendly)
   --exclude owner/repo  Skip a noisy repo. Repeatable.
-  --no-notify           Suppress desktop notifications on workflow failure
-  --sound               Also play a system sound on failure
+  --no-notify           Master switch: suppress all desktop notifications
+                        (failed builds, GitHub notifications, PR comments),
+                        regardless of the config pane toggles below
+  --sound               Also play a system sound alongside any alert
   --jira-url URL        Jira base URL (e.g. https://company.atlassian.net).
                         Overrides the value saved by the inline prompt.
                         If omitted, the saved URL is used automatically.
@@ -121,7 +123,14 @@ KEYBINDINGS (watch mode)
   t                     Open Jira ticket from the focused row's title. If no
                         Jira URL is configured, prompts for it and saves it.
   r  /  R  /  space     Refresh now (don't wait for the next interval)
+  ?                     Open/close the config pane
   q  /  Q  /  Ctrl-C    Quit cleanly, restore terminal, save state
+
+CONFIG PANE (opened with ?)
+  1                     Toggle desktop alerts for failed builds
+  2                     Toggle desktop alerts for all GitHub notifications
+  3                     Toggle desktop alerts for comments on PRs you authored
+  q  /  Q               Quit (? closes the pane and returns to watch mode)
 
 PANELS
   NOTIFICATIONS  Inbound mentions, review requests, replies on threads
