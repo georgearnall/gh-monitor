@@ -2,6 +2,26 @@ package notify
 
 import "testing"
 
+func TestReasonLabel(t *testing.T) {
+	cases := []struct {
+		reason, want string
+	}{
+		{"mention", "Mentioned"},
+		{"team_mention", "Mentioned"},
+		{"review_requested", "Review requested"},
+		{"assign", "Assigned"},
+		{"comment", "New comment"},
+		{"author", "GitHub notification"},
+		{"subscribed", "GitHub notification"},
+		{"", "GitHub notification"},
+	}
+	for _, c := range cases {
+		if got := reasonLabel(c.reason); got != c.want {
+			t.Errorf("reasonLabel(%q) = %q, want %q", c.reason, got, c.want)
+		}
+	}
+}
+
 func TestAppleString(t *testing.T) {
 	cases := []struct {
 		in, want string

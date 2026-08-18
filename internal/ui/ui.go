@@ -238,6 +238,10 @@ type ConfigSnapshot struct {
 	RateLimit      int
 	JiraURL        string
 	TermWidth      int
+
+	NotifyFailedBuilds  bool
+	NotifyAllGitHub     bool
+	NotifyOwnPRComments bool
 }
 
 // RenderConfig redraws the config screen, which entirely replaces the main
@@ -276,6 +280,14 @@ func RenderConfig(snap ConfigSnapshot) {
 	printAligned(settings)
 
 	pln(tty)
+	pln(tty, dim("NOTIFICATIONS", tty))
+	printAligned([][]string{
+		{"  [1] " + dim("Failed builds", tty), onOffLabel(snap.NotifyFailedBuilds, tty)},
+		{"  [2] " + dim("All GitHub notifications", tty), onOffLabel(snap.NotifyAllGitHub, tty)},
+		{"  [3] " + dim("Comments on your PRs", tty), onOffLabel(snap.NotifyOwnPRComments, tty)},
+	})
+
+	pln(tty)
 	pln(tty, dim(fmt.Sprintf("MONITORED REPOS (%d)", len(snap.Repos)), tty))
 	if len(snap.Repos) == 0 {
 		pln(tty, "  "+dim("none discovered yet", tty))
@@ -293,11 +305,21 @@ func RenderConfig(snap ConfigSnapshot) {
 
 	pln(tty)
 	if tty {
-		pln(tty, dim("[?] close  [q] quit", tty))
+		pln(tty, dim("[1/2/3] toggle notifications  [?] close  [q] quit", tty))
 	}
 	if tty {
 		fmt.Print(ansiClearBelow)
 	}
+}
+
+// onOffLabel renders a notification toggle's state, colored green for ON
+// and dimmed for OFF, matching the pass/fail color convention used
+// elsewhere in this file.
+func onOffLabel(v bool, tty bool) string {
+	if v {
+		return color(ansiGreen, "ON", tty)
+	}
+	return dim("OFF", tty)
 }
 
 func prSinceLabel(d time.Duration) string {

@@ -42,6 +42,16 @@ type watchConfig struct {
 	cachedRepos   []discovery.Repo
 }
 
+// notifyFailure/notifyComment/notifyNewNotification are indirections over
+// the notify package's OS-shelling alert functions, swappable in tests so
+// applyResult's alert-gating logic can be asserted without actually sending
+// a desktop notification.
+var (
+	notifyFailure         = notify.Failure
+	notifyComment         = notify.Comment
+	notifyNewNotification = notify.NewNotification
+)
+
 type pollResult struct {
 	Repos       []discovery.Repo
 	Runs        []runs.Run
@@ -176,7 +186,7 @@ func runWatch(client *ghclient.Client, cfg watchConfig) {
 				}
 				continue
 			}
-			if configMode && k != '?' && k != 'q' && k != 'Q' {
+			if configMode && k != '?' && k != 'q' && k != 'Q' && k != '1' && k != '2' && k != '3' {
 				continue
 			}
 			switch k {
@@ -233,6 +243,30 @@ func runWatch(client *ghclient.Client, cfg watchConfig) {
 			case '?':
 				configMode = !configMode
 				render()
+			case '1':
+				if configMode {
+					st.SetFailedBuildAlerts(!st.FailedBuildAlertsEnabled())
+					if err := st.Save(); err != nil {
+						fmt.Fprintf(os.Stderr, "save state: %v\n", err)
+					}
+					render()
+				}
+			case '2':
+				if configMode {
+					st.NotifyAllGitHub = !st.NotifyAllGitHub
+					if err := st.Save(); err != nil {
+						fmt.Fprintf(os.Stderr, "save state: %v\n", err)
+					}
+					render()
+				}
+			case '3':
+				if configMode {
+					st.NotifyOwnPRComments = !st.NotifyOwnPRComments
+					if err := st.Save(); err != nil {
+						fmt.Fprintf(os.Stderr, "save state: %v\n", err)
+					}
+					render()
+				}
 			case 'q', 'Q':
 				return
 			}
@@ -366,12 +400,14 @@ func applyResult(st *state.State, cfg *watchConfig, res pollResult) {
 	for _, r := range res.Runs {
 		seen[r.ID] = true
 		if st.Observe(r) == state.TransitionFailure && !st.IsRunDismissed(r.ID) {
-			if !cfg.noNotify {
-				if err := notify.Failure(r.Repo, r.WorkflowName, r.Branch, r.URL); err != nil {
+			alerted := false
+			if st.FailedBuildAlertsEnabled() && !cfg.noNotify {
+				if err := notifyFailure(r.Repo, r.WorkflowName, r.Branch, r.URL); err != nil {
 					fmt.Fprintf(os.Stderr, "notify: %v\n", err)
 				}
+				alerted = true
 			}
-			if cfg.sound {
+			if cfg.sound && alerted {
 				notify.PlayAlert()
 			}
 		}
@@ -416,12 +452,65 @@ func applyResult(st *state.State, cfg *watchConfig, res pollResult) {
 			present[n.ID] = true
 		}
 		st.PruneDismissedAbsent(present, 60*time.Second)
+		st.PruneAlertedNotifsAbsent(present, 60*time.Second)
+
+		// True only for the very first time this notification type has
+		// ever been observed (empty ledger): the one situation where we
+		// can't tell a thread that's brand new right now apart from one
+		// that's been sitting unread since before gh-monitor ever ran.
+		// See ObserveNotifAlert.
+		coldStart := len(st.AlertedNotifs) == 0
+
+		// PRs authored by the viewer, used below to tell "a comment on my
+		// own PR" apart from every other kind of notification. Fall back
+		// to the cached set on a transient PR-poll error rather than
+		// treating every PR as not-mine.
+		authored := res.PRs
+		if res.PRErr != nil {
+			authored = st.LastPRs
+		}
+		authoredSet := make(map[string]bool, len(authored))
+		for _, p := range authored {
+			authoredSet[prKey(p)] = true
+		}
+
 		filtered := make([]notifs.Notification, 0, len(res.Notifs))
 		for _, n := range res.Notifs {
 			if st.IsDismissed(n.ID, n.UpdatedAt) {
 				continue
 			}
 			filtered = append(filtered, n)
+
+			// Bookkeeping always runs regardless of toggle state, so the
+			// ledger stays warm — flipping a toggle on shouldn't storm-
+			// alert every pre-existing item it never got to observe
+			// while off.
+			isNew := st.ObserveNotifAlert(n.ID, n.UpdatedAt, coldStart)
+			if !isNew || cfg.noNotify {
+				continue
+			}
+			isOwnComment := n.HasCommentAnchor && authoredSet[fmt.Sprintf("%s#%d", n.Repo, n.PRNumber)]
+			switch {
+			case st.NotifyOwnPRComments && isOwnComment:
+				if err := notifyComment(n.Repo, n.PRNumber, n.Title, n.URL); err != nil {
+					fmt.Fprintf(os.Stderr, "notify: %v\n", err)
+				}
+				if cfg.sound {
+					notify.PlayAlert()
+				}
+			case st.NotifyAllGitHub:
+				// Reaches here even when isOwnComment is true but
+				// NotifyOwnPRComments is off — it's still a new item
+				// the user asked to hear about generically. Only one of
+				// the two cases ever fires per notification per poll,
+				// so an event that qualifies for both never double-alerts.
+				if err := notifyNewNotification(n.Repo, n.PRNumber, n.Reason, n.Title, n.URL); err != nil {
+					fmt.Fprintf(os.Stderr, "notify: %v\n", err)
+				}
+				if cfg.sound {
+					notify.PlayAlert()
+				}
+			}
 		}
 		st.LastNotifs = filtered
 	}
@@ -629,5 +718,9 @@ func renderConfig(st *state.State, cfg watchConfig) {
 		RateLimit:      st.LastRateLimit.Limit,
 		JiraURL:        effectiveJiraURLFor(cfg, st),
 		TermWidth:      ui.TermWidth(),
+
+		NotifyFailedBuilds:  st.FailedBuildAlertsEnabled(),
+		NotifyAllGitHub:     st.NotifyAllGitHub,
+		NotifyOwnPRComments: st.NotifyOwnPRComments,
 	})
 }
