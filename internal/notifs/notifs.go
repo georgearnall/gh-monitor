@@ -37,6 +37,11 @@ type Notification struct {
 	Unread    bool      `json:"unread"`
 	// PRState is the linked PR's state. Empty when not yet fetched (best-effort enrichment).
 	PRState PRState `json:"pr_state,omitempty"`
+	// HasCommentAnchor reports whether URL is anchored to a specific
+	// comment (#issuecomment-N or #discussion_rN) rather than pointing at
+	// the plain PR page. True whenever GitHub supplied a
+	// latest_comment_url we could resolve, regardless of Reason.
+	HasCommentAnchor bool `json:"has_comment_anchor,omitempty"`
 }
 
 // readWindow is how long a read notification stays visible before dropping.
@@ -95,15 +100,17 @@ func Poll(client *ghclient.Client) ([]Notification, error) {
 		if num == 0 {
 			continue
 		}
+		url, hasComment := buildHTMLURL(n, num)
 		out = append(out, Notification{
-			ID:        n.ID,
-			Repo:      n.Repository.FullName,
-			PRNumber:  num,
-			Title:     n.Subject.Title,
-			Reason:    n.Reason,
-			URL:       buildHTMLURL(n, num),
-			UpdatedAt: n.UpdatedAt,
-			Unread:    n.Unread,
+			ID:               n.ID,
+			Repo:             n.Repository.FullName,
+			PRNumber:         num,
+			Title:            n.Subject.Title,
+			Reason:           n.Reason,
+			URL:              url,
+			UpdatedAt:        n.UpdatedAt,
+			Unread:           n.Unread,
+			HasCommentAnchor: hasComment,
 		})
 	}
 
@@ -240,18 +247,23 @@ func DismissAll(client *ghclient.Client, ids []string) error {
 	return firstErr
 }
 
-// buildHTMLURL produces a clickable github.com URL. When the reason is a new
-// reply on a thread, it anchors to the specific comment so the link jumps
-// straight to it.
-func buildHTMLURL(n apiNotification, prNumber int) string {
+// buildHTMLURL produces a clickable github.com URL, anchored to the specific
+// comment whenever GitHub gave us a resolvable latest_comment_url.
+//
+// This intentionally does not condition on Reason. Reason describes why
+// you're subscribed to the thread, not what just happened on it — a new
+// comment on a PR you authored typically arrives as reason "author", not
+// "comment", so gating on reason=="comment" silently dropped the anchor for
+// exactly that case.
+func buildHTMLURL(n apiNotification, prNumber int) (url string, hasComment bool) {
 	plain := "https://github.com/" + n.Repository.FullName + "/pull/" + strconv.Itoa(prNumber)
-	if n.Reason != "comment" || n.Subject.LatestCommentURL == "" {
-		return plain
+	if n.Subject.LatestCommentURL == "" {
+		return plain, false
 	}
 	if anchored := apiCommentURLtoHTML(n.Subject.LatestCommentURL, plain); anchored != "" {
-		return anchored
+		return anchored, true
 	}
-	return plain
+	return plain, false
 }
 
 // apiCommentURLtoHTML converts an api.github.com comment URL into the

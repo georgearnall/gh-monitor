@@ -52,14 +52,17 @@ func TestApiCommentURLtoHTML(t *testing.T) {
 	}
 }
 
-func TestBuildHTMLURL_PlainPRForNonComment(t *testing.T) {
+func TestBuildHTMLURL_PlainWhenNoCommentURL(t *testing.T) {
 	n := apiNotification{
 		Reason: "review_requested",
 	}
-	n.Subject.LatestCommentURL = "https://api.github.com/repos/acme/billing/issues/comments/9"
 	n.Repository.FullName = "acme/billing"
-	if got := buildHTMLURL(n, 88); got != "https://github.com/acme/billing/pull/88" {
-		t.Errorf("non-comment notification should not anchor: got %q", got)
+	url, hasComment := buildHTMLURL(n, 88)
+	if url != "https://github.com/acme/billing/pull/88" {
+		t.Errorf("no latest_comment_url should return the plain PR url: got %q", url)
+	}
+	if hasComment {
+		t.Errorf("no latest_comment_url should report hasComment=false")
 	}
 }
 
@@ -70,8 +73,32 @@ func TestBuildHTMLURL_AnchoredForComment(t *testing.T) {
 	n.Subject.LatestCommentURL = "https://api.github.com/repos/acme/billing/issues/comments/9999"
 	n.Repository.FullName = "acme/billing"
 	want := "https://github.com/acme/billing/pull/88#issuecomment-9999"
-	if got := buildHTMLURL(n, 88); got != want {
-		t.Errorf("comment notification: got %q want %q", got, want)
+	url, hasComment := buildHTMLURL(n, 88)
+	if url != want {
+		t.Errorf("comment notification: got %q want %q", url, want)
+	}
+	if !hasComment {
+		t.Errorf("expected hasComment=true")
+	}
+}
+
+// TestBuildHTMLURL_AnchorsRegardlessOfReason is the regression test for the
+// exact case toggle "comments on your own PRs" depends on: GitHub sends
+// reason "author" (not "comment") for activity — including new comments — on
+// a PR you authored. The anchor must not be gated on reason.
+func TestBuildHTMLURL_AnchorsRegardlessOfReason(t *testing.T) {
+	n := apiNotification{
+		Reason: "author",
+	}
+	n.Subject.LatestCommentURL = "https://api.github.com/repos/acme/billing/pulls/comments/4242"
+	n.Repository.FullName = "acme/billing"
+	want := "https://github.com/acme/billing/pull/88#discussion_r4242"
+	url, hasComment := buildHTMLURL(n, 88)
+	if url != want {
+		t.Errorf("reason=author with a resolvable comment url: got %q want %q", url, want)
+	}
+	if !hasComment {
+		t.Errorf("expected hasComment=true")
 	}
 }
 
@@ -81,8 +108,12 @@ func TestBuildHTMLURL_FallbackOnUnparseableComment(t *testing.T) {
 	}
 	n.Subject.LatestCommentURL = "https://api.github.com/something/weird"
 	n.Repository.FullName = "acme/billing"
-	if got := buildHTMLURL(n, 88); got != "https://github.com/acme/billing/pull/88" {
-		t.Errorf("unparseable comment url should fall back to plain PR url: got %q", got)
+	url, hasComment := buildHTMLURL(n, 88)
+	if url != "https://github.com/acme/billing/pull/88" {
+		t.Errorf("unparseable comment url should fall back to plain PR url: got %q", url)
+	}
+	if hasComment {
+		t.Errorf("unparseable comment url should report hasComment=false")
 	}
 }
 
@@ -151,10 +182,17 @@ func TestPoll_FiltersAndSorts(t *testing.T) {
 	if got[1].URL != wantURL {
 		t.Errorf("comment URL = %q, want %q", got[1].URL, wantURL)
 	}
+	if !got[1].HasCommentAnchor {
+		t.Errorf("expected HasCommentAnchor=true for the comment notification")
+	}
 
-	// Plain PR URL for the review_requested item.
+	// Plain PR URL for the review_requested item, which never got a
+	// latest_comment_url in the fixture.
 	if got[0].URL != "https://github.com/acme/billing/pull/88" {
 		t.Errorf("plain PR URL = %q", got[0].URL)
+	}
+	if got[0].HasCommentAnchor {
+		t.Errorf("expected HasCommentAnchor=false when no latest_comment_url was supplied")
 	}
 	if got[0].PRNumber != 88 {
 		t.Errorf("PR number = %d, want 88", got[0].PRNumber)
