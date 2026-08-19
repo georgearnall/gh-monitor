@@ -692,24 +692,16 @@ func writeTable(rs []runs.Run, focusedID string, tty bool, termWidth int, links 
 	t.render()
 }
 
-// TermWidth returns the terminal's column count by shelling out to
-// `stty size`. Returns 0 when stdin/stdout isn't a tty or stty fails
-// (caller treats 0 as "unconstrained, don't shrink").
+// TermWidth returns the terminal's column count via term.GetSize. Returns 0
+// when stdin/stdout isn't a tty or the size can't be determined (caller
+// treats 0 as "unconstrained, don't shrink"). Cross-platform: term.GetSize
+// uses an ioctl on Unix and GetConsoleScreenBufferInfo on Windows, so this
+// works without shelling out to `stty`.
 func TermWidth() int {
 	if !isTTY(os.Stdout) || !isTTY(os.Stdin) {
 		return 0
 	}
-	cmd := exec.Command("stty", "size")
-	cmd.Stdin = os.Stdin
-	out, err := cmd.Output()
-	if err != nil {
-		return 0
-	}
-	fields := strings.Fields(string(out))
-	if len(fields) < 2 {
-		return 0
-	}
-	cols, err := strconv.Atoi(fields[1])
+	cols, _, err := term.GetSize(int(os.Stdout.Fd()))
 	if err != nil {
 		return 0
 	}
