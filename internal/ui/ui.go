@@ -152,14 +152,15 @@ type Snapshot struct {
 	RateLimit      int
 	PolledAt       time.Time
 	NextPollIn     time.Duration
-	TermWidth      int    // 0 = unknown / unconstrained
-	Stale          bool   // rendering from disk cache, not fresh
-	Refreshing     bool   // a background refresh is in flight
-	BgErr          string // recent background-task error to surface in the footer
-	JiraURL        string // base URL for clickable ticket refs (empty = no links)
-	PromptLine     string // non-empty: show an inline input prompt at the footer
-	Links          bool             // whether the terminal supports OSC 8 hyperlinks; hides LINK column when false
-	ReadRunIDs     map[int64]bool   // run IDs the user has marked read; rendered dimmed
+	TermWidth      int            // 0 = unknown / unconstrained
+	Stale          bool           // rendering from disk cache, not fresh
+	Refreshing     bool           // a background refresh is in flight
+	BgErr          string         // recent background-task error to surface in the footer
+	JiraURL        string         // base URL for clickable ticket refs (empty = no links)
+	PromptLine     string         // non-empty: show an inline input prompt at the footer
+	StatusLine     string         // non-empty: show a one-line status message at the footer (ignored while PromptLine is active)
+	Links          bool           // whether the terminal supports OSC 8 hyperlinks; hides LINK column when false
+	ReadRunIDs     map[int64]bool // run IDs the user has marked read; rendered dimmed
 }
 
 // Render redraws the status table. Safe to call when stdout is not a tty;
@@ -219,7 +220,7 @@ func Render(snap Snapshot) {
 // RepoStatus is a flattened view of one discovered repository for the config
 // screen. Callers build it from state.Repos + state.MutedRepos.
 type RepoStatus struct {
-	Name     string    // "owner/repo"
+	Name     string // "owner/repo"
 	Activity time.Time
 	Muted    bool
 }
@@ -237,6 +238,7 @@ type ConfigSnapshot struct {
 	RateRemaining  int
 	RateLimit      int
 	JiraURL        string
+	RepoSourceDir  string
 	TermWidth      int
 
 	NotifyFailedBuilds  bool
@@ -265,6 +267,10 @@ func RenderConfig(snap ConfigSnapshot) {
 	if jiraURLVal == "" {
 		jiraURLVal = dim("not configured", tty)
 	}
+	repoSourceDirVal := snap.RepoSourceDir
+	if repoSourceDirVal == "" {
+		repoSourceDirVal = dim("not configured", tty)
+	}
 	settings := [][]string{
 		{"  " + dim("Active poll", tty), snap.ActiveInterval.String()},
 		{"  " + dim("Idle poll", tty), snap.BaseInterval.String()},
@@ -273,6 +279,7 @@ func RenderConfig(snap ConfigSnapshot) {
 		{"  " + dim("Max repos", tty), strconv.Itoa(snap.MaxRepos)},
 		{"  " + dim("Viewer", tty), snap.ViewerLogin},
 		{"  " + dim("Jira URL", tty), jiraURLVal},
+		{"  " + dim("Repo source dir", tty), repoSourceDirVal},
 	}
 	if snap.RateLimit > 0 {
 		settings = append(settings, []string{"  " + dim("Rate limit", tty), fmt.Sprintf("%d/%d", snap.RateRemaining, snap.RateLimit)})
@@ -377,7 +384,7 @@ func footer(snap Snapshot, tty bool) {
 	}
 	pln(tty)
 	if tty {
-		pln(tty, dim("[↑↓] move  [↵] open  [m] read  [d] dismiss  [x] mute repo  [t] ticket  [r] refresh  [?] config  [q] quit", tty))
+		pln(tty, dim("[↑↓] move  [↵] open  [m] read  [d] dismiss  [x] mute repo  [t] ticket  [g] terminal  [r] refresh  [?] config  [q] quit", tty))
 	}
 	pln(tty, dim(join(parts, " · "), tty))
 	if snap.BgErr != "" {
@@ -385,6 +392,8 @@ func footer(snap Snapshot, tty bool) {
 	}
 	if snap.PromptLine != "" {
 		pln(tty, snap.PromptLine)
+	} else if snap.StatusLine != "" {
+		pln(tty, dim(snap.StatusLine, tty))
 	}
 }
 

@@ -4,8 +4,10 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strconv"
+	"strings"
 
 	"github.com/georgearnall/gh-monitor/internal/prs"
 	"github.com/georgearnall/gh-monitor/internal/runs"
@@ -229,4 +231,125 @@ func focusedURL(st *state.State, f focusTarget) string {
 		}
 	}
 	return ""
+}
+
+// focusedRepo returns the "owner/name" of whatever row the cursor is on, or
+// "" if nothing is focused or the row's repo can't be determined.
+func focusedRepo(st *state.State, f focusTarget) string {
+	switch f.Panel {
+	case "notifs":
+		for _, n := range st.LastNotifs {
+			if n.ID == f.ID {
+				return n.Repo
+			}
+		}
+	case "prs":
+		for _, p := range st.LastPRs {
+			if prKey(p) == f.ID {
+				return p.Repo
+			}
+		}
+		for _, p := range st.LastAssignedPRs {
+			if prKey(p) == f.ID {
+				return p.Repo
+			}
+		}
+	case "runs":
+		for _, r := range st.LastView {
+			if runKey(r) == f.ID {
+				return r.Repo
+			}
+		}
+	}
+	return ""
+}
+
+// resolveRepoPath finds a local clone of "owner/name" under sourceDir.
+// Tries the flat layout (sourceDir/name) first, then the owner/name
+// nested layout. A candidate only counts if it has a .git entry, so an
+// unrelated same-named directory isn't mistaken for the repo. sourceDir may
+// start with "~" (expanded against the user's home directory); this is
+// typed into the app's own inline prompt, not a shell, so it never gets
+// tilde-expanded for us.
+func resolveRepoPath(sourceDir, fullName string) (string, bool) {
+	sourceDir = expandHome(sourceDir)
+	if sourceDir == "" || fullName == "" {
+		return "", false
+	}
+	owner, name, ok := strings.Cut(fullName, "/")
+	if !ok || name == "" {
+		return "", false
+	}
+	for _, candidate := range []string{
+		filepath.Join(sourceDir, name),
+		filepath.Join(sourceDir, owner, name),
+	} {
+		if info, err := os.Stat(filepath.Join(candidate, ".git")); err == nil && info != nil {
+			return candidate, true
+		}
+	}
+	return "", false
+}
+
+// expandHome resolves a leading "~" or "~/..." against the user's home
+// directory. Paths not starting with "~" are returned unchanged. Any
+// failure to determine the home directory (or a bare "~user" form we don't
+// support) leaves the path untouched, so the eventual .git check just fails
+// cleanly instead of erroring out here.
+func expandHome(path string) string {
+	if path != "~" && !strings.HasPrefix(path, "~/") {
+		return path
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return path
+	}
+	if path == "~" {
+		return home
+	}
+	return filepath.Join(home, path[2:])
+}
+
+// openRepoInTerminal launches a terminal in path. Prefers Ghostty on macOS
+// (opening a new tab if it's already running), falling back to iTerm and
+// then Terminal.app; prefers Windows Terminal on Windows, falling back to
+// cmd.exe; tries common Linux terminal emulators in turn. Best-effort: logs
+// to stderr rather than erroring if nothing usable is found.
+func openRepoInTerminal(path string) {
+	switch runtime.GOOS {
+	case "darwin":
+		for _, app := range []string{"Ghostty", "iTerm", "Terminal"} {
+			if exec.Command("open", "-a", app, path).Run() == nil {
+				return
+			}
+		}
+		fmt.Fprintf(os.Stderr, "open terminal: no known terminal app found (tried Ghostty, iTerm, Terminal)\n")
+	case "windows":
+		if _, err := exec.LookPath("wt"); err == nil {
+			if err := exec.Command("wt", "-d", path).Start(); err == nil {
+				return
+			}
+		}
+		if err := exec.Command("cmd", "/c", "start", "", "cmd", "/K", "cd /d "+path).Start(); err != nil {
+			fmt.Fprintf(os.Stderr, "open terminal: %v\n", err)
+		}
+	default:
+		terms := []struct {
+			bin  string
+			args []string
+		}{
+			{"gnome-terminal", []string{"--working-directory=" + path}},
+			{"konsole", []string{"--workdir", path}},
+			{"xterm", []string{"-e", "cd " + path + " && exec $SHELL"}},
+		}
+		for _, t := range terms {
+			if _, err := exec.LookPath(t.bin); err != nil {
+				continue
+			}
+			if err := exec.Command(t.bin, t.args...).Start(); err == nil {
+				return
+			}
+		}
+		fmt.Fprintf(os.Stderr, "open terminal: no known terminal emulator found on PATH\n")
+	}
 }

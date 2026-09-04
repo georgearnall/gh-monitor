@@ -1,6 +1,8 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
 	"reflect"
 	"testing"
 	"time"
@@ -297,5 +299,132 @@ func TestApplyDismiss_NotPresent(t *testing.T) {
 	}
 	if len(st.LastNotifs) != 1 {
 		t.Errorf("state should be unchanged when not found; got %d notifs", len(st.LastNotifs))
+	}
+}
+
+func TestFocusedRepo(t *testing.T) {
+	st := mkState(t)
+	st.LastNotifs = []notifs.Notification{{ID: "1", Repo: "acme/notifs-repo"}}
+	st.LastPRs = []prs.PR{{Repo: "acme/prs-repo", Number: 7}}
+	st.LastAssignedPRs = []prs.PR{{Repo: "acme/assigned-repo", Number: 9}}
+	st.LastView = []runs.Run{{ID: 42, Repo: "acme/runs-repo"}}
+
+	cases := []struct {
+		name string
+		f    focusTarget
+		want string
+	}{
+		{"notif", focusTarget{"notifs", "1"}, "acme/notifs-repo"},
+		{"pr", focusTarget{"prs", "acme/prs-repo#7"}, "acme/prs-repo"},
+		{"assigned pr", focusTarget{"prs", "acme/assigned-repo#9"}, "acme/assigned-repo"},
+		{"run", focusTarget{"runs", "42"}, "acme/runs-repo"},
+		{"unknown", focusTarget{"notifs", "missing"}, ""},
+		{"zero", focusTarget{}, ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := focusedRepo(st, c.f); got != c.want {
+				t.Errorf("focusedRepo(%+v) = %q, want %q", c.f, got, c.want)
+			}
+		})
+	}
+}
+
+func TestResolveRepoPath(t *testing.T) {
+	dir := t.TempDir()
+	mustMkdirAll(t, dir+"/flat-repo/.git")
+	mustMkdirAll(t, dir+"/acme/nested-repo/.git")
+	mustMkdirAll(t, dir+"/not-a-repo") // no .git
+
+	cases := []struct {
+		name     string
+		fullName string
+		wantOK   bool
+		wantRel  string // path relative to dir, only checked when wantOK
+	}{
+		{"flat layout", "acme/flat-repo", true, "flat-repo"},
+		{"nested layout", "acme/nested-repo", true, "acme/nested-repo"},
+		{"no .git", "acme/not-a-repo", false, ""},
+		{"not cloned", "acme/missing-repo", false, ""},
+		{"empty full name", "", false, ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got, ok := resolveRepoPath(dir, c.fullName)
+			if ok != c.wantOK {
+				t.Fatalf("resolveRepoPath(%q, %q) ok = %v, want %v (path %q)", dir, c.fullName, ok, c.wantOK, got)
+			}
+			if ok && got != dir+"/"+c.wantRel {
+				t.Errorf("resolveRepoPath(%q, %q) = %q, want %q", dir, c.fullName, got, dir+"/"+c.wantRel)
+			}
+		})
+	}
+
+	if _, ok := resolveRepoPath("", "acme/flat-repo"); ok {
+		t.Errorf("empty sourceDir should never resolve")
+	}
+}
+
+// TestExpandHome is a regression test: the repo source directory is typed
+// into the app's own inline prompt (not a shell), so a leading "~" never
+// gets expanded for us and must be resolved by hand.
+func TestExpandHome(t *testing.T) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Skipf("no home dir available: %v", err)
+	}
+	cases := []struct {
+		in   string
+		want string
+	}{
+		{"~", home},
+		{"~/source", filepath.Join(home, "source")},
+		{"~/source/nested", filepath.Join(home, "source", "nested")},
+		{"/abs/path", "/abs/path"},
+		{"relative/path", "relative/path"},
+		{"", ""},
+	}
+	for _, c := range cases {
+		if got := expandHome(c.in); got != c.want {
+			t.Errorf("expandHome(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
+// TestResolveRepoPath_TildeExpansion is a regression test for the reported
+// bug: typing "~/source" into the prompt resolved nothing because the
+// literal "~" was joined straight into the filesystem path.
+func TestResolveRepoPath_TildeExpansion(t *testing.T) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Skipf("no home dir available: %v", err)
+	}
+	dir, err := os.MkdirTemp(home, "gh-monitor-tilde-test-*")
+	if err != nil {
+		t.Fatalf("mkdirtemp under home: %v", err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	mustMkdirAll(t, filepath.Join(dir, "flat-repo", ".git"))
+
+	rel, err := filepath.Rel(home, dir)
+	if err != nil {
+		t.Fatalf("rel: %v", err)
+	}
+	tildeDir := "~/" + rel
+
+	got, ok := resolveRepoPath(tildeDir, "acme/flat-repo")
+	if !ok {
+		t.Fatalf("resolveRepoPath(%q, ...) ok = false, want true", tildeDir)
+	}
+	want := filepath.Join(dir, "flat-repo")
+	if got != want {
+		t.Errorf("resolveRepoPath(%q, ...) = %q, want %q", tildeDir, got, want)
+	}
+}
+
+func mustMkdirAll(t *testing.T, path string) {
+	t.Helper()
+	if err := os.MkdirAll(path, 0o755); err != nil {
+		t.Fatalf("mkdir %q: %v", path, err)
 	}
 }

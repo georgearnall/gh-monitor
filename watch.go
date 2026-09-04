@@ -30,12 +30,13 @@ type watchConfig struct {
 	lowQuotaFloor  time.Duration
 	lowQuotaLimit  int
 
-	prSince  time.Duration // hide PRs not updated within this window (0 disables)
-	once     bool
-	excluded stringSet
-	noNotify bool
-	sound    bool
-	jiraURL  string // session override; does not write to state
+	prSince       time.Duration // hide PRs not updated within this window (0 disables)
+	once          bool
+	excluded      stringSet
+	noNotify      bool
+	sound         bool
+	jiraURL       string // session override; does not write to state
+	repoSourceDir string // session override; does not write to state
 
 	// Discovery cache: populated by doRefresh, reused until repoRefresh elapses.
 	lastDiscovery time.Time
@@ -93,7 +94,7 @@ func runWatch(client *ghclient.Client, cfg watchConfig) {
 	focused := pickFocus(st, focusTarget{})
 
 	// First paint: render whatever's in the cache. <100ms because no network.
-	renderFromState(st, cfg, true /*refreshing*/, focused, "")
+	renderFromState(st, cfg, true /*refreshing*/, focused, "", "")
 
 	trigger := make(chan struct{}, 1)
 	started := make(chan struct{}, 1)
@@ -118,6 +119,7 @@ func runWatch(client *ghclient.Client, cfg watchConfig) {
 		nextTimer  *time.Timer
 		configMode bool
 		ps         promptState
+		statusMsg  string
 	)
 	render := func() {
 		if configMode {
@@ -125,9 +127,9 @@ func runWatch(client *ghclient.Client, cfg watchConfig) {
 		} else {
 			var pl string
 			if ps.active {
-				pl = "Jira base URL: " + ps.buffer + "▌"
+				pl = ps.label + ps.buffer + "▌"
 			}
-			renderFromState(st, cfg, refreshing, focused, pl)
+			renderFromState(st, cfg, refreshing, focused, pl, statusMsg)
 		}
 	}
 
@@ -160,6 +162,7 @@ func runWatch(client *ghclient.Client, cfg watchConfig) {
 			nextTimer = time.AfterFunc(next, func() { enqueue(trigger) })
 
 		case k := <-keys:
+			statusMsg = ""
 			if ps.active {
 				switch k {
 				case '\r', '\n':
@@ -227,6 +230,7 @@ func runWatch(client *ghclient.Client, cfg watchConfig) {
 						} else {
 							ps = promptState{
 								active: true,
+								label:  "Jira base URL: ",
 								onConfirm: func(input string) {
 									input = strings.TrimRight(strings.TrimSpace(input), "/")
 									st.JiraURL = input
@@ -234,6 +238,38 @@ func runWatch(client *ghclient.Client, cfg watchConfig) {
 										fmt.Fprintf(os.Stderr, "save state: %v\n", err)
 									}
 									openURL(input + "/browse/" + ticket)
+								},
+							}
+							render()
+						}
+					}
+				}
+			case 'g':
+				if focused.ID != "" {
+					repo := focusedRepo(st, focused)
+					if repo != "" {
+						openRepoAt := func(sourceDir string) {
+							path, ok := resolveRepoPath(sourceDir, repo)
+							if !ok {
+								statusMsg = fmt.Sprintf("repo not found in %s: %s", sourceDir, repo)
+								render()
+								return
+							}
+							openRepoInTerminal(path)
+						}
+						if sourceDir := effectiveRepoSourceDirFor(cfg, st); sourceDir != "" {
+							openRepoAt(sourceDir)
+						} else {
+							ps = promptState{
+								active: true,
+								label:  "Repo source directory: ",
+								onConfirm: func(input string) {
+									input = strings.TrimRight(strings.TrimSpace(input), "/")
+									st.RepoSourceDir = input
+									if err := st.Save(); err != nil {
+										fmt.Fprintf(os.Stderr, "save state: %v\n", err)
+									}
+									openRepoAt(input)
 								},
 							}
 							render()
@@ -304,7 +340,7 @@ func runOnce(ctx context.Context, client *ghclient.Client, cfg watchConfig, st *
 	}
 	applyResult(st, &cfg, res)
 	st.EtagCache = client.Etags()
-	renderFromState(st, cfg, false, focusTarget{}, "")
+	renderFromState(st, cfg, false, focusTarget{}, "", "")
 	if err := st.Save(); err != nil {
 		fmt.Fprintf(os.Stderr, "save state: %v\n", err)
 	}
@@ -524,7 +560,7 @@ func applyResult(st *state.State, cfg *watchConfig, res pollResult) {
 	}
 }
 
-func renderFromState(st *state.State, cfg watchConfig, refreshing bool, f focusTarget, promptLine string) {
+func renderFromState(st *state.State, cfg watchConfig, refreshing bool, f focusTarget, promptLine, statusLine string) {
 	stale := refreshing && !st.LastPoll.IsZero()
 	var next time.Duration
 	if !refreshing {
@@ -552,6 +588,7 @@ func renderFromState(st *state.State, cfg watchConfig, refreshing bool, f focusT
 		BgErr:         bgErr,
 		JiraURL:       effectiveJiraURLFor(cfg, st),
 		PromptLine:    promptLine,
+		StatusLine:    statusLine,
 		Links:         ui.SupportsLinks(),
 		ReadRunIDs:    readRunIDs(st),
 	}
@@ -583,6 +620,14 @@ func effectiveJiraURLFor(cfg watchConfig, st *state.State) string {
 		u = st.JiraURL
 	}
 	return strings.TrimRight(strings.TrimSpace(u), "/")
+}
+
+func effectiveRepoSourceDirFor(cfg watchConfig, st *state.State) string {
+	d := cfg.repoSourceDir
+	if d == "" {
+		d = st.RepoSourceDir
+	}
+	return strings.TrimRight(strings.TrimSpace(d), "/")
 }
 
 func activeCount(rs []runs.Run) int {
@@ -653,6 +698,7 @@ func producerLoop(
 // all keypresses are routed to the buffer; Enter calls onConfirm; Esc cancels.
 type promptState struct {
 	active    bool
+	label     string // footer prefix shown before the input buffer, e.g. "Jira base URL: "
 	buffer    string
 	onConfirm func(string)
 }
@@ -717,6 +763,7 @@ func renderConfig(st *state.State, cfg watchConfig) {
 		RateRemaining:  st.LastRateLimit.Remaining,
 		RateLimit:      st.LastRateLimit.Limit,
 		JiraURL:        effectiveJiraURLFor(cfg, st),
+		RepoSourceDir:  effectiveRepoSourceDirFor(cfg, st),
 		TermWidth:      ui.TermWidth(),
 
 		NotifyFailedBuilds:  st.FailedBuildAlertsEnabled(),
