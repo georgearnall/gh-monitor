@@ -2,6 +2,7 @@ package main
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"testing"
@@ -420,6 +421,120 @@ func TestResolveRepoPath_TildeExpansion(t *testing.T) {
 	if got != want {
 		t.Errorf("resolveRepoPath(%q, ...) = %q, want %q", tildeDir, got, want)
 	}
+}
+
+func TestFocusedBranch(t *testing.T) {
+	st := mkState(t)
+	st.LastNotifs = []notifs.Notification{
+		{ID: "pr-notif", Repo: "acme/repo", PRNumber: 7},
+		{ID: "assigned-notif", Repo: "acme/repo", PRNumber: 9},
+		{ID: "stale-notif", Repo: "acme/repo", PRNumber: 999}, // PR not in LastPRs/LastAssignedPRs
+		{ID: "non-pr-notif", Repo: "acme/repo"},               // PRNumber 0
+	}
+	st.LastPRs = []prs.PR{{Repo: "acme/repo", Number: 7, HeadBranch: "feature-a"}}
+	st.LastAssignedPRs = []prs.PR{{Repo: "acme/repo", Number: 9, HeadBranch: "feature-b"}}
+	st.LastView = []runs.Run{{ID: 42, Repo: "acme/repo", Branch: "feature-c"}}
+
+	cases := []struct {
+		name string
+		f    focusTarget
+		want string
+	}{
+		{"pr", focusTarget{"prs", "acme/repo#7"}, "feature-a"},
+		{"assigned pr", focusTarget{"prs", "acme/repo#9"}, "feature-b"},
+		{"run", focusTarget{"runs", "42"}, "feature-c"},
+		{"pr-linked notif", focusTarget{"notifs", "pr-notif"}, "feature-a"},
+		{"assigned-pr-linked notif", focusTarget{"notifs", "assigned-notif"}, "feature-b"},
+		{"notif whose PR aged out", focusTarget{"notifs", "stale-notif"}, ""},
+		{"non-pr notif", focusTarget{"notifs", "non-pr-notif"}, ""},
+		{"unknown panel", focusTarget{"other", "x"}, ""},
+		{"zero", focusTarget{}, ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := focusedBranch(st, c.f); got != c.want {
+				t.Errorf("focusedBranch(%+v) = %q, want %q", c.f, got, c.want)
+			}
+		})
+	}
+}
+
+// gitOrSkip runs a git command in dir, skipping the test if git isn't
+// available on PATH (these tests genuinely invoke git, unlike the rest of
+// the suite).
+func gitOrSkip(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not on PATH")
+	}
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git %v: %v\n%s", args, err, out)
+	}
+}
+
+func TestResolveWorktreePath(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not on PATH")
+	}
+
+	main := t.TempDir()
+	gitOrSkip(t, main, "init", "-q", "-b", "main")
+	gitOrSkip(t, main, "config", "user.email", "test@example.com")
+	gitOrSkip(t, main, "config", "user.name", "test")
+	if err := os.WriteFile(filepath.Join(main, "f.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	gitOrSkip(t, main, "add", "f.txt")
+	gitOrSkip(t, main, "commit", "-q", "-m", "init")
+	gitOrSkip(t, main, "branch", "feature-x")
+
+	linked := filepath.Join(t.TempDir(), "linked")
+	gitOrSkip(t, main, "worktree", "add", "-q", linked, "feature-x")
+
+	t.Run("match in linked worktree", func(t *testing.T) {
+		got, ok := resolveWorktreePath(main, "feature-x")
+		if !ok {
+			t.Fatalf("expected match")
+		}
+		// Resolve symlinks: t.TempDir() on macOS may be under /var -> /private/var.
+		wantAbs, _ := filepath.EvalSymlinks(linked)
+		gotAbs, _ := filepath.EvalSymlinks(got)
+		if gotAbs != wantAbs {
+			t.Errorf("resolveWorktreePath = %q, want %q", got, linked)
+		}
+	})
+
+	t.Run("match is the main worktree itself", func(t *testing.T) {
+		got, ok := resolveWorktreePath(main, "main")
+		if !ok {
+			t.Fatalf("expected match")
+		}
+		wantAbs, _ := filepath.EvalSymlinks(main)
+		gotAbs, _ := filepath.EvalSymlinks(got)
+		if gotAbs != wantAbs {
+			t.Errorf("resolveWorktreePath = %q, want %q", got, main)
+		}
+	})
+
+	t.Run("no matching branch", func(t *testing.T) {
+		if _, ok := resolveWorktreePath(main, "no-such-branch"); ok {
+			t.Errorf("expected no match")
+		}
+	})
+
+	t.Run("empty branch", func(t *testing.T) {
+		if _, ok := resolveWorktreePath(main, ""); ok {
+			t.Errorf("expected no match for empty branch")
+		}
+	})
+
+	t.Run("not a git repo", func(t *testing.T) {
+		if _, ok := resolveWorktreePath(t.TempDir(), "feature-x"); ok {
+			t.Errorf("expected no match outside a git repo")
+		}
+	})
 }
 
 func mustMkdirAll(t *testing.T, path string) {

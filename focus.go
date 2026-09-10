@@ -264,6 +264,96 @@ func focusedRepo(st *state.State, f focusTarget) string {
 	return ""
 }
 
+// focusedBranch returns the head branch name for whatever is under the
+// cursor, or "" if unknown/not applicable. PRs and runs carry this
+// directly; notifications don't, so for a PR-linked notification we look
+// up the matching entry in LastPRs/LastAssignedPRs by repo+PR number.
+func focusedBranch(st *state.State, f focusTarget) string {
+	switch f.Panel {
+	case "prs":
+		for _, p := range st.LastPRs {
+			if prKey(p) == f.ID {
+				return p.HeadBranch
+			}
+		}
+		for _, p := range st.LastAssignedPRs {
+			if prKey(p) == f.ID {
+				return p.HeadBranch
+			}
+		}
+	case "runs":
+		for _, r := range st.LastView {
+			if runKey(r) == f.ID {
+				return r.Branch
+			}
+		}
+	case "notifs":
+		for _, n := range st.LastNotifs {
+			if n.ID == f.ID {
+				if n.PRNumber == 0 {
+					return ""
+				}
+				for _, p := range st.LastPRs {
+					if p.Repo == n.Repo && p.Number == n.PRNumber {
+						return p.HeadBranch
+					}
+				}
+				for _, p := range st.LastAssignedPRs {
+					if p.Repo == n.Repo && p.Number == n.PRNumber {
+						return p.HeadBranch
+					}
+				}
+				return ""
+			}
+		}
+	}
+	return ""
+}
+
+// resolveWorktreePath looks for a linked worktree of the repo at repoPath
+// that has branch checked out, returning its path. Runs `git -C repoPath
+// worktree list --porcelain` and parses the block-per-worktree output:
+//
+//	worktree /path/to/main
+//	HEAD <sha>
+//	branch refs/heads/main
+//
+//	worktree /path/to/linked
+//	HEAD <sha>
+//	branch refs/heads/feature-x
+//
+// Entries with `detached` or `bare` instead of a `branch` line are skipped.
+// Returns ("", false) if git isn't on PATH, the command fails (e.g. path
+// isn't a git repo), or no worktree's branch matches -- callers should fall
+// back to repoPath itself in all of those cases.
+func resolveWorktreePath(repoPath, branch string) (string, bool) {
+	if branch == "" {
+		return "", false
+	}
+	if _, err := exec.LookPath("git"); err != nil {
+		return "", false
+	}
+	out, err := exec.Command("git", "-C", repoPath, "worktree", "list", "--porcelain").Output()
+	if err != nil {
+		return "", false
+	}
+	var path string
+	for _, line := range strings.Split(string(out), "\n") {
+		switch {
+		case strings.HasPrefix(line, "worktree "):
+			path = strings.TrimPrefix(line, "worktree ")
+		case strings.HasPrefix(line, "branch "):
+			ref := strings.TrimPrefix(line, "branch ")
+			if strings.TrimPrefix(ref, "refs/heads/") == branch && path != "" {
+				return path, true
+			}
+		case line == "":
+			path = ""
+		}
+	}
+	return "", false
+}
+
 // resolveRepoPath finds a local clone of "owner/name" under sourceDir.
 // Tries the flat layout (sourceDir/name) first, then the owner/name
 // nested layout. A candidate only counts if it has a .git entry, so an
