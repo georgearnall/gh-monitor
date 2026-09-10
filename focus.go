@@ -420,7 +420,10 @@ func openRepoInTerminal(path string) {
 				return
 			}
 		}
-		if err := exec.Command("cmd", "/c", "start", "", "cmd", "/K", "cd /d "+path).Start(); err != nil {
+		// "start" takes /D as a dedicated flag for the starting directory,
+		// so cmd never has to interpret path as part of a command string
+		// (which would break on spaces and metacharacters like &).
+		if err := exec.Command("cmd", "/c", "start", "", "/D", path, "cmd").Start(); err != nil {
 			fmt.Fprintf(os.Stderr, "open terminal: %v\n", err)
 		}
 	default:
@@ -430,7 +433,10 @@ func openRepoInTerminal(path string) {
 		}{
 			{"gnome-terminal", []string{"--working-directory=" + path}},
 			{"konsole", []string{"--workdir", path}},
-			{"xterm", []string{"-e", "cd " + path + " && exec $SHELL"}},
+			// path is passed as a positional parameter ($1) to the sh -c
+			// script rather than interpolated into it, so spaces and shell
+			// metacharacters in path can't break or inject into the command.
+			{"xterm", []string{"-e", "sh", "-c", `cd "$1" && exec "$SHELL"`, "sh", path}},
 		}
 		for _, t := range terms {
 			if _, err := exec.LookPath(t.bin); err != nil {
