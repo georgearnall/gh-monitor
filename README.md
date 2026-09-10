@@ -106,6 +106,7 @@ the discovered repo set and exits. `help` prints the full help page.
 | `--exclude owner/repo` | none | Skip a noisy repo (repeatable) |
 | `--no-notify` | off | Suppress desktop notifications |
 | `--sound` | off | Also play a system sound on failure |
+| `--repo-source-dir DIR` | none | Base directory containing local repo clones, used by the `g` (open repo in terminal) action |
 
 ### Keybindings (watch mode)
 
@@ -116,6 +117,7 @@ the discovered repo set and exits. `help` prints the full help page.
 | `m` | Mark the focused notification read |
 | `M` | Mark every visible unread notification read |
 | `d` | Dismiss (mark as done) the focused notification; removes it from the inbox entirely |
+| `g` | Open the focused row's repo in a terminal (Ghostty preferred, with fallbacks). Prompts for the repo source directory on first use. Shows a footer message if the repo isn't cloned locally |
 | `r`, `R`, space | Trigger an immediate refresh |
 | `q`, `Q`, Ctrl-C | Quit cleanly, restore terminal, save state |
 

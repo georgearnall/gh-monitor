@@ -1,6 +1,9 @@
 package main
 
 import (
+	"os"
+	"os/exec"
+	"path/filepath"
 	"reflect"
 	"testing"
 	"time"
@@ -297,5 +300,246 @@ func TestApplyDismiss_NotPresent(t *testing.T) {
 	}
 	if len(st.LastNotifs) != 1 {
 		t.Errorf("state should be unchanged when not found; got %d notifs", len(st.LastNotifs))
+	}
+}
+
+func TestFocusedRepo(t *testing.T) {
+	st := mkState(t)
+	st.LastNotifs = []notifs.Notification{{ID: "1", Repo: "acme/notifs-repo"}}
+	st.LastPRs = []prs.PR{{Repo: "acme/prs-repo", Number: 7}}
+	st.LastAssignedPRs = []prs.PR{{Repo: "acme/assigned-repo", Number: 9}}
+	st.LastView = []runs.Run{{ID: 42, Repo: "acme/runs-repo"}}
+
+	cases := []struct {
+		name string
+		f    focusTarget
+		want string
+	}{
+		{"notif", focusTarget{"notifs", "1"}, "acme/notifs-repo"},
+		{"pr", focusTarget{"prs", "acme/prs-repo#7"}, "acme/prs-repo"},
+		{"assigned pr", focusTarget{"prs", "acme/assigned-repo#9"}, "acme/assigned-repo"},
+		{"run", focusTarget{"runs", "42"}, "acme/runs-repo"},
+		{"unknown", focusTarget{"notifs", "missing"}, ""},
+		{"zero", focusTarget{}, ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := focusedRepo(st, c.f); got != c.want {
+				t.Errorf("focusedRepo(%+v) = %q, want %q", c.f, got, c.want)
+			}
+		})
+	}
+}
+
+func TestResolveRepoPath(t *testing.T) {
+	dir := t.TempDir()
+	mustMkdirAll(t, dir+"/flat-repo/.git")
+	mustMkdirAll(t, dir+"/acme/nested-repo/.git")
+	mustMkdirAll(t, dir+"/not-a-repo") // no .git
+
+	cases := []struct {
+		name     string
+		fullName string
+		wantOK   bool
+		wantRel  string // path relative to dir, only checked when wantOK
+	}{
+		{"flat layout", "acme/flat-repo", true, "flat-repo"},
+		{"nested layout", "acme/nested-repo", true, "acme/nested-repo"},
+		{"no .git", "acme/not-a-repo", false, ""},
+		{"not cloned", "acme/missing-repo", false, ""},
+		{"empty full name", "", false, ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got, ok := resolveRepoPath(dir, c.fullName)
+			if ok != c.wantOK {
+				t.Fatalf("resolveRepoPath(%q, %q) ok = %v, want %v (path %q)", dir, c.fullName, ok, c.wantOK, got)
+			}
+			if ok && got != dir+"/"+c.wantRel {
+				t.Errorf("resolveRepoPath(%q, %q) = %q, want %q", dir, c.fullName, got, dir+"/"+c.wantRel)
+			}
+		})
+	}
+
+	if _, ok := resolveRepoPath("", "acme/flat-repo"); ok {
+		t.Errorf("empty sourceDir should never resolve")
+	}
+}
+
+// TestExpandHome is a regression test: the repo source directory is typed
+// into the app's own inline prompt (not a shell), so a leading "~" never
+// gets expanded for us and must be resolved by hand.
+func TestExpandHome(t *testing.T) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Skipf("no home dir available: %v", err)
+	}
+	cases := []struct {
+		in   string
+		want string
+	}{
+		{"~", home},
+		{"~/source", filepath.Join(home, "source")},
+		{"~/source/nested", filepath.Join(home, "source", "nested")},
+		{"/abs/path", "/abs/path"},
+		{"relative/path", "relative/path"},
+		{"", ""},
+	}
+	for _, c := range cases {
+		if got := expandHome(c.in); got != c.want {
+			t.Errorf("expandHome(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
+// TestResolveRepoPath_TildeExpansion is a regression test for the reported
+// bug: typing "~/source" into the prompt resolved nothing because the
+// literal "~" was joined straight into the filesystem path.
+func TestResolveRepoPath_TildeExpansion(t *testing.T) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Skipf("no home dir available: %v", err)
+	}
+	dir, err := os.MkdirTemp(home, "gh-monitor-tilde-test-*")
+	if err != nil {
+		t.Fatalf("mkdirtemp under home: %v", err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	mustMkdirAll(t, filepath.Join(dir, "flat-repo", ".git"))
+
+	rel, err := filepath.Rel(home, dir)
+	if err != nil {
+		t.Fatalf("rel: %v", err)
+	}
+	tildeDir := "~/" + rel
+
+	got, ok := resolveRepoPath(tildeDir, "acme/flat-repo")
+	if !ok {
+		t.Fatalf("resolveRepoPath(%q, ...) ok = false, want true", tildeDir)
+	}
+	want := filepath.Join(dir, "flat-repo")
+	if got != want {
+		t.Errorf("resolveRepoPath(%q, ...) = %q, want %q", tildeDir, got, want)
+	}
+}
+
+func TestFocusedBranch(t *testing.T) {
+	st := mkState(t)
+	st.LastNotifs = []notifs.Notification{
+		{ID: "pr-notif", Repo: "acme/repo", PRNumber: 7},
+		{ID: "assigned-notif", Repo: "acme/repo", PRNumber: 9},
+		{ID: "stale-notif", Repo: "acme/repo", PRNumber: 999}, // PR not in LastPRs/LastAssignedPRs
+		{ID: "non-pr-notif", Repo: "acme/repo"},               // PRNumber 0
+	}
+	st.LastPRs = []prs.PR{{Repo: "acme/repo", Number: 7, HeadBranch: "feature-a"}}
+	st.LastAssignedPRs = []prs.PR{{Repo: "acme/repo", Number: 9, HeadBranch: "feature-b"}}
+	st.LastView = []runs.Run{{ID: 42, Repo: "acme/repo", Branch: "feature-c"}}
+
+	cases := []struct {
+		name string
+		f    focusTarget
+		want string
+	}{
+		{"pr", focusTarget{"prs", "acme/repo#7"}, "feature-a"},
+		{"assigned pr", focusTarget{"prs", "acme/repo#9"}, "feature-b"},
+		{"run", focusTarget{"runs", "42"}, "feature-c"},
+		{"pr-linked notif", focusTarget{"notifs", "pr-notif"}, "feature-a"},
+		{"assigned-pr-linked notif", focusTarget{"notifs", "assigned-notif"}, "feature-b"},
+		{"notif whose PR aged out", focusTarget{"notifs", "stale-notif"}, ""},
+		{"non-pr notif", focusTarget{"notifs", "non-pr-notif"}, ""},
+		{"unknown panel", focusTarget{"other", "x"}, ""},
+		{"zero", focusTarget{}, ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := focusedBranch(st, c.f); got != c.want {
+				t.Errorf("focusedBranch(%+v) = %q, want %q", c.f, got, c.want)
+			}
+		})
+	}
+}
+
+// gitOrSkip runs a git command in dir, skipping the test if git isn't
+// available on PATH (these tests genuinely invoke git, unlike the rest of
+// the suite).
+func gitOrSkip(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not on PATH")
+	}
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git %v: %v\n%s", args, err, out)
+	}
+}
+
+func TestResolveWorktreePath(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not on PATH")
+	}
+
+	main := t.TempDir()
+	gitOrSkip(t, main, "init", "-q", "-b", "main")
+	gitOrSkip(t, main, "config", "user.email", "test@example.com")
+	gitOrSkip(t, main, "config", "user.name", "test")
+	if err := os.WriteFile(filepath.Join(main, "f.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	gitOrSkip(t, main, "add", "f.txt")
+	gitOrSkip(t, main, "commit", "-q", "-m", "init")
+	gitOrSkip(t, main, "branch", "feature-x")
+
+	linked := filepath.Join(t.TempDir(), "linked")
+	gitOrSkip(t, main, "worktree", "add", "-q", linked, "feature-x")
+
+	t.Run("match in linked worktree", func(t *testing.T) {
+		got, ok := resolveWorktreePath(main, "feature-x")
+		if !ok {
+			t.Fatalf("expected match")
+		}
+		// Resolve symlinks: t.TempDir() on macOS may be under /var -> /private/var.
+		wantAbs, _ := filepath.EvalSymlinks(linked)
+		gotAbs, _ := filepath.EvalSymlinks(got)
+		if gotAbs != wantAbs {
+			t.Errorf("resolveWorktreePath = %q, want %q", got, linked)
+		}
+	})
+
+	t.Run("match is the main worktree itself", func(t *testing.T) {
+		got, ok := resolveWorktreePath(main, "main")
+		if !ok {
+			t.Fatalf("expected match")
+		}
+		wantAbs, _ := filepath.EvalSymlinks(main)
+		gotAbs, _ := filepath.EvalSymlinks(got)
+		if gotAbs != wantAbs {
+			t.Errorf("resolveWorktreePath = %q, want %q", got, main)
+		}
+	})
+
+	t.Run("no matching branch", func(t *testing.T) {
+		if _, ok := resolveWorktreePath(main, "no-such-branch"); ok {
+			t.Errorf("expected no match")
+		}
+	})
+
+	t.Run("empty branch", func(t *testing.T) {
+		if _, ok := resolveWorktreePath(main, ""); ok {
+			t.Errorf("expected no match for empty branch")
+		}
+	})
+
+	t.Run("not a git repo", func(t *testing.T) {
+		if _, ok := resolveWorktreePath(t.TempDir(), "feature-x"); ok {
+			t.Errorf("expected no match outside a git repo")
+		}
+	})
+}
+
+func mustMkdirAll(t *testing.T, path string) {
+	t.Helper()
+	if err := os.MkdirAll(path, 0o755); err != nil {
+		t.Fatalf("mkdir %q: %v", path, err)
 	}
 }

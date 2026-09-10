@@ -4,8 +4,10 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strconv"
+	"strings"
 
 	"github.com/georgearnall/gh-monitor/internal/prs"
 	"github.com/georgearnall/gh-monitor/internal/runs"
@@ -229,4 +231,221 @@ func focusedURL(st *state.State, f focusTarget) string {
 		}
 	}
 	return ""
+}
+
+// focusedRepo returns the "owner/name" of whatever row the cursor is on, or
+// "" if nothing is focused or the row's repo can't be determined.
+func focusedRepo(st *state.State, f focusTarget) string {
+	switch f.Panel {
+	case "notifs":
+		for _, n := range st.LastNotifs {
+			if n.ID == f.ID {
+				return n.Repo
+			}
+		}
+	case "prs":
+		for _, p := range st.LastPRs {
+			if prKey(p) == f.ID {
+				return p.Repo
+			}
+		}
+		for _, p := range st.LastAssignedPRs {
+			if prKey(p) == f.ID {
+				return p.Repo
+			}
+		}
+	case "runs":
+		for _, r := range st.LastView {
+			if runKey(r) == f.ID {
+				return r.Repo
+			}
+		}
+	}
+	return ""
+}
+
+// focusedBranch returns the head branch name for whatever is under the
+// cursor, or "" if unknown/not applicable. PRs and runs carry this
+// directly; notifications don't, so for a PR-linked notification we look
+// up the matching entry in LastPRs/LastAssignedPRs by repo+PR number.
+func focusedBranch(st *state.State, f focusTarget) string {
+	switch f.Panel {
+	case "prs":
+		for _, p := range st.LastPRs {
+			if prKey(p) == f.ID {
+				return p.HeadBranch
+			}
+		}
+		for _, p := range st.LastAssignedPRs {
+			if prKey(p) == f.ID {
+				return p.HeadBranch
+			}
+		}
+	case "runs":
+		for _, r := range st.LastView {
+			if runKey(r) == f.ID {
+				return r.Branch
+			}
+		}
+	case "notifs":
+		for _, n := range st.LastNotifs {
+			if n.ID == f.ID {
+				if n.PRNumber == 0 {
+					return ""
+				}
+				for _, p := range st.LastPRs {
+					if p.Repo == n.Repo && p.Number == n.PRNumber {
+						return p.HeadBranch
+					}
+				}
+				for _, p := range st.LastAssignedPRs {
+					if p.Repo == n.Repo && p.Number == n.PRNumber {
+						return p.HeadBranch
+					}
+				}
+				return ""
+			}
+		}
+	}
+	return ""
+}
+
+// resolveWorktreePath looks for a linked worktree of the repo at repoPath
+// that has branch checked out, returning its path. Runs `git -C repoPath
+// worktree list --porcelain` and parses the block-per-worktree output:
+//
+//	worktree /path/to/main
+//	HEAD <sha>
+//	branch refs/heads/main
+//
+//	worktree /path/to/linked
+//	HEAD <sha>
+//	branch refs/heads/feature-x
+//
+// Entries with `detached` or `bare` instead of a `branch` line are skipped.
+// Returns ("", false) if git isn't on PATH, the command fails (e.g. path
+// isn't a git repo), or no worktree's branch matches -- callers should fall
+// back to repoPath itself in all of those cases.
+func resolveWorktreePath(repoPath, branch string) (string, bool) {
+	if branch == "" {
+		return "", false
+	}
+	if _, err := exec.LookPath("git"); err != nil {
+		return "", false
+	}
+	out, err := exec.Command("git", "-C", repoPath, "worktree", "list", "--porcelain").Output()
+	if err != nil {
+		return "", false
+	}
+	var path string
+	for _, line := range strings.Split(string(out), "\n") {
+		switch {
+		case strings.HasPrefix(line, "worktree "):
+			path = strings.TrimPrefix(line, "worktree ")
+		case strings.HasPrefix(line, "branch "):
+			ref := strings.TrimPrefix(line, "branch ")
+			if strings.TrimPrefix(ref, "refs/heads/") == branch && path != "" {
+				return path, true
+			}
+		case line == "":
+			path = ""
+		}
+	}
+	return "", false
+}
+
+// resolveRepoPath finds a local clone of "owner/name" under sourceDir.
+// Tries the flat layout (sourceDir/name) first, then the owner/name
+// nested layout. A candidate only counts if it has a .git entry, so an
+// unrelated same-named directory isn't mistaken for the repo. sourceDir may
+// start with "~" (expanded against the user's home directory); this is
+// typed into the app's own inline prompt, not a shell, so it never gets
+// tilde-expanded for us.
+func resolveRepoPath(sourceDir, fullName string) (string, bool) {
+	sourceDir = expandHome(sourceDir)
+	if sourceDir == "" || fullName == "" {
+		return "", false
+	}
+	owner, name, ok := strings.Cut(fullName, "/")
+	if !ok || name == "" {
+		return "", false
+	}
+	for _, candidate := range []string{
+		filepath.Join(sourceDir, name),
+		filepath.Join(sourceDir, owner, name),
+	} {
+		if info, err := os.Stat(filepath.Join(candidate, ".git")); err == nil && info != nil {
+			return candidate, true
+		}
+	}
+	return "", false
+}
+
+// expandHome resolves a leading "~" or "~/..." against the user's home
+// directory. Paths not starting with "~" are returned unchanged. Any
+// failure to determine the home directory (or a bare "~user" form we don't
+// support) leaves the path untouched, so the eventual .git check just fails
+// cleanly instead of erroring out here.
+func expandHome(path string) string {
+	if path != "~" && !strings.HasPrefix(path, "~/") {
+		return path
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return path
+	}
+	if path == "~" {
+		return home
+	}
+	return filepath.Join(home, path[2:])
+}
+
+// openRepoInTerminal launches a terminal in path. Prefers Ghostty on macOS
+// (opening a new tab if it's already running), falling back to iTerm and
+// then Terminal.app; prefers Windows Terminal on Windows, falling back to
+// cmd.exe; tries common Linux terminal emulators in turn. Best-effort: logs
+// to stderr rather than erroring if nothing usable is found.
+func openRepoInTerminal(path string) {
+	switch runtime.GOOS {
+	case "darwin":
+		for _, app := range []string{"Ghostty", "iTerm", "Terminal"} {
+			if exec.Command("open", "-a", app, path).Run() == nil {
+				return
+			}
+		}
+		fmt.Fprintf(os.Stderr, "open terminal: no known terminal app found (tried Ghostty, iTerm, Terminal)\n")
+	case "windows":
+		if _, err := exec.LookPath("wt"); err == nil {
+			if err := exec.Command("wt", "-d", path).Start(); err == nil {
+				return
+			}
+		}
+		// "start" takes /D as a dedicated flag for the starting directory,
+		// so cmd never has to interpret path as part of a command string
+		// (which would break on spaces and metacharacters like &).
+		if err := exec.Command("cmd", "/c", "start", "", "/D", path, "cmd").Start(); err != nil {
+			fmt.Fprintf(os.Stderr, "open terminal: %v\n", err)
+		}
+	default:
+		terms := []struct {
+			bin  string
+			args []string
+		}{
+			{"gnome-terminal", []string{"--working-directory=" + path}},
+			{"konsole", []string{"--workdir", path}},
+			// path is passed as a positional parameter ($1) to the sh -c
+			// script rather than interpolated into it, so spaces and shell
+			// metacharacters in path can't break or inject into the command.
+			{"xterm", []string{"-e", "sh", "-c", `cd "$1" && exec "$SHELL"`, "sh", path}},
+		}
+		for _, t := range terms {
+			if _, err := exec.LookPath(t.bin); err != nil {
+				continue
+			}
+			if err := exec.Command(t.bin, t.args...).Start(); err == nil {
+				return
+			}
+		}
+		fmt.Fprintf(os.Stderr, "open terminal: no known terminal emulator found on PATH\n")
+	}
 }

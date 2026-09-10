@@ -50,6 +50,7 @@ func main() {
 	fs.BoolVar(&cfg.noNotify, "no-notify", false, "suppress desktop notifications")
 	fs.BoolVar(&cfg.sound, "sound", false, "also play an audible alert on failure")
 	fs.StringVar(&cfg.jiraURL, "jira-url", "", "Jira base URL for clickable ticket links (e.g. https://company.atlassian.net); overrides saved value")
+	fs.StringVar(&cfg.repoSourceDir, "repo-source-dir", "", "base directory containing local repo clones, used by the 'open repo in terminal' action; overrides saved value")
 	fs.Usage = func() { fmt.Fprint(os.Stderr, helpText) }
 
 	args := os.Args[1:]
@@ -107,6 +108,10 @@ FLAGS
   --jira-url URL        Jira base URL (e.g. https://company.atlassian.net).
                         Overrides the value saved by the inline prompt.
                         If omitted, the saved URL is used automatically.
+  --repo-source-dir DIR Base directory containing your local repo clones,
+                        used by the 'g' (open repo in terminal) action.
+                        Overrides the value saved by the inline prompt.
+                        If omitted, the saved directory is used automatically.
 
 KEYBINDINGS (watch mode)
   ↑ / ↓                 Move cursor across all three panels (notifications,
@@ -122,6 +127,11 @@ KEYBINDINGS (watch mode)
                         care about).
   t                     Open Jira ticket from the focused row's title. If no
                         Jira URL is configured, prompts for it and saves it.
+  g                     Open the focused row's repo in a terminal (Ghostty
+                        preferred, with fallbacks). If no repo source
+                        directory is configured, prompts for it and saves
+                        it. If the repo isn't cloned locally, shows a
+                        footer message instead.
   r  /  R  /  space     Refresh now (don't wait for the next interval)
   ?                     Open/close the config pane
   q  /  Q  /  Ctrl-C    Quit cleanly, restore terminal, save state

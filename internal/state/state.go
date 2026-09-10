@@ -54,6 +54,13 @@ type State struct {
 	// --jira-url flag. Persisted so it survives restarts.
 	JiraURL string `json:"jira_url,omitempty"`
 
+	// RepoSourceDir is the base directory under which the user's local
+	// clones live, used by the "open repo in terminal" action to find a
+	// repo's working copy from its "owner/name". Set via the inline
+	// prompt or --repo-source-dir flag. Persisted so it survives
+	// restarts.
+	RepoSourceDir string `json:"repo_source_dir,omitempty"`
+
 	// NotifyFailedBuilds toggles the desktop alert for a workflow run
 	// transitioning active→failure. Pointer so Load can distinguish "never
 	// set" (nil → migrate to true, preserving pre-toggle behavior for both
