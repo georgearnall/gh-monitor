@@ -26,6 +26,9 @@ func TestVisibleWidth(t *testing.T) {
 		{"\x1b]2;title\x07stuff", 5},                                 // OSC 2 with BEL terminator
 		{"✓ pass", 6},                                                // multibyte but single rune ✓
 		{"a✓b", 3},
+		{"🐛 fix bug", 10},                                           // emoji is 2 columns wide
+		{"👨‍👩‍👧 family", 9},                                         // ZWJ sequence is one 2-column cluster
+		{"\x1b[2m🐛 x\x1b[0m", 4},                                    // emoji inside ANSI wrap
 	}
 	for _, c := range cases {
 		got := visibleWidth(c.in)
@@ -69,7 +72,8 @@ func TestAgeString(t *testing.T) {
 }
 
 func TestTruncate(t *testing.T) {
-	// truncate(s, n) returns up to n runes total: (n-1 source runes) + ellipsis.
+	// truncate(s, n) returns at most n terminal columns: source graphemes
+	// fitting in n-1 columns + ellipsis.
 	cases := []struct {
 		in   string
 		max  int
@@ -78,7 +82,9 @@ func TestTruncate(t *testing.T) {
 		{"hello", 10, "hello"},
 		{"hello world", 5, "hell…"},
 		{"短い", 5, "短い"},
-		{"これは長い", 4, "これは…"},
+		{"これは長い", 4, "こ…"},
+		{"🐛 fix the bug", 6, "🐛 fi…"},
+		{"ab🐛cd", 4, "ab…"}, // emoji would overflow n-1, so it is dropped whole
 	}
 	for _, c := range cases {
 		got := truncate(c.in, c.max)
