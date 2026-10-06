@@ -9,11 +9,11 @@ import (
 	"strconv"
 	"strings"
 	"time"
-	"unicode/utf8"
 
 	"github.com/georgearnall/gh-monitor/internal/notifs"
 	"github.com/georgearnall/gh-monitor/internal/prs"
 	"github.com/georgearnall/gh-monitor/internal/runs"
+	"github.com/rivo/uniseg"
 	"golang.org/x/term"
 )
 
@@ -875,8 +875,11 @@ func printAligned(rows [][]string) {
 
 var ansiRe = regexp.MustCompile("\x1b\\[[0-9;]*[a-zA-Z]|\x1b\\][^\x07\x1b]*(?:\x07|\x1b\\\\)")
 
+// visibleWidth returns the terminal column width of s, ignoring ANSI escapes.
+// Wide glyphs (emoji, CJK) count as 2 columns; grapheme clusters (ZWJ
+// sequences, flags, skin tones) count once.
 func visibleWidth(s string) int {
-	return utf8.RuneCountInString(ansiRe.ReplaceAllString(s, ""))
+	return uniseg.StringWidth(ansiRe.ReplaceAllString(s, ""))
 }
 
 func dimRow(cells []string, tty bool) []string {
@@ -975,12 +978,24 @@ func startOfToday() time.Time {
 	return time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
 }
 
+// truncate returns s cut to at most n terminal columns, ending in "…" when
+// shortened. Cuts on grapheme cluster boundaries so emoji are never split.
 func truncate(s string, n int) string {
-	if len([]rune(s)) <= n {
+	if uniseg.StringWidth(s) <= n {
 		return s
 	}
-	runes := []rune(s)
-	return string(runes[:n-1]) + "…"
+	var b strings.Builder
+	w := 0
+	g := uniseg.NewGraphemes(s)
+	for g.Next() {
+		gw := g.Width()
+		if w+gw > n-1 {
+			break
+		}
+		b.WriteString(g.Str())
+		w += gw
+	}
+	return b.String() + "…"
 }
 
 // hyperlink emits an OSC 8 hyperlink with no colour styling. Safe to use
