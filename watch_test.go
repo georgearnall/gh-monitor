@@ -313,3 +313,39 @@ func TestApplyResult_FailedBuildAlert_OnlyViewersOwnRuns(t *testing.T) {
 		t.Errorf("want only the viewer's run to alert, got %v", alerted)
 	}
 }
+
+func TestDoRefresh_DiscoveryFailureFallsBackToCachedRepos(t *testing.T) {
+	var runsCalls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/user/repos":
+			w.WriteHeader(http.StatusInternalServerError)
+		case r.URL.Path == "/user":
+			w.Write([]byte(`{"login":"testuser"}`))
+		case r.URL.Path == "/graphql":
+			w.Write([]byte(`{"data":{}}`))
+		case r.URL.Path == "/repos/o/cached/actions/runs":
+			runsCalls.Add(1)
+			w.Write([]byte(`{"workflow_runs":[]}`))
+		default:
+			w.Write([]byte(`[]`))
+		}
+	}))
+	t.Cleanup(srv.Close)
+	c := ghclient.NewForTest(srv.Client(), srv.URL+"/")
+	cfg := &watchConfig{
+		maxRepos:    20,
+		repoRefresh: time.Minute,
+		cachedRepos: []discovery.Repo{{FullName: "o/cached", Owner: "o", Name: "cached"}},
+	}
+	res := doRefresh(context.Background(), c, cfg)
+	if res.DiscErr == nil {
+		t.Fatal("expected discovery error to be reported")
+	}
+	if !res.RunsPolled || runsCalls.Load() != 1 {
+		t.Errorf("runs should be polled against the cached repo list (polled=%v calls=%d)", res.RunsPolled, runsCalls.Load())
+	}
+	if len(res.Repos) != 1 || res.Repos[0].FullName != "o/cached" {
+		t.Errorf("Repos = %+v, want cached list", res.Repos)
+	}
+}

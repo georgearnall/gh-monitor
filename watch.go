@@ -62,6 +62,7 @@ type pollResult struct {
 	ViewerLogin string
 	RateLimit   ghclient.RateLimit
 	PollErr     error
+	RunsPolled  bool // runs.Poll ran against a repo list; Runs is authoritative
 	PRErr       error
 	NotifErr    error
 	DiscErr     error
@@ -102,7 +103,10 @@ func runWatch(client *ghclient.Client, cfg watchConfig) {
 	keys := make(chan rune, 8)
 
 	go readKeys(ctx, keys)
-	go producerLoop(ctx, client, &cfg, trigger, started, results)
+	// The producer gets its own copy: doRefresh writes the discovery cache
+	// fields, and the main loop copies cfg by value on every render.
+	producerCfg := cfg
+	go producerLoop(ctx, client, &producerCfg, trigger, started, results)
 
 	enqueue(trigger) // initial refresh
 
@@ -364,27 +368,33 @@ func doRefresh(ctx context.Context, client *ghclient.Client, cfg *watchConfig) p
 	if cacheValid {
 		repos = cfg.cachedRepos
 	} else {
-		repos, discErr = discovery.Discover(client, cfg.maxRepos)
+		// Uncapped: the cap is applied after exclusions in selectRepos.
+		repos, discErr = discovery.Discover(client, 0)
 		if discErr != nil {
 			res.DiscErr = discErr
-			// Fall through. PR and notification polls are independent of the
-			// repo list, so a discovery hiccup should not blank those panels.
+			// Fall back to the last good repo list so the runs panel keeps
+			// updating. PR and notification polls don't need it at all.
+			repos = cfg.cachedRepos
 		} else {
 			cfg.lastDiscovery = time.Now()
 			cfg.cachedRepos = repos
 		}
 	}
-	repos = filterExcluded(repos, cfg.excluded)
-	res.Repos = repos
+	canPollRuns := discErr == nil || len(repos) > 0
+	repos = selectRepos(repos, cfg.excluded, cfg.maxRepos)
+	if canPollRuns {
+		res.Repos = repos
+	}
 
 	g, _ := errgroup.WithContext(ctx)
 	g.Go(func() error {
-		if discErr != nil {
+		if !canPollRuns {
 			return nil
 		}
 		polled, pollErr := runs.Poll(client, repos)
 		res.Runs = polled
 		res.PollErr = pollErr
+		res.RunsPolled = true
 		return nil
 	})
 	g.Go(func() error {
@@ -463,7 +473,7 @@ func applyResult(st *state.State, cfg *watchConfig, res pollResult) {
 	// Only overwrite each cached panel when its source poll actually succeeded.
 	// A transient failure in one branch should leave the other panels alone
 	// (and keep the stale data visible) rather than blanking everything.
-	if res.DiscErr == nil && res.PollErr == nil {
+	if res.RunsPolled && res.PollErr == nil {
 		st.PruneRunDismissals(seen, 60*time.Second)
 		st.PruneReadRuns(seen, 60*time.Second)
 		filtered := make([]runs.Run, 0, len(res.Runs))
@@ -557,7 +567,7 @@ func applyResult(st *state.State, cfg *watchConfig, res pollResult) {
 		}
 		st.LastNotifs = filtered
 	}
-	if res.DiscErr == nil && res.Repos != nil {
+	if res.RunsPolled {
 		st.Repos = res.Repos
 	}
 	st.LastPoll = time.Now()
