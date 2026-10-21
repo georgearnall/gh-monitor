@@ -209,12 +209,17 @@ func toggleConfigRepoMute(st *state.State, cfg *watchConfig, cursor int) (int, b
 	return clampIndex(cursor, len(configRepoRows(st))), true
 }
 
-// scrubRepo removes every cached row belonging to repo.
+// scrubRepo removes every cached row belonging to repo. It also forgets the
+// transition records of the repo's visible runs: a muted repo isn't polled,
+// so those records freeze, and unmuting days later would otherwise see an
+// "active -> failure" transition and fire a stale alert.
 func scrubRepo(st *state.State, repo string) {
 	keepRuns := st.LastView[:0]
 	for _, r := range st.LastView {
 		if r.Repo != repo {
 			keepRuns = append(keepRuns, r)
+		} else {
+			delete(st.Runs, r.ID)
 		}
 	}
 	st.LastView = keepRuns

@@ -507,3 +507,26 @@ func TestToggleConfigRepoMute_MuteThenUnmute(t *testing.T) {
 		t.Error("second toggle should unmute o/a")
 	}
 }
+
+func TestMuteThenUnmute_NoStaleFailureAlert(t *testing.T) {
+	origFailure := notifyFailure
+	defer func() { notifyFailure = origFailure }()
+	var alerts int
+	notifyFailure = func(_, _, _, _ string) error { alerts++; return nil }
+
+	st := isolateState(t)
+	cfg := &watchConfig{muted: newRepoSet(nil)}
+	active := runs.Run{ID: 1, Repo: "o/a", ActorLogin: "me", Status: "in_progress", UpdatedAt: time.Now()}
+	applyResult(st, cfg, pollResult{Runs: []runs.Run{active}, RunsPolled: true, ViewerLogin: "me"})
+
+	muteFocusedRepo(st, cfg, focusTarget{"runs", "1"})
+	st.UnmuteRepo("o/a")
+
+	// First poll after unmuting: the run finished (failed) while muted.
+	done := active
+	done.Status, done.Conclusion = "completed", "failure"
+	applyResult(st, cfg, pollResult{Runs: []runs.Run{done}, RunsPolled: true, ViewerLogin: "me"})
+	if alerts != 0 {
+		t.Errorf("failure that happened while muted alerted %d times on unmute", alerts)
+	}
+}
