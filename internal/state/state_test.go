@@ -520,3 +520,20 @@ func TestPrune(t *testing.T) {
 		t.Errorf("expected id 1 to be pruned")
 	}
 }
+
+func TestMuteUnmuteRepo(t *testing.T) {
+	isolate(t)
+	s, _ := Load()
+	s.MuteRepo("o/b")
+	s.MuteRepo("o/a")
+	if got := s.MutedRepoList(); len(got) != 2 || got[0] != "o/a" || got[1] != "o/b" {
+		t.Fatalf("MutedRepoList = %v, want sorted [o/a o/b]", got)
+	}
+	s.UnmuteRepo("o/a")
+	if s.MutedRepos["o/a"] {
+		t.Error("o/a still muted after UnmuteRepo")
+	}
+	if got := s.MutedRepoList(); len(got) != 1 || got[0] != "o/b" {
+		t.Errorf("MutedRepoList = %v, want [o/b]", got)
+	}
+}

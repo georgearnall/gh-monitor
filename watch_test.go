@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -285,7 +286,6 @@ func TestApplyResult_NoNotify_SuppressesAllThreeAlertTypes(t *testing.T) {
 	}
 }
 
-
 func TestApplyResult_FailedBuildAlert_OnlyViewersOwnRuns(t *testing.T) {
 	origFailure := notifyFailure
 	defer func() { notifyFailure = origFailure }()
@@ -347,5 +347,123 @@ func TestDoRefresh_DiscoveryFailureFallsBackToCachedRepos(t *testing.T) {
 	}
 	if len(res.Repos) != 1 || res.Repos[0].FullName != "o/cached" {
 		t.Errorf("Repos = %+v, want cached list", res.Repos)
+	}
+}
+
+func TestMuteFocusedRepo_ScrubsAllPanelsAndKeepsCursorPosition(t *testing.T) {
+	st := isolateState(t)
+	st.ViewerLogin = "me"
+	st.LastNotifs = []notifs.Notification{
+		{ID: "n1", Repo: "o/keep", Unread: true},
+		{ID: "n2", Repo: "o/noisy", Unread: true},
+		{ID: "n3", Repo: "o/keep", Unread: true},
+	}
+	st.LastPRs = []prs.PR{{Repo: "o/noisy", Number: 1}, {Repo: "o/keep", Number: 2}}
+	st.LastAssignedPRs = []prs.PR{{Repo: "o/noisy", Number: 3}}
+	st.LastView = []runs.Run{
+		{ID: 10, Repo: "o/noisy", ActorLogin: "me", Status: "in_progress", UpdatedAt: time.Now()},
+		{ID: 11, Repo: "o/keep", ActorLogin: "me", Status: "in_progress", UpdatedAt: time.Now()},
+	}
+	cfg := &watchConfig{muted: newRepoSet(nil)}
+
+	focus, msg := muteFocusedRepo(st, cfg, focusTarget{"notifs", "n2"})
+
+	if !st.MutedRepos["o/noisy"] || !cfg.muted.Load()["o/noisy"] {
+		t.Fatal("repo should be muted in state and in the producer snapshot")
+	}
+	for _, n := range st.LastNotifs {
+		if n.Repo == "o/noisy" {
+			t.Errorf("muted notification left: %+v", n)
+		}
+	}
+	if len(st.LastPRs) != 1 || st.LastPRs[0].Repo != "o/keep" || len(st.LastAssignedPRs) != 0 {
+		t.Errorf("muted PRs left: %+v / %+v", st.LastPRs, st.LastAssignedPRs)
+	}
+	if len(st.LastView) != 1 || st.LastView[0].Repo != "o/keep" {
+		t.Errorf("muted runs left (including the viewer's own): %+v", st.LastView)
+	}
+	if focus != (focusTarget{"notifs", "n3"}) {
+		t.Errorf("focus = %+v, want the row that moved into n2's position (n3)", focus)
+	}
+	if !strings.Contains(msg, "o/noisy") {
+		t.Errorf("status message %q should name the muted repo", msg)
+	}
+}
+
+func TestApplyResult_MutedRepoHiddenEverywhereAndSilent(t *testing.T) {
+	origFailure, origGeneric := notifyFailure, notifyNewNotification
+	defer func() { notifyFailure, notifyNewNotification = origFailure, origGeneric }()
+	var alerts int
+	notifyFailure = func(_, _, _, _ string) error { alerts++; return nil }
+	notifyNewNotification = func(_ string, _ int, _, _, _ string) error { alerts++; return nil }
+
+	st := isolateState(t)
+	st.NotifyAllGitHub = true
+	st.MuteRepo("o/noisy")
+	st.AlertedNotifs = map[string]state.NotifAlertRecord{"warm": {}} // not a cold start
+	cfg := &watchConfig{}
+	now := time.Now()
+
+	poll := func(conclusion string) pollResult {
+		status := "in_progress"
+		if conclusion != "" {
+			status = "completed"
+		}
+		return pollResult{
+			ViewerLogin: "me",
+			RunsPolled:  true,
+			Repos:       []discovery.Repo{{FullName: "o/keep"}},
+			Runs:        []runs.Run{{ID: 1, Repo: "o/noisy", ActorLogin: "me", Status: status, Conclusion: conclusion, UpdatedAt: now}},
+			PRs:         []prs.PR{{Repo: "o/noisy", Number: 1}, {Repo: "o/keep", Number: 2}},
+			Notifs:      []notifs.Notification{{ID: "n1", Repo: "o/noisy", Unread: true, UpdatedAt: now}},
+		}
+	}
+	applyResult(st, cfg, poll(""))
+	applyResult(st, cfg, poll("failure"))
+
+	if alerts != 0 {
+		t.Errorf("muted repo fired %d alerts, want 0", alerts)
+	}
+	if len(st.LastView) != 0 || len(st.LastNotifs) != 0 {
+		t.Errorf("muted rows shown: runs=%+v notifs=%+v", st.LastView, st.LastNotifs)
+	}
+	if len(st.LastPRs) != 1 || st.LastPRs[0].Repo != "o/keep" {
+		t.Errorf("LastPRs = %+v, want only o/keep", st.LastPRs)
+	}
+	if _, ok := st.AlertedNotifs["n1"]; !ok {
+		t.Error("muted notification should still be recorded so unmuting doesn't alert on it")
+	}
+}
+
+func TestDoRefresh_MutedRepoNotPolled(t *testing.T) {
+	var mutedCalls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/user":
+			w.Write([]byte(`{"login":"me"}`))
+		case r.URL.Path == "/graphql":
+			w.Write([]byte(`{"data":{}}`))
+		case strings.HasPrefix(r.URL.Path, "/repos/o/noisy/"):
+			mutedCalls.Add(1)
+			w.Write([]byte(`{"workflow_runs":[]}`))
+		default:
+			w.Write([]byte(`{"workflow_runs":[]}`))
+		}
+	}))
+	t.Cleanup(srv.Close)
+	c := ghclient.NewForTest(srv.Client(), srv.URL+"/")
+	cfg := &watchConfig{
+		maxRepos:      20,
+		repoRefresh:   time.Hour,
+		lastDiscovery: time.Now(),
+		cachedRepos:   []discovery.Repo{{FullName: "o/noisy", Owner: "o", Name: "noisy"}, {FullName: "o/keep", Owner: "o", Name: "keep"}},
+		muted:         newRepoSet(map[string]bool{"o/noisy": true}),
+	}
+	res := doRefresh(context.Background(), c, cfg)
+	if mutedCalls.Load() != 0 {
+		t.Errorf("muted repo was polled %d times", mutedCalls.Load())
+	}
+	if len(res.Repos) != 1 || res.Repos[0].FullName != "o/keep" {
+		t.Errorf("Repos = %+v, want only o/keep", res.Repos)
 	}
 }

@@ -7,6 +7,7 @@ import (
 	"os/signal"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -38,9 +39,45 @@ type watchConfig struct {
 	jiraURL       string // session override; does not write to state
 	repoSourceDir string // session override; does not write to state
 
+	// muted mirrors state.MutedRepos for the producer goroutine, which must
+	// not read State directly. The main loop republishes it on every change.
+	muted *repoSet
+
 	// Discovery cache: populated by doRefresh, reused until repoRefresh elapses.
 	lastDiscovery time.Time
 	cachedRepos   []discovery.Repo
+}
+
+// repoSet is a copy-on-write set of repo names, safe to read from the
+// producer goroutine while the main loop replaces it.
+type repoSet struct {
+	p atomic.Pointer[map[string]bool]
+}
+
+func newRepoSet(m map[string]bool) *repoSet {
+	s := &repoSet{}
+	s.Store(m)
+	return s
+}
+
+func (s *repoSet) Load() map[string]bool {
+	if s == nil {
+		return nil
+	}
+	if m := s.p.Load(); m != nil {
+		return *m
+	}
+	return nil
+}
+
+func (s *repoSet) Store(m map[string]bool) {
+	c := make(map[string]bool, len(m))
+	for k, v := range m {
+		if v {
+			c[k] = true
+		}
+	}
+	s.p.Store(&c)
 }
 
 // notifyFailure/notifyComment/notifyNewNotification are indirections over
@@ -77,6 +114,7 @@ func runWatch(client *ghclient.Client, cfg watchConfig) {
 		fail("load state: %v", err)
 	}
 	client.SetEtags(st.EtagCache)
+	cfg.muted = newRepoSet(st.MutedRepos)
 
 	if cfg.once {
 		runOnce(ctx, client, cfg, st)
@@ -221,9 +259,8 @@ func runWatch(client *ghclient.Client, cfg watchConfig) {
 					focused = dismissFocused(dismissQueue, st, &cfg, focused)
 				}
 			case 'x':
-				if focused.Panel == "runs" {
-					muteFocusedRunRepo(st, &cfg, focused)
-				}
+				focused, statusMsg = muteFocusedRepo(st, &cfg, focused)
+				render()
 			case 't':
 				if focused.Panel != "runs" && focused.ID != "" {
 					ticket := findTicketInFocused(st, focused)
@@ -381,7 +418,7 @@ func doRefresh(ctx context.Context, client *ghclient.Client, cfg *watchConfig) p
 		}
 	}
 	canPollRuns := discErr == nil || len(repos) > 0
-	repos = selectRepos(repos, cfg.excluded, cfg.maxRepos)
+	repos = selectRepos(repos, cfg.excluded, cfg.muted.Load(), cfg.maxRepos)
 	if canPollRuns {
 		res.Repos = repos
 	}
@@ -456,7 +493,7 @@ func applyResult(st *state.State, cfg *watchConfig, res pollResult) {
 		// alert on the viewer's own runs: other people's failures in a
 		// shared repo are their problem, and bots are noise.
 		if st.Observe(r) == state.TransitionFailure && !st.IsRunDismissed(r.ID) &&
-			viewer != "" && r.ActorLogin == viewer && !r.IsBot() {
+			viewer != "" && r.ActorLogin == viewer && !r.IsBot() && !st.MutedRepos[r.Repo] {
 			alerted := false
 			if st.FailedBuildAlertsEnabled() && !cfg.noNotify {
 				if err := notifyFailure(r.Repo, r.WorkflowName, r.Branch, r.URL); err != nil {
@@ -481,7 +518,7 @@ func applyResult(st *state.State, cfg *watchConfig, res pollResult) {
 			if st.IsRunDismissed(r.ID) {
 				continue
 			}
-			if st.MutedRepos[r.Repo] && r.ActorLogin != viewer {
+			if st.MutedRepos[r.Repo] {
 				continue
 			}
 			filtered = append(filtered, r)
@@ -489,8 +526,8 @@ func applyResult(st *state.State, cfg *watchConfig, res pollResult) {
 		st.LastView = filtered
 	}
 	if res.PRErr == nil && res.PRs != nil {
-		st.LastPRs = res.PRs
-		st.LastAssignedPRs = res.AssignedPRs
+		st.LastPRs = withoutMutedPRs(res.PRs, st.MutedRepos)
+		st.LastAssignedPRs = withoutMutedPRs(res.AssignedPRs, st.MutedRepos)
 	}
 	if res.NotifErr == nil && res.Notifs != nil {
 		// Self-healing dismiss prune: drop guards whose ID is no longer
@@ -532,14 +569,17 @@ func applyResult(st *state.State, cfg *watchConfig, res pollResult) {
 			if st.IsDismissed(n.ID, n.UpdatedAt) {
 				continue
 			}
-			filtered = append(filtered, n)
+			muted := st.MutedRepos[n.Repo]
+			if !muted {
+				filtered = append(filtered, n)
+			}
 
-			// Bookkeeping always runs regardless of toggle state, so the
-			// ledger stays warm — flipping a toggle on shouldn't storm-
-			// alert every pre-existing item it never got to observe
-			// while off.
+			// Bookkeeping always runs regardless of toggle or mute state,
+			// so the ledger stays warm — flipping a toggle on or unmuting
+			// a repo shouldn't storm-alert every pre-existing item it
+			// never got to observe in the meantime.
 			isNew := st.ObserveNotifAlert(n.ID, n.UpdatedAt, coldStart)
-			if !isNew || cfg.noNotify {
+			if !isNew || cfg.noNotify || muted {
 				continue
 			}
 			isOwnComment := n.HasCommentAnchor && authoredSet[fmt.Sprintf("%s#%d", n.Repo, n.PRNumber)]
@@ -575,6 +615,19 @@ func applyResult(st *state.State, cfg *watchConfig, res pollResult) {
 	if res.ViewerLogin != "" {
 		st.ViewerLogin = res.ViewerLogin
 	}
+}
+
+func withoutMutedPRs(ps []prs.PR, muted map[string]bool) []prs.PR {
+	if len(muted) == 0 {
+		return ps
+	}
+	out := make([]prs.PR, 0, len(ps))
+	for _, p := range ps {
+		if !muted[p.Repo] {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 func renderFromState(st *state.State, cfg watchConfig, refreshing bool, f focusTarget, promptLine, statusLine string) {

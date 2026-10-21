@@ -49,7 +49,7 @@ func TestSelectRepos_Excludes(t *testing.T) {
 		{FullName: "a/y"},
 		{FullName: "b/z"},
 	}
-	got := selectRepos(repos, stringSet{"a/y": true}, 0)
+	got := selectRepos(repos, stringSet{"a/y": true}, nil, 0)
 	if len(got) != 2 {
 		t.Fatalf("got %d, want 2: %+v", len(got), got)
 	}
@@ -62,7 +62,7 @@ func TestSelectRepos_Excludes(t *testing.T) {
 
 func TestSelectRepos_NoExclusions(t *testing.T) {
 	repos := []discovery.Repo{{FullName: "a/b"}}
-	got := selectRepos(repos, nil, 0)
+	got := selectRepos(repos, nil, nil, 0)
 	if len(got) != 1 {
 		t.Errorf("nil exclusion set should be a no-op, got %+v", got)
 	}
@@ -73,7 +73,7 @@ func TestSelectRepos_NoExclusions(t *testing.T) {
 func TestSelectRepos_DoesNotMutateInput(t *testing.T) {
 	repos := []discovery.Repo{{FullName: "a/a"}, {FullName: "a/b"}, {FullName: "a/c"}}
 	for i := 0; i < 3; i++ {
-		got := selectRepos(repos, stringSet{"a/b": true}, 0)
+		got := selectRepos(repos, stringSet{"a/b": true}, nil, 0)
 		if len(got) != 2 || got[0].FullName != "a/a" || got[1].FullName != "a/c" {
 			t.Fatalf("pass %d: got %+v", i, got)
 		}
@@ -83,11 +83,11 @@ func TestSelectRepos_DoesNotMutateInput(t *testing.T) {
 	}
 }
 
-func TestSelectRepos_CapAppliesAfterExclusions(t *testing.T) {
+func TestSelectRepos_CapAppliesAfterExclusionsAndMutes(t *testing.T) {
 	repos := []discovery.Repo{{FullName: "a/a"}, {FullName: "a/b"}, {FullName: "a/c"}}
-	got := selectRepos(repos, stringSet{"a/a": true}, 2)
-	if len(got) != 2 || got[0].FullName != "a/b" || got[1].FullName != "a/c" {
-		t.Errorf("want [a/b a/c], got %+v", got)
+	got := selectRepos(repos, stringSet{"a/a": true}, map[string]bool{"a/b": true}, 1)
+	if len(got) != 1 || got[0].FullName != "a/c" {
+		t.Errorf("excluded and muted repos must not take capped places: want [a/c], got %+v", got)
 	}
 }
 

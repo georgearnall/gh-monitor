@@ -9,6 +9,7 @@ import (
 
 	"github.com/georgearnall/gh-monitor/internal/discovery"
 	"github.com/georgearnall/gh-monitor/internal/ghclient"
+	"github.com/georgearnall/gh-monitor/internal/state"
 )
 
 type stringSet map[string]bool
@@ -185,20 +186,25 @@ func runListRepos(client *ghclient.Client, cfg watchConfig) {
 	if err != nil {
 		fail("discover: %v", err)
 	}
-	repos = selectRepos(repos, cfg.excluded, cfg.maxRepos)
+	var muted map[string]bool
+	if st, err := state.Load(); err == nil {
+		muted = st.MutedRepos
+	}
+	repos = selectRepos(repos, cfg.excluded, muted, cfg.maxRepos)
 	for _, r := range repos {
 		fmt.Printf("%-50s %s\n", r.FullName, r.Activity.Format("2006-01-02 15:04"))
 	}
 }
 
 // selectRepos returns the repos to monitor: discovery order, minus excluded
-// repos, capped at max (0 = no cap). Exclusions are applied before the cap so
-// they don't take places from repos the user does want. Always returns a new
-// slice: the input is the discovery cache and must not be mutated.
-func selectRepos(repos []discovery.Repo, excl stringSet, max int) []discovery.Repo {
+// and muted repos, capped at max (0 = no cap). Exclusions are applied before
+// the cap so they don't take places from repos the user does want. Always
+// returns a new slice: the input is the discovery cache and must not be
+// mutated.
+func selectRepos(repos []discovery.Repo, excl stringSet, muted map[string]bool, max int) []discovery.Repo {
 	out := make([]discovery.Repo, 0, len(repos))
 	for _, r := range repos {
-		if excl[r.FullName] {
+		if excl[r.FullName] || muted[r.FullName] {
 			continue
 		}
 		out = append(out, r)
