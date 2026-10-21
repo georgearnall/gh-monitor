@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"io"
 	"os"
 	"time"
 )
@@ -16,12 +17,22 @@ const (
 	keyLeft  rune = 0xE004
 )
 
-// readKeys forwards stdin keystrokes to the keys channel. Plain ASCII bytes
-// are forwarded as-is. CSI escape sequences (ESC [ A/B/C/D) are parsed into
-// the synthetic keyUp/Down/Right/Left runes so the consumer can switch on
-// them like any other key. Unknown CSI sequences are dropped silently.
+// readKeys forwards stdin keystrokes to the keys channel. See readKeysFrom.
 func readKeys(ctx context.Context, keys chan<- rune) {
-	r := bufio.NewReader(os.Stdin)
+	readKeysFrom(ctx, os.Stdin, keys)
+}
+
+// readKeysFrom forwards keystrokes from in to keys. Plain bytes are forwarded
+// as-is. Arrow keys (CSI "ESC [ A".."D", or SS3 "ESC O A".."D" in application
+// cursor mode) become the synthetic keyUp/Down/Right/Left runes. Other escape
+// sequences, including ones with parameters such as Ctrl+arrow
+// ("ESC [ 1 ; 5 A"), are consumed whole and dropped.
+//
+// A lone Esc is forwarded as 0x1B. It's told apart from the start of a
+// sequence by whether more bytes arrived in the same read: terminals write a
+// whole sequence at once, while a human pressing Esc produces a single byte.
+func readKeysFrom(ctx context.Context, in io.Reader, keys chan<- rune) {
+	r := bufio.NewReader(in)
 	forward := func(k rune) bool {
 		select {
 		case keys <- k:
@@ -41,40 +52,66 @@ func readKeys(ctx context.Context, keys chan<- rune) {
 			}
 			continue
 		}
-		// ESC: try to consume a CSI sequence.
-		next, err := r.ReadByte()
-		if err != nil {
-			return
-		}
-		if next != '[' {
-			// Lone ESC or an unrelated escape; forward the second byte as a
-			// regular keypress so the user's follow-up still registers.
-			if !forward(rune(next)) {
+		if r.Buffered() == 0 {
+			if !forward(0x1B) {
 				return
 			}
 			continue
 		}
-		third, err := r.ReadByte()
+		next, err := r.ReadByte()
 		if err != nil {
 			return
 		}
 		var arrow rune
-		switch third {
-		case 'A':
-			arrow = keyUp
-		case 'B':
-			arrow = keyDown
-		case 'C':
-			arrow = keyRight
-		case 'D':
-			arrow = keyLeft
+		switch next {
+		case '[':
+			// CSI: parameter/intermediate bytes then one final byte in
+			// 0x40..0x7E. Only parameterless A-D are arrows.
+			params := false
+			for {
+				b, err := r.ReadByte()
+				if err != nil {
+					return
+				}
+				if b >= 0x40 && b <= 0x7E {
+					if !params {
+						arrow = arrowFor(b)
+					}
+					break
+				}
+				params = true
+			}
+		case 'O':
+			b, err := r.ReadByte()
+			if err != nil {
+				return
+			}
+			arrow = arrowFor(b)
 		default:
+			// Alt+key arrives as ESC <key>; treat it as the plain key.
+			arrow = rune(next)
+		}
+		if arrow == 0 {
 			continue
 		}
 		if !forward(arrow) {
 			return
 		}
 	}
+}
+
+func arrowFor(b byte) rune {
+	switch b {
+	case 'A':
+		return keyUp
+	case 'B':
+		return keyDown
+	case 'C':
+		return keyRight
+	case 'D':
+		return keyLeft
+	}
+	return 0
 }
 
 // coalesceSignal forwards events from in to the returned channel, collapsing

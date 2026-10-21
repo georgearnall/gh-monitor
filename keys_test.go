@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"io"
 	"os"
 	"testing"
 	"time"
@@ -83,5 +84,62 @@ func TestCoalesceSignal_StopsOnCtxDone(t *testing.T) {
 	case <-out:
 		t.Errorf("expected no output after ctx cancel")
 	case <-time.After(80 * time.Millisecond):
+	}
+}
+
+func collectKeys(t *testing.T, chunks ...string) []rune {
+	t.Helper()
+	pr, pw := io.Pipe()
+	keys := make(chan rune, 32)
+	done := make(chan struct{})
+	go func() {
+		readKeysFrom(context.Background(), pr, keys)
+		close(done)
+	}()
+	var got []rune
+	for _, c := range chunks {
+		pw.Write([]byte(c))
+		// Drain what this write produced before the next one, so each chunk
+		// is seen as its own read (as a human typing would produce).
+	drain:
+		for {
+			select {
+			case k := <-keys:
+				got = append(got, k)
+			case <-time.After(20 * time.Millisecond):
+				break drain
+			}
+		}
+	}
+	pw.Close()
+	<-done
+	return got
+}
+
+func TestReadKeys_LoneEscIsForwarded(t *testing.T) {
+	got := collectKeys(t, "\x1b", "q")
+	if len(got) != 2 || got[0] != 0x1B || got[1] != 'q' {
+		t.Errorf("got %q, want [ESC q]", got)
+	}
+}
+
+func TestReadKeys_ArrowSequences(t *testing.T) {
+	got := collectKeys(t, "\x1b[A", "\x1b[B", "\x1bOA", "\x1bOD")
+	want := []rune{keyUp, keyDown, keyUp, keyLeft}
+	if len(got) != len(want) {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("key %d = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+func TestReadKeys_ParameterisedSequencesDropped(t *testing.T) {
+	// Ctrl+Up, then Delete, then a plain key: only the plain key survives.
+	got := collectKeys(t, "\x1b[1;5A", "\x1b[3~", "x")
+	if len(got) != 1 || got[0] != 'x' {
+		t.Errorf("got %q, want [x]", got)
 	}
 }
