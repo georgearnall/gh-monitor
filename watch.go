@@ -164,16 +164,16 @@ func runWatch(client *ghclient.Client, cfg watchConfig) {
 	go dismissWorker(ctx, client, dismissQueue, dismissOutcomes)
 
 	var (
-		refreshing   bool
-		nextTimer    *time.Timer
-		configMode   bool
-		configCursor int // index into configRepoRows
-		ps           promptState
-		statusMsg    string
+		refreshing  bool
+		nextTimer   *time.Timer
+		configMode  bool
+		configFocus string // repo under the config-pane cursor
+		ps          promptState
+		statusMsg   string
 	)
 	render := func() {
 		if configMode {
-			renderConfig(st, cfg, configCursor)
+			renderConfig(st, cfg, configFocus)
 		} else {
 			var pl string
 			if ps.active {
@@ -248,12 +248,15 @@ func runWatch(client *ghclient.Client, cfg watchConfig) {
 					if k == keyUp {
 						delta = -1
 					}
-					configCursor = clampIndex(configCursor+delta, len(configRepoRows(st)))
+					rows := configRepoRows(st)
+					if len(rows) > 0 {
+						configFocus = rows[clampIndex(configRowIndex(rows, configFocus)+delta, len(rows))].Name
+					}
 					render()
 					continue
 				case 'x':
 					var toggled bool
-					configCursor, toggled = toggleConfigRepoMute(st, &cfg, configCursor)
+					configFocus, toggled = toggleConfigRepoMute(st, &cfg, configFocus)
 					if toggled {
 						// Re-poll so an unmuted repo's rows come back now
 						// rather than at the next interval.
@@ -859,12 +862,23 @@ func configRepoRows(st *state.State) []ui.RepoStatus {
 	return repos
 }
 
+// configRowIndex returns the index of the row named focus, or 0 when it isn't
+// listed (nothing focused yet, or the repo dropped out of the list).
+func configRowIndex(rows []ui.RepoStatus, focus string) int {
+	for i, r := range rows {
+		if r.Name == focus {
+			return i
+		}
+	}
+	return 0
+}
+
 // clampIndex clamps i into [0, n-1], returning 0 when n is 0.
 func clampIndex(i, n int) int {
 	return max(0, min(i, n-1))
 }
 
-func renderConfig(st *state.State, cfg watchConfig, cursor int) {
+func renderConfig(st *state.State, cfg watchConfig, focus string) {
 	excl := make([]string, 0, len(cfg.excluded))
 	for r := range cfg.excluded {
 		excl = append(excl, r)
@@ -873,7 +887,7 @@ func renderConfig(st *state.State, cfg watchConfig, cursor int) {
 	repos := configRepoRows(st)
 	var focused string
 	if len(repos) > 0 {
-		focused = repos[clampIndex(cursor, len(repos))].Name
+		focused = repos[configRowIndex(repos, focus)].Name
 	}
 	ui.RenderConfig(ui.ConfigSnapshot{
 		Repos:          repos,

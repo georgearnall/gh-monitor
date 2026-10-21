@@ -491,20 +491,46 @@ func TestConfigRepoRows_MonitoredThenAllMuted(t *testing.T) {
 
 func TestToggleConfigRepoMute_MuteThenUnmute(t *testing.T) {
 	st := isolateState(t)
-	st.Repos = []discovery.Repo{{FullName: "o/a", Activity: time.Now()}}
+	st.Repos = []discovery.Repo{
+		{FullName: "o/a", Activity: time.Now()},
+		{FullName: "o/b", Activity: time.Now().Add(-time.Hour)},
+	}
 	st.LastPRs = []prs.PR{{Repo: "o/a", Number: 1}}
 	cfg := &watchConfig{muted: newRepoSet(nil)}
 
-	cursor, ok := toggleConfigRepoMute(st, cfg, 0)
+	// Muting moves o/a to the muted section; the cursor follows it.
+	focus, ok := toggleConfigRepoMute(st, cfg, "o/a")
 	if !ok || !st.MutedRepos["o/a"] || !cfg.muted.Load()["o/a"] {
 		t.Fatal("first toggle should mute o/a in state and producer snapshot")
+	}
+	if focus != "o/a" {
+		t.Errorf("cursor should follow the repo it toggled, got %q", focus)
 	}
 	if len(st.LastPRs) != 0 {
 		t.Errorf("muting from config should scrub rows, LastPRs = %+v", st.LastPRs)
 	}
-	// o/a is now listed once, as muted, at index 0.
-	if _, ok := toggleConfigRepoMute(st, cfg, cursor); !ok || st.MutedRepos["o/a"] || cfg.muted.Load()["o/a"] {
+
+	// Unmuting a repo discovery still returns keeps it listed and focused.
+	if focus, ok = toggleConfigRepoMute(st, cfg, focus); !ok || st.MutedRepos["o/a"] || cfg.muted.Load()["o/a"] {
 		t.Error("second toggle should unmute o/a")
+	}
+	if focus != "o/a" {
+		t.Errorf("cursor should stay on o/a after unmute, got %q", focus)
+	}
+}
+
+func TestToggleConfigRepoMute_UnmuteUndiscoveredRepoMovesCursorToNeighbour(t *testing.T) {
+	st := isolateState(t)
+	st.Repos = []discovery.Repo{{FullName: "o/live", Activity: time.Now()}}
+	st.MuteRepo("o/gone-a")
+	st.MuteRepo("o/gone-b")
+	cfg := &watchConfig{muted: newRepoSet(st.MutedRepos)}
+
+	// Rows: o/live, o/gone-a, o/gone-b. Unmuting o/gone-a removes its row
+	// (discovery doesn't return it), so the cursor lands on o/gone-b.
+	focus, _ := toggleConfigRepoMute(st, cfg, "o/gone-a")
+	if focus != "o/gone-b" {
+		t.Errorf("focus = %q, want o/gone-b", focus)
 	}
 }
 

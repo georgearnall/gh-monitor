@@ -187,15 +187,18 @@ func muteFocusedRepo(st *state.State, cfg *watchConfig, f focusTarget) (focusTar
 	return newFocus, fmt.Sprintf("muted %s · unmute from the config pane [?]", repo)
 }
 
-// toggleConfigRepoMute flips the mute state of the config-pane row at cursor
-// and returns the cursor clamped to the new row list, plus whether anything
-// changed. The caller should trigger a refresh so unmuted rows come back.
-func toggleConfigRepoMute(st *state.State, cfg *watchConfig, cursor int) (int, bool) {
+// toggleConfigRepoMute flips the mute state of the config-pane row named
+// focus (the first row if focus isn't listed). It returns the repo the cursor
+// should be on afterwards, which is the same repo when it's still listed and
+// otherwise whatever now sits at its position, plus whether anything changed.
+// The caller should trigger a refresh so unmuted rows come back.
+func toggleConfigRepoMute(st *state.State, cfg *watchConfig, focus string) (string, bool) {
 	rows := configRepoRows(st)
 	if len(rows) == 0 {
-		return 0, false
+		return "", false
 	}
-	r := rows[clampIndex(cursor, len(rows))]
+	idx := configRowIndex(rows, focus)
+	r := rows[idx]
 	if r.Muted {
 		st.UnmuteRepo(r.Name)
 	} else {
@@ -206,7 +209,16 @@ func toggleConfigRepoMute(st *state.State, cfg *watchConfig, cursor int) (int, b
 	if err := st.Save(); err != nil {
 		fmt.Fprintf(os.Stderr, "save state: %v\n", err)
 	}
-	return clampIndex(cursor, len(configRepoRows(st))), true
+	after := configRepoRows(st)
+	for _, a := range after {
+		if a.Name == r.Name {
+			return r.Name, true
+		}
+	}
+	if len(after) == 0 {
+		return "", true
+	}
+	return after[clampIndex(idx, len(after))].Name, true
 }
 
 // scrubRepo removes every cached row belonging to repo. It also forgets the
