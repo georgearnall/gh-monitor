@@ -101,7 +101,8 @@ FLAGS
   --pr-since D          Hide PRs not updated within this duration (default
                         1440h = 60 days). Use 0 to disable the filter.
   --once                Single poll cycle then exit (no TUI, script-friendly)
-  --exclude owner/repo  Skip a noisy repo. Repeatable.
+  --exclude owner/repo  Skip a repo for this session. Repeatable. To hide
+                        a repo persistently, mute it with x instead.
   --no-notify           Master switch: suppress all desktop notifications
                         (failed builds, GitHub notifications, PR comments),
                         regardless of the config pane toggles below
@@ -119,13 +120,16 @@ KEYBINDINGS (watch mode)
                         PRs, and workflow runs)
   ↵  (enter)            Open focused row in browser. If it's a notification,
                         also mark it read.
-  m                     Mark focused notification read (no-op on PRs/runs)
-  M                     Mark every visible unread notification read
+  m                     Mark focused notification read, or dim the focused
+                        workflow run
   d                     Dismiss the focused row. For notifications: marks
                         done and removes from inbox. For workflow runs:
                         hides the run locally until it falls off the poll
                         window (useful for in-progress runs you don't
                         care about).
+  x                     Mute the focused row's repo: hidden from every
+                        panel, no longer polled, never alerts, and doesn't
+                        count towards --max-repos. Unmute in the config pane.
   t                     Open Jira ticket from the focused row's title. If no
                         Jira URL is configured, prompts for it and saves it.
   g                     Open the focused row's repo in a terminal (Ghostty
@@ -136,9 +140,12 @@ KEYBINDINGS (watch mode)
   r  /  R  /  space     Refresh now (don't wait for the next interval)
   ?                     Open/close the config pane
   q  /  Q  /  Ctrl-C    Quit cleanly, restore terminal, save state
+  Esc                   Cancel an inline prompt
 
 CONFIG PANE (opened with ?)
-  1                     Toggle desktop alerts for failed builds
+  ↑ / ↓                 Move through the repo list (monitored, then muted)
+  x                     Mute / unmute the repo under the cursor
+  1                     Toggle desktop alerts for your own failed builds
   2                     Toggle desktop alerts for all GitHub notifications
   3                     Toggle desktop alerts for comments on PRs you authored
   q  /  Q               Quit (? closes the pane and returns to watch mode)
@@ -153,7 +160,8 @@ PANELS
                  first, then pending, then most-recent.
   WORKFLOW RUNS  Up to 10 rows. Active runs always shown (any actor);
                  completed runs only if you triggered them in the last
-                 24h. Renovate / Dependabot / Copilot runs are filtered.
+                 48h. Renovate / Dependabot / Copilot runs are filtered.
+                 Muted repos are hidden from all three panels.
 
 DISCOVERY
   The monitored repo set is the union of three queries, deduped and
@@ -161,6 +169,7 @@ DISCOVERY
     1. /user/repos?affiliation=owner,collaborator
     2. /search/issues?q=author:@me+is:pr+is:open
     3. /users/<you>/events  (catches team-membership repos)
+  Excluded and muted repos are dropped before --max-repos is applied.
 
 STATE
   Persisted to $XDG_CONFIG_HOME/gh-monitor/state.json (or
@@ -172,8 +181,9 @@ STATE
 RATE LIMITS
   Conditional GETs use If-None-Match; 304 responses do not count
   against the 5000/hr REST budget. Concurrent in-flight requests are
-  bounded to 8. The poll interval doubles when remaining budget drops
-  below 500. 403 / 429 responses honour Retry-After.
+  bounded to 8. The poll interval rises to at least 2m when remaining
+  budget drops below 500. Rate-limit responses honour Retry-After; other
+  403s (e.g. SSO enforcement on one repo) only skip that repo.
 
 AUTHENTICATION
   Reuses your gh CLI auth (run 'gh auth login' if you haven't). The

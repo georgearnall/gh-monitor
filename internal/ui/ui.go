@@ -908,7 +908,7 @@ const maxVisibleRuns = 10
 
 // VisibleRows filters runs for the workflow table:
 //   - All currently-active runs are kept (any actor).
-//   - Completed runs triggered by the viewer are kept for runsWindow (7 days);
+//   - Completed runs triggered by the viewer are kept for runsWindow (48h);
 //     runs from before today are dimmed by writeTable, older ones drop off.
 //   - Anything else drops as soon as it finishes.
 //
