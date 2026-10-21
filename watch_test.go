@@ -2,8 +2,10 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -154,11 +156,13 @@ func TestApplyResult_FailedBuildAlert_GatedByToggle(t *testing.T) {
 	st := isolateState(t)
 	cfg := &watchConfig{}
 
+	st.ViewerLogin = "me"
+
 	// Toggle off: an active->failure transition should not alert.
 	st.SetFailedBuildAlerts(false)
-	applyResult(st, cfg, pollResult{Runs: []runs.Run{{ID: 1, Status: "in_progress"}}})
+	applyResult(st, cfg, pollResult{Runs: []runs.Run{{ID: 1, Status: "in_progress", ActorLogin: "me"}}})
 	applyResult(st, cfg, pollResult{Runs: []runs.Run{
-		{ID: 1, Status: "completed", Conclusion: "failure", Repo: "x/y", WorkflowName: "CI", Branch: "main", URL: "https://x/1"},
+		{ID: 1, Status: "completed", Conclusion: "failure", Repo: "x/y", WorkflowName: "CI", Branch: "main", URL: "https://x/1", ActorLogin: "me"},
 	}})
 	if calls != 0 {
 		t.Fatalf("toggle off: want 0 calls, got %d", calls)
@@ -166,9 +170,9 @@ func TestApplyResult_FailedBuildAlert_GatedByToggle(t *testing.T) {
 
 	// Toggle on: a fresh run's active->failure transition should alert.
 	st.SetFailedBuildAlerts(true)
-	applyResult(st, cfg, pollResult{Runs: []runs.Run{{ID: 2, Status: "in_progress"}}})
+	applyResult(st, cfg, pollResult{Runs: []runs.Run{{ID: 2, Status: "in_progress", ActorLogin: "me"}}})
 	applyResult(st, cfg, pollResult{Runs: []runs.Run{
-		{ID: 2, Status: "completed", Conclusion: "failure", Repo: "x/y", WorkflowName: "CI", Branch: "main", URL: "https://x/2"},
+		{ID: 2, Status: "completed", Conclusion: "failure", Repo: "x/y", WorkflowName: "CI", Branch: "main", URL: "https://x/2", ActorLogin: "me"},
 	}})
 	if calls != 1 {
 		t.Errorf("toggle on: want 1 call, got %d", calls)
@@ -283,3 +287,272 @@ func TestApplyResult_NoNotify_SuppressesAllThreeAlertTypes(t *testing.T) {
 	}
 }
 
+func TestApplyResult_FailedBuildAlert_OnlyViewersOwnRuns(t *testing.T) {
+	origFailure := notifyFailure
+	defer func() { notifyFailure = origFailure }()
+	var alerted []string
+	notifyFailure = func(repo, workflow, branch, url string) error {
+		alerted = append(alerted, url)
+		return nil
+	}
+
+	st := isolateState(t)
+	cfg := &watchConfig{}
+	active := []runs.Run{
+		{ID: 1, Status: "in_progress", ActorLogin: "me", URL: "mine"},
+		{ID: 2, Status: "in_progress", ActorLogin: "colleague", URL: "colleague"},
+		{ID: 3, Status: "in_progress", ActorLogin: "renovate[bot]", Branch: "renovate/x", URL: "bot"},
+	}
+	applyResult(st, cfg, pollResult{Runs: active, ViewerLogin: "me"})
+	failed := make([]runs.Run, len(active))
+	for i, r := range active {
+		r.Status, r.Conclusion = "completed", "failure"
+		failed[i] = r
+	}
+	applyResult(st, cfg, pollResult{Runs: failed, ViewerLogin: "me"})
+	if len(alerted) != 1 || alerted[0] != "mine" {
+		t.Errorf("want only the viewer's run to alert, got %v", alerted)
+	}
+}
+
+func TestDoRefresh_DiscoveryFailureFallsBackToCachedRepos(t *testing.T) {
+	var runsCalls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/user/repos":
+			w.WriteHeader(http.StatusInternalServerError)
+		case r.URL.Path == "/user":
+			w.Write([]byte(`{"login":"testuser"}`))
+		case r.URL.Path == "/graphql":
+			w.Write([]byte(`{"data":{}}`))
+		case r.URL.Path == "/repos/o/cached/actions/runs":
+			runsCalls.Add(1)
+			w.Write([]byte(`{"workflow_runs":[]}`))
+		default:
+			w.Write([]byte(`[]`))
+		}
+	}))
+	t.Cleanup(srv.Close)
+	c := ghclient.NewForTest(srv.Client(), srv.URL+"/")
+	cfg := &watchConfig{
+		maxRepos:    20,
+		repoRefresh: time.Minute,
+		cachedRepos: []discovery.Repo{{FullName: "o/cached", Owner: "o", Name: "cached"}},
+	}
+	res := doRefresh(context.Background(), c, cfg)
+	if res.DiscErr == nil {
+		t.Fatal("expected discovery error to be reported")
+	}
+	if !res.RunsPolled || runsCalls.Load() != 1 {
+		t.Errorf("runs should be polled against the cached repo list (polled=%v calls=%d)", res.RunsPolled, runsCalls.Load())
+	}
+	if len(res.Repos) != 1 || res.Repos[0].FullName != "o/cached" {
+		t.Errorf("Repos = %+v, want cached list", res.Repos)
+	}
+}
+
+func TestMuteFocusedRepo_ScrubsAllPanelsAndKeepsCursorPosition(t *testing.T) {
+	st := isolateState(t)
+	st.ViewerLogin = "me"
+	st.LastNotifs = []notifs.Notification{
+		{ID: "n1", Repo: "o/keep", Unread: true},
+		{ID: "n2", Repo: "o/noisy", Unread: true},
+		{ID: "n3", Repo: "o/keep", Unread: true},
+	}
+	st.LastPRs = []prs.PR{{Repo: "o/noisy", Number: 1}, {Repo: "o/keep", Number: 2}}
+	st.LastAssignedPRs = []prs.PR{{Repo: "o/noisy", Number: 3}}
+	st.LastView = []runs.Run{
+		{ID: 10, Repo: "o/noisy", ActorLogin: "me", Status: "in_progress", UpdatedAt: time.Now()},
+		{ID: 11, Repo: "o/keep", ActorLogin: "me", Status: "in_progress", UpdatedAt: time.Now()},
+	}
+	cfg := &watchConfig{muted: newRepoSet(nil)}
+
+	focus, msg := muteFocusedRepo(st, cfg, focusTarget{"notifs", "n2"})
+
+	if !st.MutedRepos["o/noisy"] || !cfg.muted.Load()["o/noisy"] {
+		t.Fatal("repo should be muted in state and in the producer snapshot")
+	}
+	for _, n := range st.LastNotifs {
+		if n.Repo == "o/noisy" {
+			t.Errorf("muted notification left: %+v", n)
+		}
+	}
+	if len(st.LastPRs) != 1 || st.LastPRs[0].Repo != "o/keep" || len(st.LastAssignedPRs) != 0 {
+		t.Errorf("muted PRs left: %+v / %+v", st.LastPRs, st.LastAssignedPRs)
+	}
+	if len(st.LastView) != 1 || st.LastView[0].Repo != "o/keep" {
+		t.Errorf("muted runs left (including the viewer's own): %+v", st.LastView)
+	}
+	if focus != (focusTarget{"notifs", "n3"}) {
+		t.Errorf("focus = %+v, want the row that moved into n2's position (n3)", focus)
+	}
+	if !strings.Contains(msg, "o/noisy") {
+		t.Errorf("status message %q should name the muted repo", msg)
+	}
+}
+
+func TestApplyResult_MutedRepoHiddenEverywhereAndSilent(t *testing.T) {
+	origFailure, origGeneric := notifyFailure, notifyNewNotification
+	defer func() { notifyFailure, notifyNewNotification = origFailure, origGeneric }()
+	var alerts int
+	notifyFailure = func(_, _, _, _ string) error { alerts++; return nil }
+	notifyNewNotification = func(_ string, _ int, _, _, _ string) error { alerts++; return nil }
+
+	st := isolateState(t)
+	st.NotifyAllGitHub = true
+	st.MuteRepo("o/noisy")
+	st.AlertedNotifs = map[string]state.NotifAlertRecord{"warm": {}} // not a cold start
+	cfg := &watchConfig{}
+	now := time.Now()
+
+	poll := func(conclusion string) pollResult {
+		status := "in_progress"
+		if conclusion != "" {
+			status = "completed"
+		}
+		return pollResult{
+			ViewerLogin: "me",
+			RunsPolled:  true,
+			Repos:       []discovery.Repo{{FullName: "o/keep"}},
+			Runs:        []runs.Run{{ID: 1, Repo: "o/noisy", ActorLogin: "me", Status: status, Conclusion: conclusion, UpdatedAt: now}},
+			PRs:         []prs.PR{{Repo: "o/noisy", Number: 1}, {Repo: "o/keep", Number: 2}},
+			Notifs:      []notifs.Notification{{ID: "n1", Repo: "o/noisy", Unread: true, UpdatedAt: now}},
+		}
+	}
+	applyResult(st, cfg, poll(""))
+	applyResult(st, cfg, poll("failure"))
+
+	if alerts != 0 {
+		t.Errorf("muted repo fired %d alerts, want 0", alerts)
+	}
+	if len(st.LastView) != 0 || len(st.LastNotifs) != 0 {
+		t.Errorf("muted rows shown: runs=%+v notifs=%+v", st.LastView, st.LastNotifs)
+	}
+	if len(st.LastPRs) != 1 || st.LastPRs[0].Repo != "o/keep" {
+		t.Errorf("LastPRs = %+v, want only o/keep", st.LastPRs)
+	}
+	if _, ok := st.AlertedNotifs["n1"]; !ok {
+		t.Error("muted notification should still be recorded so unmuting doesn't alert on it")
+	}
+}
+
+func TestDoRefresh_MutedRepoNotPolled(t *testing.T) {
+	var mutedCalls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/user":
+			w.Write([]byte(`{"login":"me"}`))
+		case r.URL.Path == "/graphql":
+			w.Write([]byte(`{"data":{}}`))
+		case strings.HasPrefix(r.URL.Path, "/repos/o/noisy/"):
+			mutedCalls.Add(1)
+			w.Write([]byte(`{"workflow_runs":[]}`))
+		default:
+			w.Write([]byte(`{"workflow_runs":[]}`))
+		}
+	}))
+	t.Cleanup(srv.Close)
+	c := ghclient.NewForTest(srv.Client(), srv.URL+"/")
+	cfg := &watchConfig{
+		maxRepos:      20,
+		repoRefresh:   time.Hour,
+		lastDiscovery: time.Now(),
+		cachedRepos:   []discovery.Repo{{FullName: "o/noisy", Owner: "o", Name: "noisy"}, {FullName: "o/keep", Owner: "o", Name: "keep"}},
+		muted:         newRepoSet(map[string]bool{"o/noisy": true}),
+	}
+	res := doRefresh(context.Background(), c, cfg)
+	if mutedCalls.Load() != 0 {
+		t.Errorf("muted repo was polled %d times", mutedCalls.Load())
+	}
+	if len(res.Repos) != 1 || res.Repos[0].FullName != "o/keep" {
+		t.Errorf("Repos = %+v, want only o/keep", res.Repos)
+	}
+}
+
+func TestConfigRepoRows_MonitoredThenAllMuted(t *testing.T) {
+	st := isolateState(t)
+	now := time.Now()
+	st.Repos = []discovery.Repo{
+		{FullName: "o/old", Activity: now.Add(-time.Hour)},
+		{FullName: "o/new", Activity: now},
+	}
+	st.MuteRepo("o/z-gone") // muted but no longer discovered
+	st.MuteRepo("o/a-gone")
+	rows := configRepoRows(st)
+	var got []string
+	for _, r := range rows {
+		got = append(got, fmt.Sprintf("%s:%v", r.Name, r.Muted))
+	}
+	want := "o/new:false,o/old:false,o/a-gone:true,o/z-gone:true"
+	if strings.Join(got, ",") != want {
+		t.Errorf("rows = %s, want %s", strings.Join(got, ","), want)
+	}
+}
+
+func TestToggleConfigRepoMute_MuteThenUnmute(t *testing.T) {
+	st := isolateState(t)
+	st.Repos = []discovery.Repo{
+		{FullName: "o/a", Activity: time.Now()},
+		{FullName: "o/b", Activity: time.Now().Add(-time.Hour)},
+	}
+	st.LastPRs = []prs.PR{{Repo: "o/a", Number: 1}}
+	cfg := &watchConfig{muted: newRepoSet(nil)}
+
+	// Muting moves o/a to the muted section; the cursor follows it.
+	focus, ok := toggleConfigRepoMute(st, cfg, "o/a")
+	if !ok || !st.MutedRepos["o/a"] || !cfg.muted.Load()["o/a"] {
+		t.Fatal("first toggle should mute o/a in state and producer snapshot")
+	}
+	if focus != "o/a" {
+		t.Errorf("cursor should follow the repo it toggled, got %q", focus)
+	}
+	if len(st.LastPRs) != 0 {
+		t.Errorf("muting from config should scrub rows, LastPRs = %+v", st.LastPRs)
+	}
+
+	// Unmuting a repo discovery still returns keeps it listed and focused.
+	if focus, ok = toggleConfigRepoMute(st, cfg, focus); !ok || st.MutedRepos["o/a"] || cfg.muted.Load()["o/a"] {
+		t.Error("second toggle should unmute o/a")
+	}
+	if focus != "o/a" {
+		t.Errorf("cursor should stay on o/a after unmute, got %q", focus)
+	}
+}
+
+func TestToggleConfigRepoMute_UnmuteUndiscoveredRepoMovesCursorToNeighbour(t *testing.T) {
+	st := isolateState(t)
+	st.Repos = []discovery.Repo{{FullName: "o/live", Activity: time.Now()}}
+	st.MuteRepo("o/gone-a")
+	st.MuteRepo("o/gone-b")
+	cfg := &watchConfig{muted: newRepoSet(st.MutedRepos)}
+
+	// Rows: o/live, o/gone-a, o/gone-b. Unmuting o/gone-a removes its row
+	// (discovery doesn't return it), so the cursor lands on o/gone-b.
+	focus, _ := toggleConfigRepoMute(st, cfg, "o/gone-a")
+	if focus != "o/gone-b" {
+		t.Errorf("focus = %q, want o/gone-b", focus)
+	}
+}
+
+func TestMuteThenUnmute_NoStaleFailureAlert(t *testing.T) {
+	origFailure := notifyFailure
+	defer func() { notifyFailure = origFailure }()
+	var alerts int
+	notifyFailure = func(_, _, _, _ string) error { alerts++; return nil }
+
+	st := isolateState(t)
+	cfg := &watchConfig{muted: newRepoSet(nil)}
+	active := runs.Run{ID: 1, Repo: "o/a", ActorLogin: "me", Status: "in_progress", UpdatedAt: time.Now()}
+	applyResult(st, cfg, pollResult{Runs: []runs.Run{active}, RunsPolled: true, ViewerLogin: "me"})
+
+	muteFocusedRepo(st, cfg, focusTarget{"runs", "1"})
+	st.UnmuteRepo("o/a")
+
+	// First poll after unmuting: the run finished (failed) while muted.
+	done := active
+	done.Status, done.Conclusion = "completed", "failure"
+	applyResult(st, cfg, pollResult{Runs: []runs.Run{done}, RunsPolled: true, ViewerLogin: "me"})
+	if alerts != 0 {
+		t.Errorf("failure that happened while muted alerted %d times on unmute", alerts)
+	}
+}

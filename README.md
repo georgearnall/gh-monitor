@@ -23,7 +23,7 @@ WORKFLOW RUNS
     ● in_progress  Build      acme/payments         main      2m   open ↗
 
 polled 11:44:53 · 20 repos · 3 notifs · 2 PRs · rate limit 4823/5000 · next poll in 30s
-[↑↓] move  [↵] open  [m] mark read  [M] mark all  [r] refresh  [q] quit
+[↑↓] move  [↵] open  [m] read  [d] dismiss  [x] mute repo  [t] ticket  [g] terminal  [r] refresh  [?] config  [q] quit
 ```
 
 ## What it does
@@ -37,13 +37,19 @@ polled 11:44:53 · 20 repos · 3 notifs · 2 PRs · rate limit 4823/5000 · next
   recently-finished workflow runs.
 - **Single cursor across all three panels.** Arrow keys move row-by-row;
   Enter opens the focused item in the browser (and marks notifications
-  read); `m` marks the focused notification read; `M` marks all visible
-  unread notifications read.
+  read); `m` marks the focused notification read; `d` dismisses; `x` mutes
+  the focused row's repo.
 - **Polls in parallel** with per-call ETag conditional GETs. Most cycles
   cost a handful of rate-limit units against the 5000/hr budget.
-- **Desktop notification** on workflow failure via OSC 9 (Ghostty /
-  iTerm2) or `osascript` (other macOS terminals). Not supported on
-  Windows (no-op there; see [WINDOWS.md](WINDOWS.md)).
+- **Desktop notification** when one of **your own** workflow runs fails
+  (other people's and bot runs never alert), plus optional alerts for new
+  GitHub notifications and comments on your PRs. Delivered via OSC 9
+  (Ghostty / iTerm2) or `osascript` (other macOS terminals). Toggle each
+  category in the config pane (`?`). Not supported on Windows (no-op
+  there; see [WINDOWS.md](WINDOWS.md)).
+- **Mute noisy repos** with `x` from any panel. A muted repo disappears
+  from every panel, stops being polled, never alerts, and doesn't count
+  towards `--max-repos`. Unmute from the config pane.
 - **Adaptive layout**. Narrow terminals shed the PR branch column and
   use shorter status labels; the repo cell trims the organisation part
   with a leading ellipsis and drops the org entirely when too tight,
@@ -79,7 +85,7 @@ panel; everything else uses default `gh` scopes.
 ### Windows
 
 Developed and tested on macOS/Linux. It builds and runs on Windows,
-but the interactive keybindings (arrow keys, `q`, `m`, `M`, `d`, `r`)
+but the interactive keybindings (arrow keys, `q`, `m`, `d`, `x`, `r`)
 are currently unreliable there — see [WINDOWS.md](WINDOWS.md) for
 why and what's involved in fixing it. Desktop notifications and the
 `--sound` flag are unsupported on Windows and silently no-op.
@@ -114,12 +120,32 @@ the discovered repo set and exits. `help` prints the full help page.
 |---|---|
 | `↑` / `↓` | Move the cursor through the visible rows across all panels |
 | `↵` (enter) | Open the focused row in the browser. For notifications, also mark read. |
-| `m` | Mark the focused notification read |
-| `M` | Mark every visible unread notification read |
-| `d` | Dismiss (mark as done) the focused notification; removes it from the inbox entirely |
+| `m` | Mark the focused notification read, or dim the focused workflow run |
+| `d` | Dismiss the focused row. Notifications are marked done on GitHub and removed from the inbox; workflow runs are hidden locally |
+| `x` | Mute the focused row's repo: hidden from every panel, no longer polled, no alerts. Unmute from the config pane |
+| `t` | Open the Jira ticket referenced in the focused row's title. Prompts for the Jira base URL on first use |
 | `g` | Open the focused row's repo in a terminal (Ghostty preferred, with fallbacks). Prompts for the repo source directory on first use. Shows a footer message if the repo isn't cloned locally |
 | `r`, `R`, space | Trigger an immediate refresh |
+| `?` | Open / close the config pane |
 | `q`, `Q`, Ctrl-C | Quit cleanly, restore terminal, save state |
+
+In an inline prompt (Jira URL, repo source directory), Enter confirms and
+Esc cancels.
+
+### Config pane (`?`)
+
+Shows the effective settings, the alert toggles, and every repo: monitored
+repos by recent activity, then all muted repos (including ones discovery no
+longer returns).
+
+| Key | Action |
+|---|---|
+| `↑` / `↓` | Move the cursor through the repo list |
+| `x` | Mute / unmute the repo under the cursor |
+| `1` | Toggle alerts for your failed builds |
+| `2` | Toggle alerts for all GitHub notifications |
+| `3` | Toggle alerts for comments on PRs you authored |
+| `?` | Close the pane |
 
 ## What gets shown
 
@@ -145,16 +171,18 @@ On narrow terminals the BRANCH column drops first; the status text
 trimming the organisation before the name and finally dropping the org
 entirely when it would still overflow.
 
-**Workflow runs panel.** Capped at 10 rows, sorted active-first then
-most-recently-updated:
+**Workflow runs panel.** Capped at 10 rows, sorted most-recently-updated
+first:
 
 - Active runs (queued / in_progress / waiting) regardless of who
   triggered them.
 - Completed runs only if **you** triggered them and they finished within
-  the last 24 hours.
-- Bot runs are dropped entirely. Renovate, Dependabot, and Copilot
-  review workflows are filtered by actor / branch prefix / workflow
-  name.
+  the last 48 hours. Runs from before today are dimmed.
+- Bot runs are dropped entirely. Renovate, Dependabot, the Copilot coding
+  agent, and Copilot review workflows are filtered by actor / branch
+  prefix / workflow name.
+
+Muted repos are hidden from all three panels.
 
 ## Discovery
 
@@ -168,6 +196,10 @@ sorted by most-recent activity:
 3. `GET /users/<you>/events`: your activity stream (catches repos
    accessed only via team membership, e.g. deployment / infra repos).
 
+Excluded (`--exclude`) and muted repos are removed before the
+`--max-repos` cap is applied, so they don't take places. If discovery
+fails, polling continues against the last good repo list.
+
 Discovery re-runs every 5 minutes (configurable via `--repo-refresh`).
 
 ## State
@@ -179,12 +211,16 @@ Persisted to `$XDG_CONFIG_HOME/gh-monitor/state.json` (or
 - ETag cache (so warm cold starts mostly hit 304s and consume ~2
   rate-limit units instead of ~170). Degenerate ETags such as GitHub's
   sentinel `W/""` from `/notifications` are not cached, so PATCHed
-  notifications reflect on the next refresh.
+  notifications reflect on the next refresh. Entries unused for an hour
+  (e.g. repos that dropped out of discovery or were muted) are pruned.
 - Run-ID dedup map (so failure notifications fire once per run, even
   across restarts).
 - Discovered repo list + last poll timestamp + rate-limit headroom.
+- Muted repos, dismissed / read markers, alert toggles, Jira URL and repo
+  source directory.
 
-Safe to delete at any time; the tool repopulates on next launch.
+Safe to delete at any time; the tool repopulates on next launch (you
+lose mutes and settings).
 
 ## Rate-limit posture
 
@@ -194,10 +230,25 @@ Conservative by design:
   responses don't decrement the primary 5000/hr budget.
 - Refresh polling is bounded to 8 concurrent in-flight requests (well
   under GitHub's documented secondary limit of 100).
-- The adaptive poll interval doubles when `X-RateLimit-Remaining` drops
-  below 500.
-- 403 / 429 responses honour `Retry-After`.
+- The poll interval rises to at least 2 minutes when
+  `X-RateLimit-Remaining` drops below 500.
+- Rate-limit responses (429, or 403 with `Retry-After`,
+  `X-RateLimit-Remaining: 0` or a rate-limit message) honour
+  `Retry-After`. Other 403s, such as SAML/SSO enforcement or missing
+  Actions access on one repo, only skip that repo.
 - The footer always shows current `X-RateLimit-Remaining/Limit`.
+
+## Known limitations
+
+- If one repo's run poll fails (for any reason other than a rate limit),
+  its runs drop out of the panel until it recovers, and after 60s its
+  dismissed / read markers are forgotten, so those runs reappear.
+- Background errors (mark-read failures, desktop alert errors, state save
+  errors) are printed to stderr, which draws over the TUI instead of
+  using the footer.
+- Telling a lone Esc apart from an escape sequence relies on the terminal
+  sending each sequence in one write; over a very slow link an arrow key
+  can occasionally be read as Esc followed by text.
 
 ## Building and testing
 

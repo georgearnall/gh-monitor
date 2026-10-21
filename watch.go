@@ -7,6 +7,7 @@ import (
 	"os/signal"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -38,9 +39,45 @@ type watchConfig struct {
 	jiraURL       string // session override; does not write to state
 	repoSourceDir string // session override; does not write to state
 
+	// muted mirrors state.MutedRepos for the producer goroutine, which must
+	// not read State directly. The main loop republishes it on every change.
+	muted *repoSet
+
 	// Discovery cache: populated by doRefresh, reused until repoRefresh elapses.
 	lastDiscovery time.Time
 	cachedRepos   []discovery.Repo
+}
+
+// repoSet is a copy-on-write set of repo names, safe to read from the
+// producer goroutine while the main loop replaces it.
+type repoSet struct {
+	p atomic.Pointer[map[string]bool]
+}
+
+func newRepoSet(m map[string]bool) *repoSet {
+	s := &repoSet{}
+	s.Store(m)
+	return s
+}
+
+func (s *repoSet) Load() map[string]bool {
+	if s == nil {
+		return nil
+	}
+	if m := s.p.Load(); m != nil {
+		return *m
+	}
+	return nil
+}
+
+func (s *repoSet) Store(m map[string]bool) {
+	c := make(map[string]bool, len(m))
+	for k, v := range m {
+		if v {
+			c[k] = true
+		}
+	}
+	s.p.Store(&c)
 }
 
 // notifyFailure/notifyComment/notifyNewNotification are indirections over
@@ -53,6 +90,13 @@ var (
 	notifyNewNotification = notify.NewNotification
 )
 
+// etagMaxAge is how long an unused ETag cache entry survives: an hour, or
+// twice the discovery interval if that's longer. Well above every poll
+// cadence, so only paths that have genuinely stopped being polled are dropped.
+func (c watchConfig) etagMaxAge() time.Duration {
+	return max(time.Hour, 2*c.repoRefresh)
+}
+
 type pollResult struct {
 	Repos       []discovery.Repo
 	Runs        []runs.Run
@@ -62,6 +106,7 @@ type pollResult struct {
 	ViewerLogin string
 	RateLimit   ghclient.RateLimit
 	PollErr     error
+	RunsPolled  bool // runs.Poll ran against a repo list; Runs is authoritative
 	PRErr       error
 	NotifErr    error
 	DiscErr     error
@@ -76,6 +121,7 @@ func runWatch(client *ghclient.Client, cfg watchConfig) {
 		fail("load state: %v", err)
 	}
 	client.SetEtags(st.EtagCache)
+	cfg.muted = newRepoSet(st.MutedRepos)
 
 	if cfg.once {
 		runOnce(ctx, client, cfg, st)
@@ -102,7 +148,10 @@ func runWatch(client *ghclient.Client, cfg watchConfig) {
 	keys := make(chan rune, 8)
 
 	go readKeys(ctx, keys)
-	go producerLoop(ctx, client, &cfg, trigger, started, results)
+	// The producer gets its own copy: doRefresh writes the discovery cache
+	// fields, and the main loop copies cfg by value on every render.
+	producerCfg := cfg
+	go producerLoop(ctx, client, &producerCfg, trigger, started, results)
 
 	enqueue(trigger) // initial refresh
 
@@ -115,15 +164,16 @@ func runWatch(client *ghclient.Client, cfg watchConfig) {
 	go dismissWorker(ctx, client, dismissQueue, dismissOutcomes)
 
 	var (
-		refreshing bool
-		nextTimer  *time.Timer
-		configMode bool
-		ps         promptState
-		statusMsg  string
+		refreshing  bool
+		nextTimer   *time.Timer
+		configMode  bool
+		configFocus string // repo under the config-pane cursor
+		ps          promptState
+		statusMsg   string
 	)
 	render := func() {
 		if configMode {
-			renderConfig(st, cfg)
+			renderConfig(st, cfg, configFocus)
 		} else {
 			var pl string
 			if ps.active {
@@ -149,6 +199,7 @@ func runWatch(client *ghclient.Client, cfg watchConfig) {
 		case res := <-results:
 			refreshing = false
 			applyResult(st, &cfg, res)
+			client.PruneEtags(cfg.etagMaxAge())
 			st.EtagCache = client.Etags()
 			focused = pickFocus(st, focused)
 			render()
@@ -189,8 +240,36 @@ func runWatch(client *ghclient.Client, cfg watchConfig) {
 				}
 				continue
 			}
-			if configMode && k != '?' && k != 'q' && k != 'Q' && k != '1' && k != '2' && k != '3' {
-				continue
+			if configMode {
+				switch k {
+				case '?', 'q', 'Q', '1', '2', '3':
+				case keyUp, keyDown:
+					delta := 1
+					if k == keyUp {
+						delta = -1
+					}
+					rows := configRepoRows(st)
+					if len(rows) > 0 {
+						configFocus = rows[clampIndex(configRowIndex(rows, configFocus)+delta, len(rows))].Name
+					}
+					render()
+					continue
+				case 'x':
+					var toggled bool
+					configFocus, toggled = toggleConfigRepoMute(st, &cfg, configFocus)
+					if toggled {
+						// Re-poll so an unmuted repo's rows come back now
+						// rather than at the next interval.
+						if nextTimer != nil {
+							nextTimer.Stop()
+						}
+						enqueue(trigger)
+						render()
+					}
+					continue
+				default:
+					continue
+				}
 			}
 			switch k {
 			case 'r', 'R', ' ':
@@ -217,9 +296,8 @@ func runWatch(client *ghclient.Client, cfg watchConfig) {
 					focused = dismissFocused(dismissQueue, st, &cfg, focused)
 				}
 			case 'x':
-				if focused.Panel == "runs" {
-					muteFocusedRunRepo(st, &cfg, focused)
-				}
+				focused, statusMsg = muteFocusedRepo(st, &cfg, focused)
+				render()
 			case 't':
 				if focused.Panel != "runs" && focused.ID != "" {
 					ticket := findTicketInFocused(st, focused)
@@ -342,6 +420,7 @@ func runOnce(ctx context.Context, client *ghclient.Client, cfg watchConfig, st *
 		fmt.Fprintf(os.Stderr, "notif poll: %v\n", res.NotifErr)
 	}
 	applyResult(st, &cfg, res)
+	client.PruneEtags(cfg.etagMaxAge())
 	st.EtagCache = client.Etags()
 	renderFromState(st, cfg, false, focusTarget{}, "", "")
 	if err := st.Save(); err != nil {
@@ -364,27 +443,33 @@ func doRefresh(ctx context.Context, client *ghclient.Client, cfg *watchConfig) p
 	if cacheValid {
 		repos = cfg.cachedRepos
 	} else {
-		repos, discErr = discovery.Discover(client, cfg.maxRepos)
+		// Uncapped: the cap is applied after exclusions in selectRepos.
+		repos, discErr = discovery.Discover(client, 0)
 		if discErr != nil {
 			res.DiscErr = discErr
-			// Fall through. PR and notification polls are independent of the
-			// repo list, so a discovery hiccup should not blank those panels.
+			// Fall back to the last good repo list so the runs panel keeps
+			// updating. PR and notification polls don't need it at all.
+			repos = cfg.cachedRepos
 		} else {
 			cfg.lastDiscovery = time.Now()
 			cfg.cachedRepos = repos
 		}
 	}
-	repos = filterExcluded(repos, cfg.excluded)
-	res.Repos = repos
+	canPollRuns := discErr == nil || len(repos) > 0
+	repos = selectRepos(repos, cfg.excluded, cfg.muted.Load(), cfg.maxRepos)
+	if canPollRuns {
+		res.Repos = repos
+	}
 
 	g, _ := errgroup.WithContext(ctx)
 	g.Go(func() error {
-		if discErr != nil {
+		if !canPollRuns {
 			return nil
 		}
 		polled, pollErr := runs.Poll(client, repos)
 		res.Runs = polled
 		res.PollErr = pollErr
+		res.RunsPolled = true
 		return nil
 	})
 	g.Go(func() error {
@@ -435,10 +520,18 @@ func applyResult(st *state.State, cfg *watchConfig, res pollResult) {
 	if res.Runs == nil && res.Repos == nil && res.PRs == nil && res.Notifs == nil {
 		return
 	}
+	viewer := res.ViewerLogin
+	if viewer == "" {
+		viewer = st.ViewerLogin
+	}
 	seen := make(map[int64]bool, len(res.Runs))
 	for _, r := range res.Runs {
 		seen[r.ID] = true
-		if st.Observe(r) == state.TransitionFailure && !st.IsRunDismissed(r.ID) {
+		// Observe every run so the transition ledger stays warm, but only
+		// alert on the viewer's own runs: other people's failures in a
+		// shared repo are their problem, and bots are noise.
+		if st.Observe(r) == state.TransitionFailure && !st.IsRunDismissed(r.ID) &&
+			viewer != "" && r.ActorLogin == viewer && !r.IsBot() && !st.MutedRepos[r.Repo] {
 			alerted := false
 			if st.FailedBuildAlertsEnabled() && !cfg.noNotify {
 				if err := notifyFailure(r.Repo, r.WorkflowName, r.Branch, r.URL); err != nil {
@@ -455,19 +548,15 @@ func applyResult(st *state.State, cfg *watchConfig, res pollResult) {
 	// Only overwrite each cached panel when its source poll actually succeeded.
 	// A transient failure in one branch should leave the other panels alone
 	// (and keep the stale data visible) rather than blanking everything.
-	if res.DiscErr == nil && res.PollErr == nil {
+	if res.RunsPolled && res.PollErr == nil {
 		st.PruneRunDismissals(seen, 60*time.Second)
 		st.PruneReadRuns(seen, 60*time.Second)
-		viewer := res.ViewerLogin
-		if viewer == "" {
-			viewer = st.ViewerLogin
-		}
 		filtered := make([]runs.Run, 0, len(res.Runs))
 		for _, r := range res.Runs {
 			if st.IsRunDismissed(r.ID) {
 				continue
 			}
-			if st.MutedRepos[r.Repo] && r.ActorLogin != viewer {
+			if st.MutedRepos[r.Repo] {
 				continue
 			}
 			filtered = append(filtered, r)
@@ -475,8 +564,8 @@ func applyResult(st *state.State, cfg *watchConfig, res pollResult) {
 		st.LastView = filtered
 	}
 	if res.PRErr == nil && res.PRs != nil {
-		st.LastPRs = res.PRs
-		st.LastAssignedPRs = res.AssignedPRs
+		st.LastPRs = withoutMutedPRs(res.PRs, st.MutedRepos)
+		st.LastAssignedPRs = withoutMutedPRs(res.AssignedPRs, st.MutedRepos)
 	}
 	if res.NotifErr == nil && res.Notifs != nil {
 		// Self-healing dismiss prune: drop guards whose ID is no longer
@@ -518,14 +607,17 @@ func applyResult(st *state.State, cfg *watchConfig, res pollResult) {
 			if st.IsDismissed(n.ID, n.UpdatedAt) {
 				continue
 			}
-			filtered = append(filtered, n)
+			muted := st.MutedRepos[n.Repo]
+			if !muted {
+				filtered = append(filtered, n)
+			}
 
-			// Bookkeeping always runs regardless of toggle state, so the
-			// ledger stays warm — flipping a toggle on shouldn't storm-
-			// alert every pre-existing item it never got to observe
-			// while off.
+			// Bookkeeping always runs regardless of toggle or mute state,
+			// so the ledger stays warm — flipping a toggle on or unmuting
+			// a repo shouldn't storm-alert every pre-existing item it
+			// never got to observe in the meantime.
 			isNew := st.ObserveNotifAlert(n.ID, n.UpdatedAt, coldStart)
-			if !isNew || cfg.noNotify {
+			if !isNew || cfg.noNotify || muted {
 				continue
 			}
 			isOwnComment := n.HasCommentAnchor && authoredSet[fmt.Sprintf("%s#%d", n.Repo, n.PRNumber)]
@@ -553,7 +645,7 @@ func applyResult(st *state.State, cfg *watchConfig, res pollResult) {
 		}
 		st.LastNotifs = filtered
 	}
-	if res.DiscErr == nil && res.Repos != nil {
+	if res.RunsPolled {
 		st.Repos = res.Repos
 	}
 	st.LastPoll = time.Now()
@@ -561,6 +653,19 @@ func applyResult(st *state.State, cfg *watchConfig, res pollResult) {
 	if res.ViewerLogin != "" {
 		st.ViewerLogin = res.ViewerLogin
 	}
+}
+
+func withoutMutedPRs(ps []prs.PR, muted map[string]bool) []prs.PR {
+	if len(muted) == 0 {
+		return ps
+	}
+	out := make([]prs.PR, 0, len(ps))
+	for _, p := range ps {
+		if !muted[p.Repo] {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 func renderFromState(st *state.State, cfg watchConfig, refreshing bool, f focusTarget, promptLine, statusLine string) {
@@ -737,25 +842,56 @@ func findTicketInFocused(st *state.State, f focusTarget) string {
 	return ui.FindTicket(title)
 }
 
-func renderConfig(st *state.State, cfg watchConfig) {
+// configRepoRows lists the repos shown in the config pane: monitored repos by
+// most recent activity, then every muted repo by name (including ones that
+// discovery no longer returns, so they can always be unmuted).
+func configRepoRows(st *state.State) []ui.RepoStatus {
+	repos := make([]ui.RepoStatus, 0, len(st.Repos)+len(st.MutedRepos))
+	for _, r := range st.Repos {
+		if st.MutedRepos[r.FullName] {
+			continue
+		}
+		repos = append(repos, ui.RepoStatus{Name: r.FullName, Activity: r.Activity})
+	}
+	sort.SliceStable(repos, func(i, j int) bool {
+		return repos[i].Activity.After(repos[j].Activity)
+	})
+	for _, name := range st.MutedRepoList() {
+		repos = append(repos, ui.RepoStatus{Name: name, Muted: true})
+	}
+	return repos
+}
+
+// configRowIndex returns the index of the row named focus, or 0 when it isn't
+// listed (nothing focused yet, or the repo dropped out of the list).
+func configRowIndex(rows []ui.RepoStatus, focus string) int {
+	for i, r := range rows {
+		if r.Name == focus {
+			return i
+		}
+	}
+	return 0
+}
+
+// clampIndex clamps i into [0, n-1], returning 0 when n is 0.
+func clampIndex(i, n int) int {
+	return max(0, min(i, n-1))
+}
+
+func renderConfig(st *state.State, cfg watchConfig, focus string) {
 	excl := make([]string, 0, len(cfg.excluded))
 	for r := range cfg.excluded {
 		excl = append(excl, r)
 	}
 	sort.Strings(excl)
-	repos := make([]ui.RepoStatus, 0, len(st.Repos))
-	for _, r := range st.Repos {
-		repos = append(repos, ui.RepoStatus{
-			Name:     r.FullName,
-			Activity: r.Activity,
-			Muted:    st.MutedRepos[r.FullName],
-		})
+	repos := configRepoRows(st)
+	var focused string
+	if len(repos) > 0 {
+		focused = repos[configRowIndex(repos, focus)].Name
 	}
-	sort.Slice(repos, func(i, j int) bool {
-		return repos[i].Activity.After(repos[j].Activity)
-	})
 	ui.RenderConfig(ui.ConfigSnapshot{
 		Repos:          repos,
+		FocusedRepo:    focused,
 		ExcludedRepos:  excl,
 		ViewerLogin:    st.ViewerLogin,
 		BaseInterval:   cfg.baseInterval,

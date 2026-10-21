@@ -54,6 +54,7 @@ func TestRun_IsBot(t *testing.T) {
 		{"dependabot bot actor", Run{ActorLogin: "dependabot[bot]"}, true},
 		{"copilot bot actor", Run{ActorLogin: "Copilot[bot]"}, true},
 		{"copilot reviewer actor", Run{ActorLogin: "copilot-pull-request-reviewer[bot]"}, true},
+		{"copilot coding agent actor", Run{ActorLogin: "Copilot", WorkflowName: "Addressing comment on PR #385"}, true},
 		{"renovate branch prefix", Run{Branch: "renovate/phpunit-13"}, true},
 		{"dependabot branch prefix", Run{Branch: "dependabot/npm_and_yarn/react-19"}, true},
 		{"copilot in workflow name", Run{WorkflowName: "Running Copilot Code Review"}, true},
@@ -125,5 +126,43 @@ func TestPoll_EmptyRepos(t *testing.T) {
 	}
 	if len(got) != 0 {
 		t.Errorf("expected zero runs, got %+v", got)
+	}
+}
+
+func TestPoll_ForbiddenRepoDoesNotFailPoll(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "/o/locked/") {
+			w.WriteHeader(http.StatusForbidden)
+			w.Write([]byte(`{"message":"Resource protected by organization SAML enforcement."}`))
+			return
+		}
+		w.Write([]byte(`{"workflow_runs":[{"id":1,"name":"CI","status":"in_progress"}]}`))
+	}))
+	defer srv.Close()
+	c := ghclient.NewForTest(srv.Client(), srv.URL+"/")
+	got, err := Poll(c, []discovery.Repo{
+		{FullName: "o/ok", Owner: "o", Name: "ok"},
+		{FullName: "o/locked", Owner: "o", Name: "locked"},
+	})
+	if err != nil {
+		t.Fatalf("a 403 on one repo must not fail the whole poll, got %v", err)
+	}
+	if len(got) != 1 || got[0].Repo != "o/ok" {
+		t.Errorf("want the accessible repo's run, got %+v", got)
+	}
+}
+
+func TestPoll_AllReposFailingReturnsError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadGateway)
+	}))
+	defer srv.Close()
+	c := ghclient.NewForTest(srv.Client(), srv.URL+"/")
+	_, err := Poll(c, []discovery.Repo{{FullName: "o/a", Owner: "o", Name: "a"}, {FullName: "o/b", Owner: "o", Name: "b"}})
+	if err == nil {
+		t.Fatal("every repo failing must surface an error so the caller keeps its last view")
+	}
+	if _, ok := ghclient.AsRateLimited(err); ok {
+		t.Errorf("a 502 outage should not be reported as a rate limit: %v", err)
 	}
 }

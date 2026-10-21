@@ -6,6 +6,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"sort"
 	"time"
 
 	"github.com/georgearnall/gh-monitor/internal/discovery"
@@ -383,12 +384,30 @@ func (s *State) PruneReadRuns(present map[int64]bool, minAge time.Duration) {
 	}
 }
 
-// MuteRepo records that the user wants to hide other actors' runs from repo.
+// MuteRepo hides repo from every panel: it stops being polled for runs, and
+// its notifications and PRs are filtered out. Unmute via the config pane.
 func (s *State) MuteRepo(repo string) {
 	if s.MutedRepos == nil {
 		s.MutedRepos = map[string]bool{}
 	}
 	s.MutedRepos[repo] = true
+}
+
+// UnmuteRepo reverses MuteRepo.
+func (s *State) UnmuteRepo(repo string) {
+	delete(s.MutedRepos, repo)
+}
+
+// MutedRepoList returns the muted repos sorted by name.
+func (s *State) MutedRepoList() []string {
+	out := make([]string, 0, len(s.MutedRepos))
+	for r, muted := range s.MutedRepos {
+		if muted {
+			out = append(out, r)
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 // Prune removes records for runs that haven't been seen recently enough

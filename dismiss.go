@@ -155,43 +155,98 @@ func dismissFocusedRun(st *state.State, cfg *watchConfig, f focusTarget) focusTa
 	return newFocus
 }
 
-// muteFocusedRunRepo persistently mutes the repo of the focused run so that
-// only runs triggered by the viewer are shown from it. Immediate effect:
-// other actors' runs from that repo are removed from LastView inline.
-func muteFocusedRunRepo(st *state.State, cfg *watchConfig, f focusTarget) {
-	if f.Panel != "runs" || f.ID == "" {
-		return
+// muteFocusedRepo persistently mutes the focused row's repo, from any panel.
+// A muted repo is hidden from every panel, no longer polled for runs, and
+// never alerts. Rows are scrubbed immediately rather than on the next poll,
+// and the cursor moves to whatever now occupies the focused row's position.
+// Returns the new focus and a footer status message.
+func muteFocusedRepo(st *state.State, cfg *watchConfig, f focusTarget) (focusTarget, string) {
+	repo := focusedRepo(st, f)
+	if repo == "" {
+		return f, ""
 	}
-	runID, err := strconv.ParseInt(f.ID, 10, 64)
-	if err != nil {
-		return
-	}
-	var repo string
-	for _, r := range st.LastView {
-		if r.ID == runID {
-			repo = r.Repo
+	idx := 0
+	for i, t := range cursorTargets(st) {
+		if t == f {
+			idx = i
 			break
 		}
 	}
-	if repo == "" {
-		return
-	}
+
 	st.MuteRepo(repo)
-	// Scrub other actors' runs for the muted repo from LastView immediately
-	// so rows disappear without waiting for the next poll.
-	viewer := st.ViewerLogin
-	keep := st.LastView[:0]
-	for _, r := range st.LastView {
-		if r.Repo == repo && r.ActorLogin != viewer {
-			continue
-		}
-		keep = append(keep, r)
-	}
-	st.LastView = keep
+	cfg.muted.Store(st.MutedRepos)
+	scrubRepo(st, repo)
 	if err := st.Save(); err != nil {
 		fmt.Fprintf(os.Stderr, "save state: %v\n", err)
 	}
-	renderFromState(st, *cfg, false, f, "", "")
+
+	newFocus := focusTarget{}
+	if after := cursorTargets(st); len(after) > 0 {
+		newFocus = after[min(idx, len(after)-1)]
+	}
+	return newFocus, fmt.Sprintf("muted %s · unmute from the config pane [?]", repo)
+}
+
+// toggleConfigRepoMute flips the mute state of the config-pane row named
+// focus (the first row if focus isn't listed). It returns the repo the cursor
+// should be on afterwards, which is the same repo when it's still listed and
+// otherwise whatever now sits at its position, plus whether anything changed.
+// The caller should trigger a refresh so unmuted rows come back.
+func toggleConfigRepoMute(st *state.State, cfg *watchConfig, focus string) (string, bool) {
+	rows := configRepoRows(st)
+	if len(rows) == 0 {
+		return "", false
+	}
+	idx := configRowIndex(rows, focus)
+	r := rows[idx]
+	if r.Muted {
+		st.UnmuteRepo(r.Name)
+	} else {
+		st.MuteRepo(r.Name)
+		scrubRepo(st, r.Name)
+	}
+	cfg.muted.Store(st.MutedRepos)
+	if err := st.Save(); err != nil {
+		fmt.Fprintf(os.Stderr, "save state: %v\n", err)
+	}
+	after := configRepoRows(st)
+	for _, a := range after {
+		if a.Name == r.Name {
+			return r.Name, true
+		}
+	}
+	if len(after) == 0 {
+		return "", true
+	}
+	return after[clampIndex(idx, len(after))].Name, true
+}
+
+// scrubRepo removes every cached row belonging to repo. It also forgets the
+// transition records of the repo's visible runs: a muted repo isn't polled,
+// so those records freeze, and unmuting days later would otherwise see an
+// "active -> failure" transition and fire a stale alert.
+func scrubRepo(st *state.State, repo string) {
+	keepRuns := st.LastView[:0]
+	for _, r := range st.LastView {
+		if r.Repo != repo {
+			keepRuns = append(keepRuns, r)
+		} else {
+			delete(st.Runs, r.ID)
+		}
+	}
+	st.LastView = keepRuns
+
+	keepNotifs := st.LastNotifs[:0]
+	for _, n := range st.LastNotifs {
+		if n.Repo != repo {
+			keepNotifs = append(keepNotifs, n)
+		}
+	}
+	st.LastNotifs = keepNotifs
+
+	one := map[string]bool{repo: true}
+	st.LastPRs = withoutMutedPRs(st.LastPRs, one)
+	st.LastAssignedPRs = withoutMutedPRs(st.LastAssignedPRs, one)
 }
 
 // markFocusedRunRead dims the focused workflow run by recording it as read in
@@ -233,4 +288,3 @@ func markFocusedRead(client *ghclient.Client, st *state.State, cfg *watchConfig,
 		}
 	}()
 }
-

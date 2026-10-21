@@ -516,3 +516,77 @@ func TestAsRateLimited_NotRateLimited(t *testing.T) {
 		t.Errorf("nil error misclassified")
 	}
 }
+
+func TestGet_403Classification(t *testing.T) {
+	cases := []struct {
+		name      string
+		headers   map[string]string
+		body      string
+		wantLimit bool
+	}{
+		{"sso enforcement", nil, `{"message":"Resource protected by organization SAML enforcement."}`, false},
+		{"permission denied", nil, `{"message":"Must have admin rights to Repository."}`, false},
+		{"primary limit exhausted", map[string]string{"X-RateLimit-Remaining": "0"}, `{"message":"API rate limit exceeded"}`, true},
+		{"secondary limit message only", nil, `{"message":"You have exceeded a secondary rate limit."}`, true},
+		{"retry-after", map[string]string{"Retry-After": "5"}, `{}`, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				for k, v := range tc.headers {
+					w.Header().Set(k, v)
+				}
+				w.WriteHeader(http.StatusForbidden)
+				fmt.Fprint(w, tc.body)
+			}))
+			defer srv.Close()
+			err := newTestClient(srv).Get("x", nil)
+			_, isLimit := AsRateLimited(err)
+			if isLimit != tc.wantLimit {
+				t.Fatalf("rate-limited = %v, want %v (err=%v)", isLimit, tc.wantLimit, err)
+			}
+			if !tc.wantLimit {
+				he, ok := AsHTTPError(err)
+				if !ok || he.Status != http.StatusForbidden {
+					t.Errorf("want *HTTPError with 403, got %T %v", err, err)
+				}
+			}
+		})
+	}
+}
+
+func TestPruneEtags_DropsUnusedEntries(t *testing.T) {
+	c := NewForTest(http.DefaultClient, "http://unused/")
+	c.SetEtags(map[string]EtagEntry{
+		"fresh":  {ETag: `"a"`, UsedAt: time.Now()},
+		"stale":  {ETag: `"b"`, UsedAt: time.Now().Add(-2 * time.Hour)},
+		"legacy": {ETag: `"c"`}, // pre-UsedAt state file: gets a full window
+	})
+	c.PruneEtags(time.Hour)
+	got := c.Etags()
+	if _, ok := got["stale"]; ok {
+		t.Error("stale entry should be pruned")
+	}
+	if _, ok := got["fresh"]; !ok {
+		t.Error("fresh entry should survive")
+	}
+	if _, ok := got["legacy"]; !ok {
+		t.Error("legacy entry without UsedAt should survive its first prune")
+	}
+}
+
+func TestGet_RefreshesEtagUsedAt(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotModified)
+	}))
+	defer srv.Close()
+	c := newTestClient(srv)
+	c.SetEtags(map[string]EtagEntry{"x": {ETag: `"a"`, Body: []byte(`{}`), UsedAt: time.Now().Add(-2 * time.Hour)}})
+	if err := c.Get("x", nil); err != nil {
+		t.Fatal(err)
+	}
+	c.PruneEtags(time.Hour)
+	if _, ok := c.Etags()["x"]; !ok {
+		t.Error("an entry served as a 304 should count as used")
+	}
+}
