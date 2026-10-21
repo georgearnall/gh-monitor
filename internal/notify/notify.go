@@ -14,15 +14,8 @@ import (
 // via an escape sequence — no fork, no system permission prompt. Otherwise we
 // fall back to `osascript` for macOS native notifications.
 //
-// Desktop notifications are not supported on Windows: there's no OSC 9
-// terminal to fall back on and no equivalent of `osascript` to shell out to.
-// Rather than fail noisily on every workflow failure, this is a no-op there.
-// See WINDOWS.md.
+// No-op on Windows; see deliver.
 func Failure(repo, workflow, branch, url string) error {
-	if runtime.GOOS == "windows" {
-		return nil
-	}
-
 	title := "GHA failed: " + repo
 	body := fmt.Sprintf("%s on %s", workflow, branch)
 	return deliver(title, body, url)
@@ -65,7 +58,15 @@ func reasonLabel(reason string) string {
 // In Ghostty (and other terminals that honour OSC 9) we send the notification
 // via an escape sequence — no fork, no system permission prompt. Otherwise we
 // fall back to `osascript` for macOS native notifications.
+//
+// Desktop notifications are not supported on Windows: there's no OSC 9
+// terminal to fall back on and no equivalent of `osascript` to shell out to.
+// Rather than fail noisily on every alert, this is a no-op there.
+// See WINDOWS.md.
 func deliver(title, body, url string) error {
+	if runtime.GOOS == "windows" {
+		return nil
+	}
 	switch {
 	case supportsOSC9():
 		return sendOSC9(title, body)
