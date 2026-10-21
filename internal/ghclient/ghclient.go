@@ -39,10 +39,13 @@ type Client struct {
 }
 
 // EtagEntry is the cached response for one path. The Body is the raw HTTP
-// response body, base64-encoded by encoding/json when persisted.
+// response body, base64-encoded by encoding/json when persisted. UsedAt is
+// the last time the entry was looked up or stored, so PruneEtags can drop
+// paths that are no longer polled (e.g. repos that fell out of discovery).
 type EtagEntry struct {
-	ETag string `json:"etag"`
-	Body []byte `json:"body"`
+	ETag   string    `json:"etag"`
+	Body   []byte    `json:"body"`
+	UsedAt time.Time `json:"used_at,omitempty"`
 }
 
 func New() (*Client, error) {
@@ -314,11 +317,30 @@ func (c *Client) SetEtags(m map[string]EtagEntry) {
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	now := time.Now()
 	for k, v := range m {
 		if !isUsefulETag(v.ETag) {
 			continue
 		}
+		if v.UsedAt.IsZero() {
+			// Saved before UsedAt existed: give it a full prune window.
+			v.UsedAt = now
+		}
 		c.etags[k] = v
+	}
+}
+
+// PruneEtags drops cache entries not used within maxAge. Without this the
+// cache grows forever: every repo ever polled keeps its last response body,
+// and the whole cache is rewritten to state.json on every poll.
+func (c *Client) PruneEtags(maxAge time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	cutoff := time.Now().Add(-maxAge)
+	for k, v := range c.etags {
+		if v.UsedAt.Before(cutoff) {
+			delete(c.etags, k)
+		}
 	}
 }
 
@@ -352,12 +374,17 @@ func (c *Client) lookupEtag(path string) (EtagEntry, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	e, ok := c.etags[path]
+	if ok {
+		e.UsedAt = time.Now()
+		c.etags[path] = e
+	}
 	return e, ok
 }
 
 func (c *Client) storeEtag(path string, e EtagEntry) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	e.UsedAt = time.Now()
 	c.etags[path] = e
 }
 

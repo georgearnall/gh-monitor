@@ -554,3 +554,39 @@ func TestGet_403Classification(t *testing.T) {
 		})
 	}
 }
+
+func TestPruneEtags_DropsUnusedEntries(t *testing.T) {
+	c := NewForTest(http.DefaultClient, "http://unused/")
+	c.SetEtags(map[string]EtagEntry{
+		"fresh":  {ETag: `"a"`, UsedAt: time.Now()},
+		"stale":  {ETag: `"b"`, UsedAt: time.Now().Add(-2 * time.Hour)},
+		"legacy": {ETag: `"c"`}, // pre-UsedAt state file: gets a full window
+	})
+	c.PruneEtags(time.Hour)
+	got := c.Etags()
+	if _, ok := got["stale"]; ok {
+		t.Error("stale entry should be pruned")
+	}
+	if _, ok := got["fresh"]; !ok {
+		t.Error("fresh entry should survive")
+	}
+	if _, ok := got["legacy"]; !ok {
+		t.Error("legacy entry without UsedAt should survive its first prune")
+	}
+}
+
+func TestGet_RefreshesEtagUsedAt(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotModified)
+	}))
+	defer srv.Close()
+	c := newTestClient(srv)
+	c.SetEtags(map[string]EtagEntry{"x": {ETag: `"a"`, Body: []byte(`{}`), UsedAt: time.Now().Add(-2 * time.Hour)}})
+	if err := c.Get("x", nil); err != nil {
+		t.Fatal(err)
+	}
+	c.PruneEtags(time.Hour)
+	if _, ok := c.Etags()["x"]; !ok {
+		t.Error("an entry served as a 304 should count as used")
+	}
+}
