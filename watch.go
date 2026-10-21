@@ -435,10 +435,18 @@ func applyResult(st *state.State, cfg *watchConfig, res pollResult) {
 	if res.Runs == nil && res.Repos == nil && res.PRs == nil && res.Notifs == nil {
 		return
 	}
+	viewer := res.ViewerLogin
+	if viewer == "" {
+		viewer = st.ViewerLogin
+	}
 	seen := make(map[int64]bool, len(res.Runs))
 	for _, r := range res.Runs {
 		seen[r.ID] = true
-		if st.Observe(r) == state.TransitionFailure && !st.IsRunDismissed(r.ID) {
+		// Observe every run so the transition ledger stays warm, but only
+		// alert on the viewer's own runs: other people's failures in a
+		// shared repo are their problem, and bots are noise.
+		if st.Observe(r) == state.TransitionFailure && !st.IsRunDismissed(r.ID) &&
+			viewer != "" && r.ActorLogin == viewer && !r.IsBot() {
 			alerted := false
 			if st.FailedBuildAlertsEnabled() && !cfg.noNotify {
 				if err := notifyFailure(r.Repo, r.WorkflowName, r.Branch, r.URL); err != nil {
@@ -458,10 +466,6 @@ func applyResult(st *state.State, cfg *watchConfig, res pollResult) {
 	if res.DiscErr == nil && res.PollErr == nil {
 		st.PruneRunDismissals(seen, 60*time.Second)
 		st.PruneReadRuns(seen, 60*time.Second)
-		viewer := res.ViewerLogin
-		if viewer == "" {
-			viewer = st.ViewerLogin
-		}
 		filtered := make([]runs.Run, 0, len(res.Runs))
 		for _, r := range res.Runs {
 			if st.IsRunDismissed(r.ID) {

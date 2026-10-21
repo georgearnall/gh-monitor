@@ -289,7 +289,7 @@ func RenderConfig(snap ConfigSnapshot) {
 	pln(tty)
 	pln(tty, dim("NOTIFICATIONS", tty))
 	printAligned([][]string{
-		{"  [1] " + dim("Failed builds", tty), onOffLabel(snap.NotifyFailedBuilds, tty)},
+		{"  [1] " + dim("Your failed builds", tty), onOffLabel(snap.NotifyFailedBuilds, tty)},
 		{"  [2] " + dim("All GitHub notifications", tty), onOffLabel(snap.NotifyAllGitHub, tty)},
 		{"  [3] " + dim("Comments on your PRs", tty), onOffLabel(snap.NotifyOwnPRComments, tty)},
 	})

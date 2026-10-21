@@ -154,11 +154,13 @@ func TestApplyResult_FailedBuildAlert_GatedByToggle(t *testing.T) {
 	st := isolateState(t)
 	cfg := &watchConfig{}
 
+	st.ViewerLogin = "me"
+
 	// Toggle off: an active->failure transition should not alert.
 	st.SetFailedBuildAlerts(false)
-	applyResult(st, cfg, pollResult{Runs: []runs.Run{{ID: 1, Status: "in_progress"}}})
+	applyResult(st, cfg, pollResult{Runs: []runs.Run{{ID: 1, Status: "in_progress", ActorLogin: "me"}}})
 	applyResult(st, cfg, pollResult{Runs: []runs.Run{
-		{ID: 1, Status: "completed", Conclusion: "failure", Repo: "x/y", WorkflowName: "CI", Branch: "main", URL: "https://x/1"},
+		{ID: 1, Status: "completed", Conclusion: "failure", Repo: "x/y", WorkflowName: "CI", Branch: "main", URL: "https://x/1", ActorLogin: "me"},
 	}})
 	if calls != 0 {
 		t.Fatalf("toggle off: want 0 calls, got %d", calls)
@@ -166,9 +168,9 @@ func TestApplyResult_FailedBuildAlert_GatedByToggle(t *testing.T) {
 
 	// Toggle on: a fresh run's active->failure transition should alert.
 	st.SetFailedBuildAlerts(true)
-	applyResult(st, cfg, pollResult{Runs: []runs.Run{{ID: 2, Status: "in_progress"}}})
+	applyResult(st, cfg, pollResult{Runs: []runs.Run{{ID: 2, Status: "in_progress", ActorLogin: "me"}}})
 	applyResult(st, cfg, pollResult{Runs: []runs.Run{
-		{ID: 2, Status: "completed", Conclusion: "failure", Repo: "x/y", WorkflowName: "CI", Branch: "main", URL: "https://x/2"},
+		{ID: 2, Status: "completed", Conclusion: "failure", Repo: "x/y", WorkflowName: "CI", Branch: "main", URL: "https://x/2", ActorLogin: "me"},
 	}})
 	if calls != 1 {
 		t.Errorf("toggle on: want 1 call, got %d", calls)
@@ -283,3 +285,31 @@ func TestApplyResult_NoNotify_SuppressesAllThreeAlertTypes(t *testing.T) {
 	}
 }
 
+
+func TestApplyResult_FailedBuildAlert_OnlyViewersOwnRuns(t *testing.T) {
+	origFailure := notifyFailure
+	defer func() { notifyFailure = origFailure }()
+	var alerted []string
+	notifyFailure = func(repo, workflow, branch, url string) error {
+		alerted = append(alerted, url)
+		return nil
+	}
+
+	st := isolateState(t)
+	cfg := &watchConfig{}
+	active := []runs.Run{
+		{ID: 1, Status: "in_progress", ActorLogin: "me", URL: "mine"},
+		{ID: 2, Status: "in_progress", ActorLogin: "colleague", URL: "colleague"},
+		{ID: 3, Status: "in_progress", ActorLogin: "renovate[bot]", Branch: "renovate/x", URL: "bot"},
+	}
+	applyResult(st, cfg, pollResult{Runs: active, ViewerLogin: "me"})
+	failed := make([]runs.Run, len(active))
+	for i, r := range active {
+		r.Status, r.Conclusion = "completed", "failure"
+		failed[i] = r
+	}
+	applyResult(st, cfg, pollResult{Runs: failed, ViewerLogin: "me"})
+	if len(alerted) != 1 || alerted[0] != "mine" {
+		t.Errorf("want only the viewer's run to alert, got %v", alerted)
+	}
+}
