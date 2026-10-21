@@ -44,12 +44,13 @@ func (r Run) IsFailure() bool {
 }
 
 // IsBot reports whether the run was triggered by — or runs on behalf of — a
-// known automated agent: Renovate, Dependabot, or a Copilot code-review
+// known automated agent: Renovate, Dependabot, the Copilot coding agent
+// (login "Copilot", e.g. "Addressing comment on PR #N"), or a Copilot code-review
 // workflow. Detection covers all three of: actor login, head branch prefix,
 // and workflow name.
 func (r Run) IsBot() bool {
 	switch strings.ToLower(r.ActorLogin) {
-	case "renovate[bot]", "dependabot[bot]", "copilot[bot]", "copilot-pull-request-reviewer[bot]":
+	case "renovate[bot]", "dependabot[bot]", "copilot", "copilot[bot]", "copilot-pull-request-reviewer[bot]":
 		return true
 	}
 	if strings.HasPrefix(r.Branch, "renovate/") || strings.HasPrefix(r.Branch, "dependabot/") {

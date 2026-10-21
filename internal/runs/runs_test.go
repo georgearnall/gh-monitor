@@ -54,6 +54,7 @@ func TestRun_IsBot(t *testing.T) {
 		{"dependabot bot actor", Run{ActorLogin: "dependabot[bot]"}, true},
 		{"copilot bot actor", Run{ActorLogin: "Copilot[bot]"}, true},
 		{"copilot reviewer actor", Run{ActorLogin: "copilot-pull-request-reviewer[bot]"}, true},
+		{"copilot coding agent actor", Run{ActorLogin: "Copilot", WorkflowName: "Addressing comment on PR #385"}, true},
 		{"renovate branch prefix", Run{Branch: "renovate/phpunit-13"}, true},
 		{"dependabot branch prefix", Run{Branch: "dependabot/npm_and_yarn/react-19"}, true},
 		{"copilot in workflow name", Run{WorkflowName: "Running Copilot Code Review"}, true},
