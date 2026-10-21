@@ -217,8 +217,8 @@ func Render(snap Snapshot) {
 	}
 }
 
-// RepoStatus is a flattened view of one discovered repository for the config
-// screen. Callers build it from state.Repos + state.MutedRepos.
+// RepoStatus is a flattened view of one repository for the config screen.
+// Callers build it from state.Repos (monitored) + state.MutedRepos.
 type RepoStatus struct {
 	Name     string // "owner/repo"
 	Activity time.Time
@@ -227,8 +227,9 @@ type RepoStatus struct {
 
 // ConfigSnapshot is the input to RenderConfig.
 type ConfigSnapshot struct {
-	Repos          []RepoStatus
-	ExcludedRepos  []string // sorted, from --exclude flag
+	Repos          []RepoStatus // monitored first, then muted
+	FocusedRepo    string       // repo under the config cursor, or ""
+	ExcludedRepos  []string     // sorted, from --exclude flag
 	ViewerLogin    string
 	BaseInterval   time.Duration
 	ActiveInterval time.Duration
@@ -295,11 +296,11 @@ func RenderConfig(snap ConfigSnapshot) {
 	})
 
 	pln(tty)
-	pln(tty, dim(fmt.Sprintf("MONITORED REPOS (%d)", len(snap.Repos)), tty))
+	pln(tty, dim("REPOS", tty))
 	if len(snap.Repos) == 0 {
 		pln(tty, "  "+dim("none discovered yet", tty))
 	} else {
-		writeConfigRepoTable(snap.Repos, tty, snap.TermWidth)
+		writeConfigRepoTable(snap.Repos, snap.FocusedRepo, tty, snap.TermWidth)
 	}
 
 	if len(snap.ExcludedRepos) > 0 {
@@ -312,7 +313,7 @@ func RenderConfig(snap ConfigSnapshot) {
 
 	pln(tty)
 	if tty {
-		pln(tty, dim("[1/2/3] toggle notifications  [?] close  [q] quit", tty))
+		pln(tty, dim("[↑↓] move  [x] mute/unmute repo  [1/2/3] toggle notifications  [?] close  [q] quit", tty))
 	}
 	if tty {
 		fmt.Print(ansiClearBelow)
@@ -339,17 +340,25 @@ func prSinceLabel(d time.Duration) string {
 	return d.String()
 }
 
-func writeConfigRepoTable(repos []RepoStatus, tty bool, termWidth int) {
+func writeConfigRepoTable(repos []RepoStatus, focused string, tty bool, termWidth int) {
 	t := newPanelTable(
-		dimRow([]string{"REPO", "LAST ACTIVITY", "STATUS"}, tty),
-		0, termWidth, tty,
+		dimRow([]string{"  ", "REPO", "LAST ACTIVITY", "STATUS"}, tty),
+		1, termWidth, tty,
 	)
 	for _, r := range repos {
-		status := ""
+		cursor := "  "
+		if r.Name == focused {
+			cursor = color(ansiYellow, "▶", tty) + " "
+		}
+		status := color(ansiGreen, "monitored", tty)
 		if r.Muted {
 			status = dim("muted", tty)
 		}
-		t.addRow([]string{r.Name, relativeAge(r.Activity), status}, false)
+		activity := ""
+		if !r.Activity.IsZero() {
+			activity = relativeAge(r.Activity)
+		}
+		t.addRow([]string{cursor, r.Name, activity, status}, false)
 	}
 	t.render()
 }

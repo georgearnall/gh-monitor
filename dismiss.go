@@ -187,6 +187,28 @@ func muteFocusedRepo(st *state.State, cfg *watchConfig, f focusTarget) (focusTar
 	return newFocus, fmt.Sprintf("muted %s · unmute from the config pane [?]", repo)
 }
 
+// toggleConfigRepoMute flips the mute state of the config-pane row at cursor
+// and returns the cursor clamped to the new row list, plus whether anything
+// changed. The caller should trigger a refresh so unmuted rows come back.
+func toggleConfigRepoMute(st *state.State, cfg *watchConfig, cursor int) (int, bool) {
+	rows := configRepoRows(st)
+	if len(rows) == 0 {
+		return 0, false
+	}
+	r := rows[clampIndex(cursor, len(rows))]
+	if r.Muted {
+		st.UnmuteRepo(r.Name)
+	} else {
+		st.MuteRepo(r.Name)
+		scrubRepo(st, r.Name)
+	}
+	cfg.muted.Store(st.MutedRepos)
+	if err := st.Save(); err != nil {
+		fmt.Fprintf(os.Stderr, "save state: %v\n", err)
+	}
+	return clampIndex(cursor, len(configRepoRows(st))), true
+}
+
 // scrubRepo removes every cached row belonging to repo.
 func scrubRepo(st *state.State, repo string) {
 	keepRuns := st.LastView[:0]

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -465,5 +466,44 @@ func TestDoRefresh_MutedRepoNotPolled(t *testing.T) {
 	}
 	if len(res.Repos) != 1 || res.Repos[0].FullName != "o/keep" {
 		t.Errorf("Repos = %+v, want only o/keep", res.Repos)
+	}
+}
+
+func TestConfigRepoRows_MonitoredThenAllMuted(t *testing.T) {
+	st := isolateState(t)
+	now := time.Now()
+	st.Repos = []discovery.Repo{
+		{FullName: "o/old", Activity: now.Add(-time.Hour)},
+		{FullName: "o/new", Activity: now},
+	}
+	st.MuteRepo("o/z-gone") // muted but no longer discovered
+	st.MuteRepo("o/a-gone")
+	rows := configRepoRows(st)
+	var got []string
+	for _, r := range rows {
+		got = append(got, fmt.Sprintf("%s:%v", r.Name, r.Muted))
+	}
+	want := "o/new:false,o/old:false,o/a-gone:true,o/z-gone:true"
+	if strings.Join(got, ",") != want {
+		t.Errorf("rows = %s, want %s", strings.Join(got, ","), want)
+	}
+}
+
+func TestToggleConfigRepoMute_MuteThenUnmute(t *testing.T) {
+	st := isolateState(t)
+	st.Repos = []discovery.Repo{{FullName: "o/a", Activity: time.Now()}}
+	st.LastPRs = []prs.PR{{Repo: "o/a", Number: 1}}
+	cfg := &watchConfig{muted: newRepoSet(nil)}
+
+	cursor, ok := toggleConfigRepoMute(st, cfg, 0)
+	if !ok || !st.MutedRepos["o/a"] || !cfg.muted.Load()["o/a"] {
+		t.Fatal("first toggle should mute o/a in state and producer snapshot")
+	}
+	if len(st.LastPRs) != 0 {
+		t.Errorf("muting from config should scrub rows, LastPRs = %+v", st.LastPRs)
+	}
+	// o/a is now listed once, as muted, at index 0.
+	if _, ok := toggleConfigRepoMute(st, cfg, cursor); !ok || st.MutedRepos["o/a"] || cfg.muted.Load()["o/a"] {
+		t.Error("second toggle should unmute o/a")
 	}
 }

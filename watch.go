@@ -157,15 +157,16 @@ func runWatch(client *ghclient.Client, cfg watchConfig) {
 	go dismissWorker(ctx, client, dismissQueue, dismissOutcomes)
 
 	var (
-		refreshing bool
-		nextTimer  *time.Timer
-		configMode bool
-		ps         promptState
-		statusMsg  string
+		refreshing   bool
+		nextTimer    *time.Timer
+		configMode   bool
+		configCursor int // index into configRepoRows
+		ps           promptState
+		statusMsg    string
 	)
 	render := func() {
 		if configMode {
-			renderConfig(st, cfg)
+			renderConfig(st, cfg, configCursor)
 		} else {
 			var pl string
 			if ps.active {
@@ -231,8 +232,33 @@ func runWatch(client *ghclient.Client, cfg watchConfig) {
 				}
 				continue
 			}
-			if configMode && k != '?' && k != 'q' && k != 'Q' && k != '1' && k != '2' && k != '3' {
-				continue
+			if configMode {
+				switch k {
+				case '?', 'q', 'Q', '1', '2', '3':
+				case keyUp, keyDown:
+					delta := 1
+					if k == keyUp {
+						delta = -1
+					}
+					configCursor = clampIndex(configCursor+delta, len(configRepoRows(st)))
+					render()
+					continue
+				case 'x':
+					var toggled bool
+					configCursor, toggled = toggleConfigRepoMute(st, &cfg, configCursor)
+					if toggled {
+						// Re-poll so an unmuted repo's rows come back now
+						// rather than at the next interval.
+						if nextTimer != nil {
+							nextTimer.Stop()
+						}
+						enqueue(trigger)
+						render()
+					}
+					continue
+				default:
+					continue
+				}
 			}
 			switch k {
 			case 'r', 'R', ' ':
@@ -804,25 +830,45 @@ func findTicketInFocused(st *state.State, f focusTarget) string {
 	return ui.FindTicket(title)
 }
 
-func renderConfig(st *state.State, cfg watchConfig) {
+// configRepoRows lists the repos shown in the config pane: monitored repos by
+// most recent activity, then every muted repo by name (including ones that
+// discovery no longer returns, so they can always be unmuted).
+func configRepoRows(st *state.State) []ui.RepoStatus {
+	repos := make([]ui.RepoStatus, 0, len(st.Repos)+len(st.MutedRepos))
+	for _, r := range st.Repos {
+		if st.MutedRepos[r.FullName] {
+			continue
+		}
+		repos = append(repos, ui.RepoStatus{Name: r.FullName, Activity: r.Activity})
+	}
+	sort.SliceStable(repos, func(i, j int) bool {
+		return repos[i].Activity.After(repos[j].Activity)
+	})
+	for _, name := range st.MutedRepoList() {
+		repos = append(repos, ui.RepoStatus{Name: name, Muted: true})
+	}
+	return repos
+}
+
+// clampIndex clamps i into [0, n-1], returning 0 when n is 0.
+func clampIndex(i, n int) int {
+	return max(0, min(i, n-1))
+}
+
+func renderConfig(st *state.State, cfg watchConfig, cursor int) {
 	excl := make([]string, 0, len(cfg.excluded))
 	for r := range cfg.excluded {
 		excl = append(excl, r)
 	}
 	sort.Strings(excl)
-	repos := make([]ui.RepoStatus, 0, len(st.Repos))
-	for _, r := range st.Repos {
-		repos = append(repos, ui.RepoStatus{
-			Name:     r.FullName,
-			Activity: r.Activity,
-			Muted:    st.MutedRepos[r.FullName],
-		})
+	repos := configRepoRows(st)
+	var focused string
+	if len(repos) > 0 {
+		focused = repos[clampIndex(cursor, len(repos))].Name
 	}
-	sort.Slice(repos, func(i, j int) bool {
-		return repos[i].Activity.After(repos[j].Activity)
-	})
 	ui.RenderConfig(ui.ConfigSnapshot{
 		Repos:          repos,
+		FocusedRepo:    focused,
 		ExcludedRepos:  excl,
 		ViewerLogin:    st.ViewerLogin,
 		BaseInterval:   cfg.baseInterval,
