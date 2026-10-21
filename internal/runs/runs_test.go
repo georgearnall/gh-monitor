@@ -127,3 +127,26 @@ func TestPoll_EmptyRepos(t *testing.T) {
 		t.Errorf("expected zero runs, got %+v", got)
 	}
 }
+
+func TestPoll_ForbiddenRepoDoesNotFailPoll(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "/o/locked/") {
+			w.WriteHeader(http.StatusForbidden)
+			w.Write([]byte(`{"message":"Resource protected by organization SAML enforcement."}`))
+			return
+		}
+		w.Write([]byte(`{"workflow_runs":[{"id":1,"name":"CI","status":"in_progress"}]}`))
+	}))
+	defer srv.Close()
+	c := ghclient.NewForTest(srv.Client(), srv.URL+"/")
+	got, err := Poll(c, []discovery.Repo{
+		{FullName: "o/ok", Owner: "o", Name: "ok"},
+		{FullName: "o/locked", Owner: "o", Name: "locked"},
+	})
+	if err != nil {
+		t.Fatalf("a 403 on one repo must not fail the whole poll, got %v", err)
+	}
+	if len(got) != 1 || got[0].Repo != "o/ok" {
+		t.Errorf("want the accessible repo's run, got %+v", got)
+	}
+}

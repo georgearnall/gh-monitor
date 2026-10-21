@@ -91,18 +91,8 @@ func (c *Client) Get(path string, v any) error {
 		}
 		return json.NewDecoder(bytes.NewReader(cached.Body)).Decode(v)
 
-	case resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusTooManyRequests:
-		retry := parseRetryAfter(resp.Header.Get("Retry-After"))
-		body, _ := io.ReadAll(resp.Body)
-		return &RateLimitedError{
-			Status:     resp.StatusCode,
-			RetryAfter: retry,
-			Body:       string(body),
-		}
-
 	case resp.StatusCode >= 400:
-		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("HTTP %d %s: %s", resp.StatusCode, path, body)
+		return responseError(http.MethodGet, path, resp)
 	}
 
 	body, err := io.ReadAll(resp.Body)
@@ -169,17 +159,8 @@ func (c *Client) Patch(path string, body any) error {
 
 	c.recordRateLimit(resp)
 
-	if resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusTooManyRequests {
-		raw, _ := io.ReadAll(resp.Body)
-		return &RateLimitedError{
-			Status:     resp.StatusCode,
-			RetryAfter: parseRetryAfter(resp.Header.Get("Retry-After")),
-			Body:       string(raw),
-		}
-	}
 	if resp.StatusCode >= 400 {
-		raw, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("PATCH %s: HTTP %d: %s", path, resp.StatusCode, raw)
+		return responseError(http.MethodPatch, path, resp)
 	}
 	return nil
 }
@@ -204,22 +185,8 @@ func (c *Client) Delete(path string) error {
 
 	c.recordRateLimit(resp)
 
-	if resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusTooManyRequests {
-		raw, _ := io.ReadAll(resp.Body)
-		return &RateLimitedError{
-			Status:     resp.StatusCode,
-			RetryAfter: parseRetryAfter(resp.Header.Get("Retry-After")),
-			Body:       string(raw),
-		}
-	}
 	if resp.StatusCode >= 400 {
-		raw, _ := io.ReadAll(resp.Body)
-		return &HTTPError{
-			Method: http.MethodDelete,
-			Path:   path,
-			Status: resp.StatusCode,
-			Body:   string(raw),
-		}
+		return responseError(http.MethodDelete, path, resp)
 	}
 	return nil
 }
@@ -251,17 +218,8 @@ func (c *Client) GraphQL(query string, vars map[string]any, v any) error {
 
 	c.recordRateLimit(resp)
 
-	if resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusTooManyRequests {
-		raw, _ := io.ReadAll(resp.Body)
-		return &RateLimitedError{
-			Status:     resp.StatusCode,
-			RetryAfter: parseRetryAfter(resp.Header.Get("Retry-After")),
-			Body:       string(raw),
-		}
-	}
 	if resp.StatusCode >= 400 {
-		raw, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("graphql HTTP %d: %s", resp.StatusCode, raw)
+		return responseError(http.MethodPost, "graphql", resp)
 	}
 
 	var envelope struct {
@@ -318,17 +276,8 @@ func (c *Client) GraphQLBestEffort(query string, vars map[string]any, v any) err
 
 	c.recordRateLimit(resp)
 
-	if resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusTooManyRequests {
-		raw, _ := io.ReadAll(resp.Body)
-		return &RateLimitedError{
-			Status:     resp.StatusCode,
-			RetryAfter: parseRetryAfter(resp.Header.Get("Retry-After")),
-			Body:       string(raw),
-		}
-	}
 	if resp.StatusCode >= 400 {
-		raw, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("graphql HTTP %d: %s", resp.StatusCode, raw)
+		return responseError(http.MethodPost, "graphql", resp)
 	}
 
 	var envelope struct {
@@ -438,10 +387,42 @@ func (c *Client) recordRateLimit(resp *http.Response) {
 	}
 }
 
-// HTTPError carries the HTTP status of a failed REST call so callers
-// can distinguish retryable transient failures (5xx) from permanent
-// client errors (4xx). Currently produced by Delete; Get and Patch
-// still wrap with fmt.Errorf for backward compatibility.
+// responseError converts a >=400 response into *RateLimitedError when GitHub
+// is actually throttling us, or *HTTPError otherwise.
+//
+// A bare 403 is not a rate limit: GitHub also returns 403 for SAML/SSO
+// enforcement and missing permissions (e.g. Actions disabled for this token).
+// Treating those as rate limits used to freeze the whole runs panel and back
+// off polling whenever one monitored repo was inaccessible. GitHub's docs
+// identify primary limits by X-RateLimit-Remaining: 0 and secondary limits by
+// Retry-After or a "rate limit" message, so only those qualify.
+func responseError(method, path string, resp *http.Response) error {
+	raw, _ := io.ReadAll(resp.Body)
+	if isRateLimitResponse(resp, raw) {
+		return &RateLimitedError{
+			Status:     resp.StatusCode,
+			RetryAfter: parseRetryAfter(resp.Header.Get("Retry-After")),
+			Body:       string(raw),
+		}
+	}
+	return &HTTPError{Method: method, Path: path, Status: resp.StatusCode, Body: string(raw)}
+}
+
+func isRateLimitResponse(resp *http.Response, body []byte) bool {
+	switch resp.StatusCode {
+	case http.StatusTooManyRequests:
+		return true
+	case http.StatusForbidden:
+		return resp.Header.Get("Retry-After") != "" ||
+			resp.Header.Get("X-RateLimit-Remaining") == "0" ||
+			bytes.Contains(bytes.ToLower(body), []byte("rate limit"))
+	}
+	return false
+}
+
+// HTTPError carries the HTTP status of a failed REST or GraphQL call so
+// callers can distinguish retryable transient failures (5xx) from permanent
+// client errors (4xx).
 type HTTPError struct {
 	Method string
 	Path   string

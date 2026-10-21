@@ -516,3 +516,41 @@ func TestAsRateLimited_NotRateLimited(t *testing.T) {
 		t.Errorf("nil error misclassified")
 	}
 }
+
+func TestGet_403Classification(t *testing.T) {
+	cases := []struct {
+		name      string
+		headers   map[string]string
+		body      string
+		wantLimit bool
+	}{
+		{"sso enforcement", nil, `{"message":"Resource protected by organization SAML enforcement."}`, false},
+		{"permission denied", nil, `{"message":"Must have admin rights to Repository."}`, false},
+		{"primary limit exhausted", map[string]string{"X-RateLimit-Remaining": "0"}, `{"message":"API rate limit exceeded"}`, true},
+		{"secondary limit message only", nil, `{"message":"You have exceeded a secondary rate limit."}`, true},
+		{"retry-after", map[string]string{"Retry-After": "5"}, `{}`, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				for k, v := range tc.headers {
+					w.Header().Set(k, v)
+				}
+				w.WriteHeader(http.StatusForbidden)
+				fmt.Fprint(w, tc.body)
+			}))
+			defer srv.Close()
+			err := newTestClient(srv).Get("x", nil)
+			_, isLimit := AsRateLimited(err)
+			if isLimit != tc.wantLimit {
+				t.Fatalf("rate-limited = %v, want %v (err=%v)", isLimit, tc.wantLimit, err)
+			}
+			if !tc.wantLimit {
+				he, ok := AsHTTPError(err)
+				if !ok || he.Status != http.StatusForbidden {
+					t.Errorf("want *HTTPError with 403, got %T %v", err, err)
+				}
+			}
+		})
+	}
+}
