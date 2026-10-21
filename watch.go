@@ -90,10 +90,12 @@ var (
 	notifyNewNotification = notify.NewNotification
 )
 
-// etagMaxAge is how long an unused ETag cache entry survives. Well above the
-// slowest poll cadence (discovery every 5m, low-quota floor 2m), so only
-// paths that have genuinely stopped being polled are dropped.
-const etagMaxAge = time.Hour
+// etagMaxAge is how long an unused ETag cache entry survives: an hour, or
+// twice the discovery interval if that's longer. Well above every poll
+// cadence, so only paths that have genuinely stopped being polled are dropped.
+func (c watchConfig) etagMaxAge() time.Duration {
+	return max(time.Hour, 2*c.repoRefresh)
+}
 
 type pollResult struct {
 	Repos       []discovery.Repo
@@ -197,7 +199,7 @@ func runWatch(client *ghclient.Client, cfg watchConfig) {
 		case res := <-results:
 			refreshing = false
 			applyResult(st, &cfg, res)
-			client.PruneEtags(etagMaxAge)
+			client.PruneEtags(cfg.etagMaxAge())
 			st.EtagCache = client.Etags()
 			focused = pickFocus(st, focused)
 			render()
@@ -415,7 +417,7 @@ func runOnce(ctx context.Context, client *ghclient.Client, cfg watchConfig, st *
 		fmt.Fprintf(os.Stderr, "notif poll: %v\n", res.NotifErr)
 	}
 	applyResult(st, &cfg, res)
-	client.PruneEtags(etagMaxAge)
+	client.PruneEtags(cfg.etagMaxAge())
 	st.EtagCache = client.Etags()
 	renderFromState(st, cfg, false, focusTarget{}, "", "")
 	if err := st.Save(); err != nil {
