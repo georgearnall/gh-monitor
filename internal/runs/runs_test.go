@@ -151,3 +151,18 @@ func TestPoll_ForbiddenRepoDoesNotFailPoll(t *testing.T) {
 		t.Errorf("want the accessible repo's run, got %+v", got)
 	}
 }
+
+func TestPoll_AllReposFailingReturnsError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadGateway)
+	}))
+	defer srv.Close()
+	c := ghclient.NewForTest(srv.Client(), srv.URL+"/")
+	_, err := Poll(c, []discovery.Repo{{FullName: "o/a", Owner: "o", Name: "a"}, {FullName: "o/b", Owner: "o", Name: "b"}})
+	if err == nil {
+		t.Fatal("every repo failing must surface an error so the caller keeps its last view")
+	}
+	if _, ok := ghclient.AsRateLimited(err); ok {
+		t.Errorf("a 502 outage should not be reported as a rate limit: %v", err)
+	}
+}

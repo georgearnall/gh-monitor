@@ -64,12 +64,12 @@ func (r Run) IsBot() bool {
 
 type apiResp struct {
 	WorkflowRuns []struct {
-		ID         int64     `json:"id"`
-		Name       string    `json:"name"`
-		HeadBranch string    `json:"head_branch"`
-		Status     string    `json:"status"`
-		Conclusion string    `json:"conclusion"`
-		HTMLURL    string    `json:"html_url"`
+		ID         int64  `json:"id"`
+		Name       string `json:"name"`
+		HeadBranch string `json:"head_branch"`
+		Status     string `json:"status"`
+		Conclusion string `json:"conclusion"`
+		HTMLURL    string `json:"html_url"`
 		Actor      struct {
 			Login string `json:"login"`
 		} `json:"actor"`
@@ -82,12 +82,17 @@ const pollConcurrency = 8
 
 // Poll fetches the most recent workflow runs for each repo in parallel,
 // bounded to pollConcurrency simultaneous requests. The first rate-limit
-// response is surfaced so the watch loop can honour Retry-After.
+// response is surfaced so the watch loop can honour Retry-After. Other
+// per-repo failures are skipped, unless every repo failed (e.g. the network
+// is down): then the first error is returned so the caller keeps its last
+// good view instead of treating "no data" as "no runs".
 func Poll(client *ghclient.Client, repos []discovery.Repo) ([]Run, error) {
 	var (
-		mu    sync.Mutex
-		all   []Run
-		fatal error
+		mu        sync.Mutex
+		all       []Run
+		fatal     error
+		firstErr  error
+		succeeded int
 	)
 
 	g, _ := errgroup.WithContext(context.Background())
@@ -99,13 +104,14 @@ func Poll(client *ghclient.Client, repos []discovery.Repo) ([]Run, error) {
 			path := fmt.Sprintf("repos/%s/%s/actions/runs?per_page=10", r.Owner, r.Name)
 			var resp apiResp
 			if err := client.Get(path, &resp); err != nil {
-				if _, ok := ghclient.AsRateLimited(err); ok {
-					mu.Lock()
-					if fatal == nil {
-						fatal = err
-					}
-					mu.Unlock()
+				mu.Lock()
+				if _, ok := ghclient.AsRateLimited(err); ok && fatal == nil {
+					fatal = err
 				}
+				if firstErr == nil {
+					firstErr = fmt.Errorf("%s: %w", r.FullName, err)
+				}
+				mu.Unlock()
 				return nil
 			}
 			batch := make([]Run, 0, len(resp.WorkflowRuns))
@@ -125,11 +131,15 @@ func Poll(client *ghclient.Client, repos []discovery.Repo) ([]Run, error) {
 			}
 			mu.Lock()
 			all = append(all, batch...)
+			succeeded++
 			mu.Unlock()
 			return nil
 		})
 	}
 
 	_ = g.Wait()
+	if fatal == nil && succeeded == 0 && firstErr != nil {
+		fatal = firstErr
+	}
 	return all, fatal
 }
