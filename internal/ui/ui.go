@@ -687,6 +687,15 @@ func prStatusCell(p prs.PR, compact bool) *Cell {
 // runsRepoCol is the column index of REPO inside writeTable's rows.
 const runsRepoCol = 3
 
+// runsWorkflowCol is the column index of WORKFLOW inside writeTable's rows.
+// Names get up to workflowMax columns when the terminal has room, and are
+// cut back towards workflowMin before the REPO column starts shrinking.
+const (
+	runsWorkflowCol = 2
+	workflowMin     = 30
+	workflowMax     = 50
+)
+
 func writeTable(rs []runs.Run, focusedID string, tty bool, termWidth int, links bool, readIDs map[int64]bool) {
 	headers := []string{"  ", "STATUS", "WORKFLOW", "REPO", "BRANCH", "AGE"}
 	if links {
@@ -703,7 +712,7 @@ func writeTable(rs []runs.Run, focusedID string, tty bool, termWidth int, links 
 		row := []string{
 			cursor,
 			statusCell(r).Render(tty, dim),
-			truncate(r.WorkflowName, 30),
+			truncate(r.WorkflowName, workflowMax),
 			r.Repo,
 			truncate(r.Branch, 30),
 			ageString(r),
@@ -725,6 +734,18 @@ func writeTable(rs []runs.Run, focusedID string, tty bool, termWidth int, links 
 			}
 		}
 		t.addRowWithDetail(row, dim && tty, detail)
+	}
+	if termWidth > 0 {
+		all := [][]string{t.headers}
+		for _, r := range t.rows {
+			all = append(all, r.cells)
+		}
+		if over := tableWidth(all) - termWidth; over > 0 {
+			limit := max(workflowMin, columnWidths(all)[runsWorkflowCol]-over)
+			for i, r := range rs {
+				t.rows[i].cells[runsWorkflowCol] = truncate(r.WorkflowName, limit)
+			}
+		}
 	}
 	t.render()
 }

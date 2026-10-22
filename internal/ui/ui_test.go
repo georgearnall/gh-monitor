@@ -947,6 +947,48 @@ func TestWriteTable_DoesNotDimRecentCompletedRun(t *testing.T) {
 	}
 }
 
+func TestWriteTable_WorkflowColumnWidensWithRoom(t *testing.T) {
+	now := time.Now()
+	name := "Blue/Green - weight-change in prod (75%)" // 40 cols
+	rs := []runs.Run{{ID: 1, Repo: "trainline-private/IdentityServer", WorkflowName: name, Branch: "main", Status: "in_progress", CreatedAt: now, UpdatedAt: now}}
+
+	wide := captureStdout(t, func() { writeTable(rs, "", false, 200, false, nil) })
+	if !strings.Contains(wide, name) {
+		t.Errorf("wide terminal should show the full workflow name:\n%s", wide)
+	}
+	if !strings.Contains(wide, "trainline-private/IdentityServer") {
+		t.Errorf("repo should stay whole when there's room:\n%s", wide)
+	}
+
+	// Too narrow for the full name: the workflow shrinks first, but never
+	// below workflowMin, and the table fits.
+	narrow := captureStdout(t, func() { writeTable(rs, "", false, 100, false, nil) })
+	row := strings.Split(narrow, "\n")[1]
+	if strings.Contains(row, name) || !strings.Contains(row, "…") {
+		t.Errorf("narrow terminal should truncate the workflow name:\n%s", narrow)
+	}
+	if w := visibleWidth(row); w > 100 {
+		t.Errorf("row is %d cols, want <= 100:\n%s", w, narrow)
+	}
+	if !strings.Contains(row, "trainline-private/IdentityServer") {
+		t.Errorf("repo should stay whole while the workflow name can still shrink:\n%s", narrow)
+	}
+
+	// Narrower still: the workflow stops at workflowMin and the repo gives way.
+	narrower := captureStdout(t, func() { writeTable(rs, "", false, 95, false, nil) })
+	row = strings.Split(narrower, "\n")[1]
+	if !strings.Contains(row, truncate(name, workflowMin)+" ") || strings.Contains(row, "trainline-private/") {
+		t.Errorf("want workflow at %d cols and the repo shrunk:\n%s", workflowMin, narrower)
+	}
+
+	long := strings.Repeat("x", 70)
+	rs[0].WorkflowName = long
+	capped := captureStdout(t, func() { writeTable(rs, "", false, 0, false, nil) })
+	if !strings.Contains(capped, strings.Repeat("x", workflowMax-1)+"…") || strings.Contains(capped, strings.Repeat("x", workflowMax)) {
+		t.Errorf("workflow names cap at %d cols:\n%s", workflowMax, capped)
+	}
+}
+
 func TestWriteNotifsTable_UnreadGetsColoredLinkAndTickets_ReadDoesNot(t *testing.T) {
 	now := time.Now()
 	ns := []notifs.Notification{
