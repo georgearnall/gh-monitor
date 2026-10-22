@@ -1121,3 +1121,81 @@ func captureStdout(t *testing.T, fn func()) string {
 	os.Stdout = old
 	return <-done
 }
+
+func TestWriteTable_NoProgressLineWithoutProgress(t *testing.T) {
+	now := time.Now()
+	rs := []runs.Run{{ID: 1, Repo: "x/y", WorkflowName: "CI", Status: "in_progress", CreatedAt: now, UpdatedAt: now}}
+	out := captureStdout(t, func() { writeTable(rs, "", false, 0, false, nil) })
+	if strings.Contains(out, "└") || strings.Count(out, "\n") != 2 {
+		t.Errorf("want header + one row and no progress line:\n%s", out)
+	}
+}
+
+func TestWriteTable_ProgressLineUnderRun(t *testing.T) {
+	now := time.Now()
+	rs := []runs.Run{
+		{ID: 1, Repo: "x/y", WorkflowName: "Deploy", Status: "in_progress", CreatedAt: now, UpdatedAt: now,
+			Progress: &runs.Progress{JobsDone: 3, JobsTotal: 5, Job: "deploy-prod", Step: "Migrate DB"}},
+		{ID: 2, Repo: "x/y", WorkflowName: "CI", Status: "completed", Conclusion: "success", CreatedAt: now, UpdatedAt: now},
+	}
+	out := captureStdout(t, func() { writeTable(rs, "", false, 0, false, nil) })
+	lines := strings.Split(strings.TrimRight(out, "\n"), "\n")
+	if len(lines) != 4 {
+		t.Fatalf("want header, run, progress line, run; got %d lines:\n%s", len(lines), out)
+	}
+	if !strings.Contains(lines[1], "Deploy") || lines[2] != "    └ ▰▰▰▱▱ 3/5 deploy-prod › Migrate DB" || !strings.Contains(lines[3], "CI") {
+		t.Errorf("progress line not under its run:\n%s", out)
+	}
+	if strings.Contains(lines[0], "PROGRESS") {
+		t.Errorf("there is no PROGRESS column any more:\n%s", out)
+	}
+}
+
+func TestProgressLine(t *testing.T) {
+	active := func(p runs.Progress) runs.Run { return runs.Run{Status: "in_progress", Progress: &p} }
+	cases := []struct {
+		name string
+		r    runs.Run
+		want string // "" means nil
+	}{
+		{"no progress", runs.Run{Status: "in_progress"}, ""},
+		{"no jobs yet", active(runs.Progress{}), ""},
+		{"none done", active(runs.Progress{JobsTotal: 5, Job: "build"}), "▱▱▱▱▱ 0/5 build"},
+		{"partial", active(runs.Progress{JobsDone: 3, JobsTotal: 5, Job: "deploy", Step: "Push"}), "▰▰▰▱▱ 3/5 deploy › Push"},
+		{"rounds to nearest", active(runs.Progress{JobsDone: 1, JobsTotal: 3}), "▰▰▱▱▱ 1/3"},
+		{"first of many shows", active(runs.Progress{JobsDone: 1, JobsTotal: 8}), "▰▱▱▱▱ 1/8"},
+		{"never full until done", active(runs.Progress{JobsDone: 9, JobsTotal: 10}), "▰▰▰▰▱ 9/10"},
+		{"all done", active(runs.Progress{JobsDone: 4, JobsTotal: 4}), "▰▰▰▰▰ 4/4"},
+		{"parallel", active(runs.Progress{JobsTotal: 3, Job: "test (mac)", Step: "Run", ParallelJobs: 2}), "▱▱▱▱▱ 0/3 test (mac) › Run +2"},
+		{"failed", runs.Run{Status: "completed", Conclusion: "failure", Progress: &runs.Progress{FailedJob: "deploy-prod", FailedStep: "Migrate DB"}}, "failed at deploy-prod › Migrate DB"},
+		{"failed no job info", runs.Run{Status: "completed", Conclusion: "failure", Progress: &runs.Progress{}}, ""},
+		{"success", runs.Run{Status: "completed", Conclusion: "success", Progress: &runs.Progress{JobsDone: 2, JobsTotal: 2}}, ""},
+	}
+	for _, tc := range cases {
+		c := progressLine(tc.r, 0)
+		got := ""
+		if c != nil {
+			got = strings.TrimPrefix(c.Render(false, false), progressIndent)
+		}
+		if got != tc.want {
+			t.Errorf("%s: got %q, want %q", tc.name, got, tc.want)
+		}
+	}
+}
+
+func TestProgressLine_UsesFullWidthThenTruncates(t *testing.T) {
+	// Real reusable-workflow job names from a deploy pipeline.
+	r := runs.Run{Status: "in_progress", Progress: &runs.Progress{JobsDone: 1, JobsTotal: 8, ParallelJobs: 1,
+		Job: "dev: Deploy service / Deploy to dev", Step: "Configure AWS credentials"}}
+	wide := progressLine(r, 200).Render(false, false)
+	if want := progressIndent + "▰▱▱▱▱ 1/8 dev: Deploy service / Deploy to dev › Configure AWS credentials +1"; wide != want {
+		t.Errorf("wide terminal should show everything:\ngot  %q\nwant %q", wide, want)
+	}
+	narrow := progressLine(r, 60).Render(false, false)
+	if w := visibleWidth(narrow); w != 60 {
+		t.Errorf("narrow line is %d cols, want exactly 60: %q", w, narrow)
+	}
+	if !strings.HasSuffix(narrow, "… +1") {
+		t.Errorf("parallel suffix must survive truncation: %q", narrow)
+	}
+}

@@ -93,8 +93,9 @@ func (c *Cell) Render(tty, insideDim bool) string {
 // tableRow is one data row in a rendered panel. The repo column must be plain
 // text (no ANSI) so fitRepoColumn can measure and shrink it before styling.
 type tableRow struct {
-	cells []string
-	dim   bool // if true: wrap cells[1:] in ansiDim+ansiReset post-fit; skip styleRepoCell
+	cells  []string
+	dim    bool   // if true: wrap cells[1:] in ansiDim+ansiReset post-fit; skip styleRepoCell
+	detail string // optional pre-rendered line printed under the row, outside the column layout
 }
 
 // panelTable is the shared rendering pipeline for all three panels:
@@ -117,6 +118,10 @@ func (t *panelTable) addRow(cells []string, dim bool) {
 	t.rows = append(t.rows, tableRow{cells: cells, dim: dim})
 }
 
+func (t *panelTable) addRowWithDetail(cells []string, dim bool, detail string) {
+	t.rows = append(t.rows, tableRow{cells: cells, dim: dim, detail: detail})
+}
+
 func (t *panelTable) render() {
 	raw := make([][]string, 0, len(t.rows)+1)
 	raw = append(raw, t.headers)
@@ -135,7 +140,14 @@ func (t *panelTable) render() {
 			raw[i+1][t.repoColIdx] = styleRepoCell(raw[i+1][t.repoColIdx], t.tty)
 		}
 	}
-	printAligned(raw)
+	lines := alignedLines(raw)
+	pln(t.tty, lines[0])
+	for i, r := range t.rows {
+		pln(t.tty, lines[i+1])
+		if r.detail != "" {
+			pln(t.tty, r.detail)
+		}
+	}
 }
 
 type Snapshot struct {
@@ -705,7 +717,14 @@ func writeTable(rs []runs.Run, focusedID string, tty bool, termWidth int, links 
 			}
 			row = append(row, link)
 		}
-		t.addRow(row, dim && tty)
+		var detail string
+		if c := progressLine(r, termWidth); c != nil {
+			detail = c.Render(tty, dim && tty)
+			if dim && tty {
+				detail = ansiDim + detail + ansiReset
+			}
+		}
+		t.addRowWithDetail(row, dim && tty, detail)
 	}
 	t.render()
 }
@@ -851,10 +870,17 @@ func shrinkRepo(repo string, budget int) string {
 // so an in-place redraw doesn't leave dangling characters from a previous
 // longer line.
 func printAligned(rows [][]string) {
-	if len(rows) == 0 {
-		return
-	}
 	tty := isTTY(os.Stdout)
+	for _, l := range alignedLines(rows) {
+		pln(tty, l)
+	}
+}
+
+// alignedLines lays rows out in columns padded to the widest cell.
+func alignedLines(rows [][]string) []string {
+	if len(rows) == 0 {
+		return nil
+	}
 	cols := len(rows[0])
 	widths := make([]int, cols)
 	for _, row := range rows {
@@ -865,6 +891,7 @@ func printAligned(rows [][]string) {
 			}
 		}
 	}
+	out := make([]string, 0, len(rows))
 	var line strings.Builder
 	for _, row := range rows {
 		line.Reset()
@@ -878,8 +905,9 @@ func printAligned(rows [][]string) {
 				}
 			}
 		}
-		pln(tty, line.String())
+		out = append(out, line.String())
 	}
+	return out
 }
 
 var ansiRe = regexp.MustCompile("\x1b\\[[0-9;]*[a-zA-Z]|\x1b\\][^\x07\x1b]*(?:\x07|\x1b\\\\)")
@@ -963,6 +991,71 @@ func statusCell(r runs.Run) *Cell {
 		return c.Colored(ansiDim, "·").Plain(" " + r.Conclusion)
 	}
 	return c.Plain(r.Conclusion)
+}
+
+const progressBarCells = 5
+
+// progressIndent lines the progress line up under the STATUS column.
+const progressIndent = "    └ "
+
+// progressLine renders the line under a run: a bar, jobs done/total and the
+// current job › step for an active run, or where a failed run broke. The
+// job/step text is cut to fit termWidth (0 = unconstrained). Nil when
+// there's nothing to show.
+func progressLine(r runs.Run, termWidth int) *Cell {
+	p := r.Progress
+	if p == nil {
+		return nil
+	}
+	fit := func(used int, s string) string {
+		if termWidth <= 0 {
+			return s
+		}
+		return truncate(s, max(termWidth-used, 8))
+	}
+	if r.IsActive() {
+		if p.JobsTotal == 0 {
+			return nil
+		}
+		// Round to the nearest cell, but only fill the bar once every job
+		// is done.
+		filled := (p.JobsDone*progressBarCells + p.JobsTotal/2) / p.JobsTotal
+		if p.JobsDone < p.JobsTotal {
+			filled = min(filled, progressBarCells-1)
+		}
+		count := fmt.Sprintf(" %d/%d", p.JobsDone, p.JobsTotal)
+		c := NewCell().
+			Plain(progressIndent).
+			Colored(ansiYellow, strings.Repeat("▰", filled)).
+			Colored(ansiDim, strings.Repeat("▱", progressBarCells-filled)).
+			Plain(count)
+		var suffix string
+		if p.ParallelJobs > 0 {
+			suffix = fmt.Sprintf(" +%d", p.ParallelJobs)
+		}
+		if d := jobStep(p.Job, p.Step); d != "" {
+			used := visibleWidth(progressIndent) + progressBarCells + len(count) + 1 + len(suffix)
+			c.Plain(" " + fit(used, d))
+		}
+		if suffix != "" {
+			c.Colored(ansiDim, suffix)
+		}
+		return c
+	}
+	if r.IsFailure() && p.FailedJob != "" {
+		const label = "failed at"
+		used := visibleWidth(progressIndent) + len(label) + 1
+		return NewCell().Plain(progressIndent).Colored(ansiRed, label).Plain(" " + fit(used, jobStep(p.FailedJob, p.FailedStep)))
+	}
+	return nil
+}
+
+// jobStep joins a job and step name as "job › step", or just the job.
+func jobStep(job, step string) string {
+	if step == "" {
+		return job
+	}
+	return job + " › " + step
 }
 
 func ageString(r runs.Run) string {
