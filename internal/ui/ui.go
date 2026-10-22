@@ -1033,7 +1033,7 @@ func progressLine(r runs.Run, termWidth int) *Cell {
 		if p.ParallelJobs > 0 {
 			suffix = fmt.Sprintf(" +%d", p.ParallelJobs)
 		}
-		if d := jobStep(p.Job, p.Step); d != "" {
+		if d := runs.JobStep(p.Job, p.Step); d != "" {
 			used := visibleWidth(progressIndent) + progressBarCells + len(count) + 1 + len(suffix)
 			c.Plain(" " + fit(used, d))
 		}
@@ -1045,17 +1045,9 @@ func progressLine(r runs.Run, termWidth int) *Cell {
 	if r.IsFailure() && p.FailedJob != "" {
 		const label = "failed at"
 		used := visibleWidth(progressIndent) + len(label) + 1
-		return NewCell().Plain(progressIndent).Colored(ansiRed, label).Plain(" " + fit(used, jobStep(p.FailedJob, p.FailedStep)))
+		return NewCell().Plain(progressIndent).Colored(ansiRed, label).Plain(" " + fit(used, p.FailedAt()))
 	}
 	return nil
-}
-
-// jobStep joins a job and step name as "job › step", or just the job.
-func jobStep(job, step string) string {
-	if step == "" {
-		return job
-	}
-	return job + " › " + step
 }
 
 func ageString(r runs.Run) string {

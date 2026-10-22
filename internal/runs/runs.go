@@ -188,6 +188,22 @@ func FetchProgress(client *ghclient.Client, repo string, id int64) (*Progress, e
 	return summarise(resp.Jobs), nil
 }
 
+// FailedAt returns "job › step" for where a failed run broke, or "".
+func (p *Progress) FailedAt() string {
+	if p == nil {
+		return ""
+	}
+	return JobStep(p.FailedJob, p.FailedStep)
+}
+
+// JobStep joins a job and step name as "job › step", or just the job.
+func JobStep(job, step string) string {
+	if step == "" {
+		return job
+	}
+	return job + " › " + step
+}
+
 // stepLabel shortens the names GitHub generates for unnamed `uses:` steps,
 // "Run owner/repo/path@ref", to the action's own name ("path"'s last
 // segment). Steps with a real name, or unnamed `run:` scripts (which

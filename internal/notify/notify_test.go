@@ -39,3 +39,12 @@ func TestAppleString(t *testing.T) {
 		}
 	}
 }
+
+func TestFailureBody(t *testing.T) {
+	if got, want := failureBody("Deploy", "main", ""), "Deploy on main"; got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+	if got, want := failureBody("Deploy", "main", "deploy-prod › Migrate DB"), "Deploy on main · failed at deploy-prod › Migrate DB"; got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}

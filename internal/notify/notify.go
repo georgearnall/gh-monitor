@@ -14,11 +14,19 @@ import (
 // via an escape sequence — no fork, no system permission prompt. Otherwise we
 // fall back to `osascript` for macOS native notifications.
 //
+// failedAt is "job › step" when known, or "".
+//
 // No-op on Windows; see deliver.
-func Failure(repo, workflow, branch, url string) error {
-	title := "GHA failed: " + repo
+func Failure(repo, workflow, branch, failedAt, url string) error {
+	return deliver("GHA failed: "+repo, failureBody(workflow, branch, failedAt), url)
+}
+
+func failureBody(workflow, branch, failedAt string) string {
 	body := fmt.Sprintf("%s on %s", workflow, branch)
-	return deliver(title, body, url)
+	if failedAt != "" {
+		body += " · failed at " + failedAt
+	}
+	return body
 }
 
 // Comment delivers a desktop notification for a new top-level conversation

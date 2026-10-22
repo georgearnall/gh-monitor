@@ -148,7 +148,7 @@ func TestApplyResult_FailedBuildAlert_GatedByToggle(t *testing.T) {
 	origFailure := notifyFailure
 	defer func() { notifyFailure = origFailure }()
 	var calls int
-	notifyFailure = func(repo, workflow, branch, url string) error {
+	notifyFailure = func(repo, workflow, branch, failedAt, url string) error {
 		calls++
 		return nil
 	}
@@ -257,7 +257,7 @@ func TestApplyResult_NoNotify_SuppressesAllThreeAlertTypes(t *testing.T) {
 	origFailure, origComment, origGeneric := notifyFailure, notifyComment, notifyNewNotification
 	defer func() { notifyFailure, notifyComment, notifyNewNotification = origFailure, origComment, origGeneric }()
 	var failureCalls, commentCalls, genericCalls int
-	notifyFailure = func(repo, workflow, branch, url string) error { failureCalls++; return nil }
+	notifyFailure = func(repo, workflow, branch, failedAt, url string) error { failureCalls++; return nil }
 	notifyComment = func(repo string, prNumber int, prTitle, url string) error { commentCalls++; return nil }
 	notifyNewNotification = func(repo string, prNumber int, reason, title, url string) error { genericCalls++; return nil }
 
@@ -291,7 +291,7 @@ func TestApplyResult_FailedBuildAlert_OnlyViewersOwnRuns(t *testing.T) {
 	origFailure := notifyFailure
 	defer func() { notifyFailure = origFailure }()
 	var alerted []string
-	notifyFailure = func(repo, workflow, branch, url string) error {
+	notifyFailure = func(repo, workflow, branch, failedAt, url string) error {
 		alerted = append(alerted, url)
 		return nil
 	}
@@ -395,7 +395,7 @@ func TestApplyResult_MutedRepoHiddenEverywhereAndSilent(t *testing.T) {
 	origFailure, origGeneric := notifyFailure, notifyNewNotification
 	defer func() { notifyFailure, notifyNewNotification = origFailure, origGeneric }()
 	var alerts int
-	notifyFailure = func(_, _, _, _ string) error { alerts++; return nil }
+	notifyFailure = func(_, _, _, _, _ string) error { alerts++; return nil }
 	notifyNewNotification = func(_ string, _ int, _, _, _ string) error { alerts++; return nil }
 
 	st := isolateState(t)
@@ -538,7 +538,7 @@ func TestMuteThenUnmute_NoStaleFailureAlert(t *testing.T) {
 	origFailure := notifyFailure
 	defer func() { notifyFailure = origFailure }()
 	var alerts int
-	notifyFailure = func(_, _, _, _ string) error { alerts++; return nil }
+	notifyFailure = func(_, _, _, _, _ string) error { alerts++; return nil }
 
 	st := isolateState(t)
 	cfg := &watchConfig{muted: newRepoSet(nil)}
@@ -671,5 +671,24 @@ func TestAttachProgress_SkipsOthersCompletedAndBots(t *testing.T) {
 		if n := ps.count(id); n != 0 {
 			t.Errorf("run %d fetched %d times, want 0", id, n)
 		}
+	}
+}
+
+func TestApplyResult_FailureAlertIncludesFailedStep(t *testing.T) {
+	origFailure := notifyFailure
+	defer func() { notifyFailure = origFailure }()
+	var got []string
+	notifyFailure = func(_, _, _, failedAt, _ string) error {
+		got = append(got, failedAt)
+		return nil
+	}
+	st := isolateState(t)
+	st.ViewerLogin = "me"
+	cfg := &watchConfig{}
+	applyResult(st, cfg, pollResult{Runs: []runs.Run{{ID: 1, Status: "in_progress", ActorLogin: "me"}}})
+	applyResult(st, cfg, pollResult{Runs: []runs.Run{{ID: 1, Status: "completed", Conclusion: "failure", Repo: "x/y", ActorLogin: "me",
+		Progress: &runs.Progress{FailedJob: "deploy-prod", FailedStep: "Migrate DB"}}}})
+	if len(got) != 1 || got[0] != "deploy-prod › Migrate DB" {
+		t.Errorf("failedAt passed to alert = %q", got)
 	}
 }

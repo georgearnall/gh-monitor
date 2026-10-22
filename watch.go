@@ -600,7 +600,7 @@ func applyResult(st *state.State, cfg *watchConfig, res pollResult) {
 			viewer != "" && r.ActorLogin == viewer && !r.IsBot() && !st.MutedRepos[r.Repo] {
 			alerted := false
 			if st.FailedBuildAlertsEnabled() && !cfg.noNotify {
-				if err := notifyFailure(r.Repo, r.WorkflowName, r.Branch, r.URL); err != nil {
+				if err := notifyFailure(r.Repo, r.WorkflowName, r.Branch, r.Progress.FailedAt(), r.URL); err != nil {
 					fmt.Fprintf(os.Stderr, "notify: %v\n", err)
 				}
 				alerted = true
