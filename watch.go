@@ -7,6 +7,7 @@ import (
 	"os/signal"
 	"sort"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -46,6 +47,16 @@ type watchConfig struct {
 	// Discovery cache: populated by doRefresh, reused until repoRefresh elapses.
 	lastDiscovery time.Time
 	cachedRepos   []discovery.Repo
+
+	// Job/step progress per run ID, owned by the producer like the
+	// discovery cache. Replaced (never mutated) on each refresh so a
+	// by-value copy of cfg can't share it.
+	progressCache map[int64]progressEntry
+}
+
+type progressEntry struct {
+	p     *runs.Progress
+	final bool // fetched after the run completed, so it can't change
 }
 
 // repoSet is a copy-on-write set of repo names, safe to read from the
@@ -467,6 +478,10 @@ func doRefresh(ctx context.Context, client *ghclient.Client, cfg *watchConfig) p
 			return nil
 		}
 		polled, pollErr := runs.Poll(client, repos)
+		if pollErr == nil {
+			viewer, _ := client.Viewer()
+			attachProgress(client, cfg, polled, viewer)
+		}
 		res.Runs = polled
 		res.PollErr = pollErr
 		res.RunsPolled = true
@@ -508,6 +523,57 @@ func doRefresh(ctx context.Context, client *ghclient.Client, cfg *watchConfig) p
 	}
 	res.RateLimit = client.RateLimit()
 	return res
+}
+
+const progressConcurrency = 8
+
+// attachProgress sets Progress on the runs the panel will show that are
+// either still active or failed: one jobs call each. Completed runs are
+// fetched once and then served from cfg.progressCache; under low quota no
+// new fetches are made and cached values are reused.
+func attachProgress(client *ghclient.Client, cfg *watchConfig, rs []runs.Run, viewer string) {
+	want := map[int64]bool{}
+	for _, r := range ui.VisibleRows(rs, viewer) {
+		if r.IsActive() || r.IsFailure() {
+			want[r.ID] = true
+		}
+	}
+	rl := client.RateLimit()
+	lowQuota := rl.Limit > 0 && rl.Remaining < cfg.lowQuotaLimit
+
+	next := make(map[int64]progressEntry, len(want))
+	var mu sync.Mutex
+	g, _ := errgroup.WithContext(context.Background())
+	g.SetLimit(progressConcurrency)
+	for _, r := range rs {
+		if !want[r.ID] {
+			continue
+		}
+		cached, ok := cfg.progressCache[r.ID]
+		if ok {
+			next[r.ID] = cached
+		}
+		if (ok && cached.final) || lowQuota {
+			continue
+		}
+		g.Go(func() error {
+			p, err := runs.FetchProgress(client, r.Repo, r.ID)
+			if err != nil {
+				return nil // keep the cached value, if any
+			}
+			mu.Lock()
+			next[r.ID] = progressEntry{p: p, final: !r.IsActive()}
+			mu.Unlock()
+			return nil
+		})
+	}
+	_ = g.Wait()
+	for i := range rs {
+		if e, ok := next[rs[i].ID]; ok {
+			rs[i].Progress = e.p
+		}
+	}
+	cfg.progressCache = next
 }
 
 // applyResult updates state.Runs, fires notifications, and updates the cache

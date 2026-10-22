@@ -556,3 +556,120 @@ func TestMuteThenUnmute_NoStaleFailureAlert(t *testing.T) {
 		t.Errorf("failure that happened while muted alerted %d times on unmute", alerts)
 	}
 }
+
+// progressServer serves the jobs endpoint for every run, counting calls per
+// run ID. failing makes it 502; remaining sets X-RateLimit-Remaining.
+type progressServer struct {
+	calls     map[string]int
+	failing   atomic.Bool
+	remaining atomic.Int32
+	mu        chan struct{}
+}
+
+func newProgressServer(t *testing.T) (*progressServer, *ghclient.Client) {
+	t.Helper()
+	ps := &progressServer{calls: map[string]int{}, mu: make(chan struct{}, 1)}
+	ps.remaining.Store(5000)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-RateLimit-Limit", "5000")
+		w.Header().Set("X-RateLimit-Remaining", fmt.Sprint(ps.remaining.Load()))
+		ps.mu <- struct{}{}
+		ps.calls[r.URL.Path]++
+		<-ps.mu
+		if ps.failing.Load() {
+			w.WriteHeader(http.StatusBadGateway)
+			return
+		}
+		w.Write([]byte(`{"jobs":[{"name":"build","status":"completed","conclusion":"failure","steps":[{"name":"Compile","status":"completed","conclusion":"failure"}]},{"name":"deploy","status":"in_progress","steps":[{"name":"Push","status":"in_progress"}]}]}`))
+	}))
+	t.Cleanup(srv.Close)
+	return ps, ghclient.NewForTest(srv.Client(), srv.URL+"/")
+}
+
+func (ps *progressServer) count(id int64) int {
+	ps.mu <- struct{}{}
+	defer func() { <-ps.mu }()
+	return ps.calls[fmt.Sprintf("/repos/o/a/actions/runs/%d/jobs", id)]
+}
+
+func TestAttachProgress_ActiveRunGetsProgress(t *testing.T) {
+	ps, c := newProgressServer(t)
+	cfg := &watchConfig{lowQuotaLimit: 200}
+	rs := []runs.Run{{ID: 1, Repo: "o/a", Status: "in_progress", ActorLogin: "someone", UpdatedAt: time.Now()}}
+	attachProgress(c, cfg, rs, "me")
+	if rs[0].Progress == nil || rs[0].Progress.Job != "deploy" || rs[0].Progress.Step != "Push" {
+		t.Fatalf("progress = %+v", rs[0].Progress)
+	}
+	attachProgress(c, cfg, rs, "me")
+	if n := ps.count(1); n != 2 {
+		t.Errorf("active runs are refetched every poll: got %d calls, want 2", n)
+	}
+}
+
+func TestAttachProgress_FailedRunFetchedOnce(t *testing.T) {
+	ps, c := newProgressServer(t)
+	cfg := &watchConfig{lowQuotaLimit: 200}
+	mk := func() []runs.Run {
+		return []runs.Run{{ID: 2, Repo: "o/a", Status: "completed", Conclusion: "failure", ActorLogin: "me", UpdatedAt: time.Now()}}
+	}
+	rs := mk()
+	attachProgress(c, cfg, rs, "me")
+	rs = mk()
+	attachProgress(c, cfg, rs, "me")
+	if n := ps.count(2); n != 1 {
+		t.Errorf("completed run fetched %d times, want 1", n)
+	}
+	if rs[0].Progress == nil || rs[0].Progress.FailedStep != "Compile" {
+		t.Errorf("cached progress not attached: %+v", rs[0].Progress)
+	}
+}
+
+func TestAttachProgress_RunCompletingIsRefetched(t *testing.T) {
+	ps, c := newProgressServer(t)
+	cfg := &watchConfig{lowQuotaLimit: 200}
+	attachProgress(c, cfg, []runs.Run{{ID: 3, Repo: "o/a", Status: "in_progress", ActorLogin: "me", UpdatedAt: time.Now()}}, "me")
+	attachProgress(c, cfg, []runs.Run{{ID: 3, Repo: "o/a", Status: "completed", Conclusion: "failure", ActorLogin: "me", UpdatedAt: time.Now()}}, "me")
+	if n := ps.count(3); n != 2 {
+		t.Errorf("a run that just completed must be refetched for its final jobs: got %d calls", n)
+	}
+}
+
+func TestAttachProgress_ErrorKeepsPrevious(t *testing.T) {
+	ps, c := newProgressServer(t)
+	cfg := &watchConfig{lowQuotaLimit: 200}
+	attachProgress(c, cfg, []runs.Run{{ID: 1, Repo: "o/a", Status: "in_progress", UpdatedAt: time.Now()}}, "me")
+	ps.failing.Store(true)
+	rs := []runs.Run{{ID: 1, Repo: "o/a", Status: "in_progress", UpdatedAt: time.Now()}}
+	attachProgress(c, cfg, rs, "me")
+	if rs[0].Progress == nil || rs[0].Progress.Job != "deploy" {
+		t.Errorf("transient error must keep the last progress, got %+v", rs[0].Progress)
+	}
+}
+
+func TestAttachProgress_LowQuotaSkipsFetches(t *testing.T) {
+	ps, c := newProgressServer(t)
+	cfg := &watchConfig{lowQuotaLimit: 200}
+	ps.remaining.Store(100)
+	attachProgress(c, cfg, []runs.Run{{ID: 1, Repo: "o/a", Status: "in_progress", UpdatedAt: time.Now()}}, "me")
+	// That call recorded the low quota; the next must not fetch.
+	attachProgress(c, cfg, []runs.Run{{ID: 1, Repo: "o/a", Status: "in_progress", UpdatedAt: time.Now()}}, "me")
+	if n := ps.count(1); n != 1 {
+		t.Errorf("low quota should skip fetches: got %d calls, want 1", n)
+	}
+}
+
+func TestAttachProgress_SkipsOthersCompletedAndBots(t *testing.T) {
+	ps, c := newProgressServer(t)
+	cfg := &watchConfig{lowQuotaLimit: 200}
+	rs := []runs.Run{
+		{ID: 4, Repo: "o/a", Status: "completed", Conclusion: "failure", ActorLogin: "someone", UpdatedAt: time.Now()},
+		{ID: 5, Repo: "o/a", Status: "in_progress", ActorLogin: "renovate[bot]", UpdatedAt: time.Now()},
+		{ID: 6, Repo: "o/a", Status: "completed", Conclusion: "success", ActorLogin: "me", UpdatedAt: time.Now()},
+	}
+	attachProgress(c, cfg, rs, "me")
+	for _, id := range []int64{4, 5, 6} {
+		if n := ps.count(id); n != 0 {
+			t.Errorf("run %d fetched %d times, want 0", id, n)
+		}
+	}
+}
