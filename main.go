@@ -161,6 +161,7 @@ PANELS
   WORKFLOW RUNS  Up to 10 rows. Active runs always shown (any actor);
                  completed runs only if you triggered them in the last
                  48h. Renovate / Dependabot / Copilot runs are filtered.
+                 Runs finished over 30 minutes ago are greyed out.
                  A line under each active run shows jobs done/total
                  and the current job › step; failed runs show where
                  they broke.

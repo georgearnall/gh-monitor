@@ -687,6 +687,9 @@ func prStatusCell(p prs.PR, compact bool) *Cell {
 // runsRepoCol is the column index of REPO inside writeTable's rows.
 const runsRepoCol = 3
 
+// recentlyFinished is how long a finished run stays at full brightness.
+const recentlyFinished = 30 * time.Minute
+
 // runsWorkflowCol is the column index of WORKFLOW inside writeTable's rows.
 // Names get up to workflowMax columns when the terminal has room, and are
 // cut back towards workflowMin before the REPO column starts shrinking.
@@ -702,9 +705,10 @@ func writeTable(rs []runs.Run, focusedID string, tty bool, termWidth int, links 
 		headers = append(headers, "LINK")
 	}
 	t := newPanelTable(dimRow(headers, tty), runsRepoCol, termWidth, tty)
-	today := startOfToday()
 	for _, r := range rs {
-		dim := (!r.IsActive() && r.UpdatedAt.Before(today)) || readIDs[r.ID]
+		// In-flight and just-finished runs are shown at full brightness;
+		// older ones are context. Status glyph colours survive the dim.
+		dim := (!r.IsActive() && time.Since(r.UpdatedAt) >= recentlyFinished) || readIDs[r.ID]
 		cursor := "  "
 		if focusedID != "" && strconv.FormatInt(r.ID, 10) == focusedID {
 			cursor = color(ansiYellow, "▶", tty) + " "
@@ -958,7 +962,7 @@ const maxVisibleRuns = 10
 // VisibleRows filters runs for the workflow table:
 //   - All currently-active runs are kept (any actor).
 //   - Completed runs triggered by the viewer are kept for runsWindow (48h);
-//     runs from before today are dimmed by writeTable, older ones drop off.
+//     writeTable dims them 30 minutes after they finish, older ones drop off.
 //   - Anything else drops as soon as it finishes.
 //
 // Result is sorted by UpdatedAt desc (newest first) then truncated to
@@ -1086,11 +1090,6 @@ func ageString(r runs.Run) string {
 		return fmt.Sprintf("%dh", int(d.Hours()))
 	}
 	return fmt.Sprintf("%dd", int(d.Hours()/24))
-}
-
-func startOfToday() time.Time {
-	now := time.Now()
-	return time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
 }
 
 // truncate returns s cut to at most n terminal columns, ending in "…" when

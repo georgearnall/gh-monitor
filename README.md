@@ -181,7 +181,10 @@ first:
 - Active runs (queued / in_progress / waiting) regardless of who
   triggered them.
 - Completed runs only if **you** triggered them and they finished within
-  the last 48 hours. Runs from before today are dimmed.
+  the last 48 hours.
+- Active runs, and runs that finished in the last 30 minutes, are shown
+  at full brightness. Older finished runs are greyed out, keeping the
+  colour of their ✓ / ✗.
 - Bot runs are dropped entirely. Renovate, Dependabot, the Copilot coding
   agent, and Copilot review workflows are filtered by actor / branch
   prefix / workflow name.

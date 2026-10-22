@@ -898,20 +898,20 @@ func TestWriteTable_LinkUsesPaleBlue(t *testing.T) {
 	}
 }
 
-func TestWriteTable_DimsOldCompletedRun(t *testing.T) {
-	// A run completed 2 days ago is before startOfToday() so should be dimmed.
-	old := time.Now().AddDate(0, 0, -2)
+func TestWriteTable_DimsCompletedRun(t *testing.T) {
+	// A run that finished more than 30 minutes ago is dimmed.
+	old := time.Now().Add(-31 * time.Minute)
 	rs := []runs.Run{
 		{ID: 1, Repo: "x/y", WorkflowName: "CI", Status: "completed", Conclusion: "success", URL: "u", CreatedAt: old, UpdatedAt: old},
 	}
 	out := captureStdout(t, func() { writeTable(rs, "", true, 300, true, nil) })
 	// Row-level dim wraps the status cell: ansiDim immediately precedes the colour code.
 	if !strings.Contains(out, ansiDim+ansiGreen) {
-		t.Errorf("old completed run status cell should be wrapped in dim+colour; output:\n%q", out)
+		t.Errorf("completed run status cell should be wrapped in dim+colour; output:\n%q", out)
 	}
 	// Dimmed rows use plain hyperlink, not coloredHyperlink (no pale blue).
 	if strings.Contains(out, ansiPaleBlue) {
-		t.Errorf("old completed run link should not use pale blue (would break dim wrap); output:\n%q", out)
+		t.Errorf("completed run link should not use pale blue (would break dim wrap); output:\n%q", out)
 	}
 }
 
@@ -931,19 +931,29 @@ func TestWriteTable_DoesNotDimActiveRun(t *testing.T) {
 	}
 }
 
-func TestWriteTable_DoesNotDimRecentCompletedRun(t *testing.T) {
-	now := time.Now()
+func TestWriteTable_DoesNotDimRecentlyFinishedRun(t *testing.T) {
+	recent := time.Now().Add(-29 * time.Minute)
 	rs := []runs.Run{
-		{ID: 1, Repo: "x/y", WorkflowName: "CI", Status: "completed", Conclusion: "success", URL: "u", CreatedAt: now, UpdatedAt: now},
+		{ID: 1, Repo: "x/y", WorkflowName: "CI", Status: "completed", Conclusion: "success", URL: "u", CreatedAt: recent, UpdatedAt: recent},
 	}
 	out := captureStdout(t, func() { writeTable(rs, "", true, 300, true, nil) })
-	// Recent run: coloured link (pale blue).
-	if !strings.Contains(out, ansiPaleBlue) {
-		t.Errorf("recent completed run should have pale blue link; output:\n%q", out)
+	if strings.Contains(out, ansiDim+ansiGreen) || !strings.Contains(out, ansiPaleBlue) {
+		t.Errorf("a run finished under 30 minutes ago should stay bright; output:\n%q", out)
 	}
-	// Recent completed run status: green check closed with full reset, not dim.
-	if strings.Contains(out, ansiDim+ansiGreen) {
-		t.Errorf("recent completed run status should not be wrapped in dim; output:\n%q", out)
+}
+
+func TestWriteTable_DimsFailedRunButKeepsRed(t *testing.T) {
+	now := time.Now().Add(-time.Hour)
+	rs := []runs.Run{
+		{ID: 1, Repo: "x/y", WorkflowName: "CI", Status: "completed", Conclusion: "failure", URL: "u", CreatedAt: now, UpdatedAt: now,
+			Progress: &runs.Progress{FailedJob: "test", FailedStep: "Run"}},
+	}
+	out := captureStdout(t, func() { writeTable(rs, "", true, 300, true, nil) })
+	if !strings.Contains(out, ansiDim+ansiRed+"✗") {
+		t.Errorf("failed run should be dimmed with its red cross kept; output:\n%q", out)
+	}
+	if !strings.Contains(out, ansiDim+"    └ "+ansiRed+"failed at") {
+		t.Errorf("failed-at line should be dimmed with red label kept; output:\n%q", out)
 	}
 }
 
