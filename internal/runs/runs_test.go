@@ -166,3 +166,112 @@ func TestPoll_AllReposFailingReturnsError(t *testing.T) {
 		t.Errorf("a 502 outage should not be reported as a rate limit: %v", err)
 	}
 }
+
+func jobsServer(t *testing.T, body string) *ghclient.Client {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/repos/o/a/actions/runs/7/jobs" || r.URL.Query().Get("filter") != "latest" {
+			t.Errorf("unexpected request: %s", r.URL)
+		}
+		fmt.Fprint(w, body)
+	}))
+	t.Cleanup(srv.Close)
+	return ghclient.NewForTest(srv.Client(), srv.URL+"/")
+}
+
+func TestFetchProgress_SequentialPipeline(t *testing.T) {
+	c := jobsServer(t, `{"jobs":[
+		{"name":"build","status":"completed","conclusion":"success","steps":[{"name":"Compile","status":"completed","conclusion":"success"}]},
+		{"name":"deploy-staging","status":"completed","conclusion":"skipped"},
+		{"name":"deploy-prod","status":"in_progress","started_at":"2026-05-18T10:00:00Z","steps":[
+			{"name":"Checkout","status":"completed","conclusion":"success"},
+			{"name":"Migrate DB","status":"in_progress"},
+			{"name":"Smoke test","status":"queued"}]},
+		{"name":"notify","status":"queued"}
+	]}`)
+	p, err := FetchProgress(c, "o/a", 7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := Progress{JobsDone: 2, JobsTotal: 4, Job: "deploy-prod", Step: "Migrate DB"}
+	if *p != want {
+		t.Errorf("got %+v, want %+v", *p, want)
+	}
+}
+
+func TestFetchProgress_ParallelJobsPicksEarliest(t *testing.T) {
+	c := jobsServer(t, `{"jobs":[
+		{"name":"test (linux)","status":"in_progress","started_at":"2026-05-18T10:02:00Z","steps":[{"name":"Run","status":"in_progress"}]},
+		{"name":"test (mac)","status":"in_progress","started_at":"2026-05-18T10:01:00Z","steps":[{"name":"Setup","status":"completed"},{"name":"Install","status":"queued"}]},
+		{"name":"test (win)","status":"in_progress","started_at":"2026-05-18T10:03:00Z"}
+	]}`)
+	p, err := FetchProgress(c, "o/a", 7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Matrix legs count as separate jobs; with no step in progress the last
+	// completed one is shown.
+	want := Progress{JobsTotal: 3, Job: "test (mac)", Step: "Setup", ParallelJobs: 2}
+	if *p != want {
+		t.Errorf("got %+v, want %+v", *p, want)
+	}
+}
+
+func TestFetchProgress_QueuedOnly(t *testing.T) {
+	c := jobsServer(t, `{"jobs":[{"name":"build","status":"queued"}]}`)
+	p, err := FetchProgress(c, "o/a", 7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := (Progress{JobsTotal: 1}); *p != want {
+		t.Errorf("got %+v, want %+v", *p, want)
+	}
+}
+
+func TestFetchProgress_FailedStep(t *testing.T) {
+	c := jobsServer(t, `{"jobs":[
+		{"name":"build","status":"completed","conclusion":"success"},
+		{"name":"deploy-prod","status":"completed","conclusion":"failure","steps":[
+			{"name":"Checkout","status":"completed","conclusion":"success"},
+			{"name":"Migrate DB","status":"completed","conclusion":"failure"},
+			{"name":"Smoke test","status":"completed","conclusion":"skipped"}]}
+	]}`)
+	p, err := FetchProgress(c, "o/a", 7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := Progress{JobsDone: 2, JobsTotal: 2, FailedJob: "deploy-prod", FailedStep: "Migrate DB"}
+	if *p != want {
+		t.Errorf("got %+v, want %+v", *p, want)
+	}
+}
+
+func TestFetchProgress_HTTPError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadGateway)
+	}))
+	defer srv.Close()
+	c := ghclient.NewForTest(srv.Client(), srv.URL+"/")
+	if _, err := FetchProgress(c, "o/a", 7); err == nil {
+		t.Fatal("want error on 502")
+	}
+}
+
+func TestStepLabel(t *testing.T) {
+	cases := map[string]string{
+		"Run trainline-private/trainline-actions/run-static-scan-dotnet@run-static-scan-dotnet/v1": "run-static-scan-dotnet",
+		"Run actions/checkout@v4":          "checkout",
+		"Post Run actions/checkout@v4":     "Post checkout",
+		"Run docker/build-push-action@abc": "build-push-action",
+		"Run dotnet build":                 "Run dotnet build",
+		"Run ./build.sh":                   "Run ./build.sh",
+		"Run echo foo@bar":                 "Run echo foo@bar",
+		"Configure AWS credentials":        "Configure AWS credentials",
+		"Set up job":                       "Set up job",
+	}
+	for in, want := range cases {
+		if got := stepLabel(in); got != want {
+			t.Errorf("stepLabel(%q) = %q, want %q", in, got, want)
+		}
+	}
+}

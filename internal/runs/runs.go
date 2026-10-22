@@ -23,6 +23,19 @@ type Run struct {
 	ActorLogin   string    `json:"actor_login"`
 	CreatedAt    time.Time `json:"created_at"`
 	UpdatedAt    time.Time `json:"updated_at"`
+	Progress     *Progress `json:"progress,omitempty"`
+}
+
+// Progress summarises a run's jobs: how many have finished, which job and
+// step are running now, and where a failed run broke.
+type Progress struct {
+	JobsDone     int    `json:"jobs_done"`
+	JobsTotal    int    `json:"jobs_total"`
+	Job          string `json:"job,omitempty"`           // earliest-started in-progress job
+	Step         string `json:"step,omitempty"`          // its current (or last completed) step
+	ParallelJobs int    `json:"parallel_jobs,omitempty"` // other jobs in progress alongside Job
+	FailedJob    string `json:"failed_job,omitempty"`
+	FailedStep   string `json:"failed_step,omitempty"`
 }
 
 // IsActive reports whether the run is still in-flight (not yet conclusive).
@@ -36,7 +49,11 @@ func (r Run) IsActive() bool {
 
 // IsFailure reports whether the run reached a notification-worthy failure state.
 func (r Run) IsFailure() bool {
-	switch r.Conclusion {
+	return isFailureConclusion(r.Conclusion)
+}
+
+func isFailureConclusion(c string) bool {
+	switch c {
 	case "failure", "timed_out", "startup_failure":
 		return true
 	}
@@ -142,4 +159,97 @@ func Poll(client *ghclient.Client, repos []discovery.Repo) ([]Run, error) {
 		fatal = firstErr
 	}
 	return all, fatal
+}
+
+type jobsResp struct {
+	Jobs []job `json:"jobs"`
+}
+
+type job struct {
+	Name       string    `json:"name"`
+	Status     string    `json:"status"`
+	Conclusion string    `json:"conclusion"`
+	StartedAt  time.Time `json:"started_at"`
+	Steps      []struct {
+		Name       string `json:"name"`
+		Status     string `json:"status"`
+		Conclusion string `json:"conclusion"`
+	} `json:"steps"`
+}
+
+// FetchProgress fetches the latest attempt's jobs for one run and
+// summarises them. repo is "owner/name".
+func FetchProgress(client *ghclient.Client, repo string, id int64) (*Progress, error) {
+	path := fmt.Sprintf("repos/%s/actions/runs/%d/jobs?filter=latest&per_page=100", repo, id)
+	var resp jobsResp
+	if err := client.Get(path, &resp); err != nil {
+		return nil, err
+	}
+	return summarise(resp.Jobs), nil
+}
+
+// stepLabel shortens the names GitHub generates for unnamed `uses:` steps,
+// "Run owner/repo/path@ref", to the action's own name ("path"'s last
+// segment). Steps with a real name, or unnamed `run:` scripts (which
+// contain spaces), are returned unchanged.
+func stepLabel(name string) string {
+	for _, prefix := range []string{"Run ", "Post Run "} {
+		ref, ok := strings.CutPrefix(name, prefix)
+		if !ok || strings.ContainsAny(ref, " \t") {
+			continue
+		}
+		action, _, hasRef := strings.Cut(ref, "@")
+		if !hasRef || !strings.Contains(action, "/") {
+			continue
+		}
+		label := action[strings.LastIndex(action, "/")+1:]
+		if prefix == "Post Run " {
+			label = "Post " + label
+		}
+		return label
+	}
+	return name
+}
+
+func summarise(jobs []job) *Progress {
+	p := &Progress{JobsTotal: len(jobs)}
+	var current *job
+	for i := range jobs {
+		j := &jobs[i]
+		switch j.Status {
+		case "completed":
+			p.JobsDone++
+			if p.FailedJob == "" && isFailureConclusion(j.Conclusion) {
+				p.FailedJob = j.Name
+				for _, s := range j.Steps {
+					if isFailureConclusion(s.Conclusion) {
+						p.FailedStep = stepLabel(s.Name)
+						break
+					}
+				}
+			}
+		case "in_progress":
+			if current == nil {
+				current = j
+			} else {
+				p.ParallelJobs++
+				if j.StartedAt.Before(current.StartedAt) {
+					current = j
+				}
+			}
+		}
+	}
+	if current != nil {
+		p.Job = current.Name
+		for _, s := range current.Steps {
+			if s.Status == "in_progress" {
+				p.Step = stepLabel(s.Name)
+				break
+			}
+			if s.Status == "completed" {
+				p.Step = stepLabel(s.Name)
+			}
+		}
+	}
+	return p
 }
