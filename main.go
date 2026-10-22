@@ -161,6 +161,9 @@ PANELS
   WORKFLOW RUNS  Up to 10 rows. Active runs always shown (any actor);
                  completed runs only if you triggered them in the last
                  48h. Renovate / Dependabot / Copilot runs are filtered.
+                 A line under each active run shows jobs done/total
+                 and the current job › step; failed runs show where
+                 they broke.
                  Muted repos are hidden from all three panels.
 
 DISCOVERY
@@ -182,8 +185,9 @@ RATE LIMITS
   Conditional GETs use If-None-Match; 304 responses do not count
   against the 5000/hr REST budget. Concurrent in-flight requests are
   bounded to 8. The poll interval rises to at least 2m when remaining
-  budget drops below 500. Rate-limit responses honour Retry-After; other
-  403s (e.g. SSO enforcement on one repo) only skip that repo.
+  budget drops below 500, and run progress stops fetching. Rate-limit
+  responses honour Retry-After; other 403s (e.g. SSO enforcement on one
+  repo) only skip that repo.
 
 AUTHENTICATION
   Reuses your gh CLI auth (run 'gh auth login' if you haven't). The
