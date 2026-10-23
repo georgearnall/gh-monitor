@@ -541,7 +541,14 @@ func attachProgress(client *ghclient.Client, cfg *watchConfig, rs []runs.Run, vi
 	rl := client.RateLimit()
 	lowQuota := rl.Limit > 0 && rl.Remaining < cfg.lowQuotaLimit
 
+	// Seed every cached entry before any fetch starts: workers write to
+	// next under mu, so the loop below must not touch it at all.
 	next := make(map[int64]progressEntry, len(want))
+	for id := range want {
+		if cached, ok := cfg.progressCache[id]; ok {
+			next[id] = cached
+		}
+	}
 	var mu sync.Mutex
 	g, _ := errgroup.WithContext(context.Background())
 	g.SetLimit(progressConcurrency)
@@ -549,11 +556,7 @@ func attachProgress(client *ghclient.Client, cfg *watchConfig, rs []runs.Run, vi
 		if !want[r.ID] {
 			continue
 		}
-		cached, ok := cfg.progressCache[r.ID]
-		if ok {
-			next[r.ID] = cached
-		}
-		if (ok && cached.final) || lowQuota {
+		if cached, ok := cfg.progressCache[r.ID]; (ok && cached.final) || lowQuota {
 			continue
 		}
 		g.Go(func() error {

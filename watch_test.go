@@ -692,3 +692,17 @@ func TestApplyResult_FailureAlertIncludesFailedStep(t *testing.T) {
 		t.Errorf("failedAt passed to alert = %q", got)
 	}
 }
+
+func TestAttachProgress_ManyCachedRunsNoRace(t *testing.T) {
+	_, c := newProgressServer(t)
+	cfg := &watchConfig{lowQuotaLimit: 200}
+	var rs []runs.Run
+	for i := int64(1); i <= 10; i++ {
+		rs = append(rs, runs.Run{ID: i, Repo: "o/a", Status: "in_progress", UpdatedAt: time.Now()})
+	}
+	// More runs than progressConcurrency: once workers are in flight, later
+	// iterations must not touch the shared map while copying the cache.
+	for range 3 {
+		attachProgress(c, cfg, append([]runs.Run(nil), rs...), "me")
+	}
+}
