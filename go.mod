@@ -5,7 +5,7 @@ go 1.26.3
 require (
 	github.com/cli/go-gh/v2 v2.13.0
 	github.com/rivo/uniseg v0.4.7
-	golang.org/x/sync v0.20.0
+	golang.org/x/sync v0.24.0
 	golang.org/x/term v0.30.0
 )
 
