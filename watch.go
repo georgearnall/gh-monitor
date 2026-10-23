@@ -1,12 +1,14 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"os"
 	"os/signal"
 	"sort"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -42,17 +44,37 @@ type watchConfig struct {
 	// muted mirrors state.MutedRepos for the producer goroutine, which must
 	// not read State directly. The main loop republishes it on every change.
 	muted *repoSet
+	// dismissedRuns mirrors state.DismissedRuns the same way, so progress
+	// is fetched for the runs the panel actually shows.
+	dismissedRuns *syncSet[int64]
 
 	// Discovery cache: populated by doRefresh, reused until repoRefresh elapses.
 	lastDiscovery time.Time
 	cachedRepos   []discovery.Repo
+
+	// Job/step progress per run ID, owned by the producer like the
+	// discovery cache. Replaced (never mutated) on each refresh so a
+	// by-value copy of cfg can't share it.
+	progressCache map[int64]progressEntry
+	// No new progress fetches before this time: set when a jobs request
+	// is rate limited, from its Retry-After.
+	progressPausedUntil time.Time
 }
 
-// repoSet is a copy-on-write set of repo names, safe to read from the
-// producer goroutine while the main loop replaces it.
-type repoSet struct {
-	p atomic.Pointer[map[string]bool]
+type progressEntry struct {
+	p       *runs.Progress
+	attempt int  // run attempt the jobs belong to; a re-run invalidates the entry
+	final   bool // fetched after the attempt completed, so it can't change
 }
+
+// syncSet is a copy-on-write set, safe to read from the producer goroutine
+// while the main loop replaces it.
+type syncSet[K comparable] struct {
+	p atomic.Pointer[map[K]bool]
+}
+
+// repoSet is a set of repo names ("owner/name").
+type repoSet = syncSet[string]
 
 func newRepoSet(m map[string]bool) *repoSet {
 	s := &repoSet{}
@@ -60,7 +82,13 @@ func newRepoSet(m map[string]bool) *repoSet {
 	return s
 }
 
-func (s *repoSet) Load() map[string]bool {
+func newRunSet(m map[int64]bool) *syncSet[int64] {
+	s := &syncSet[int64]{}
+	s.Store(m)
+	return s
+}
+
+func (s *syncSet[K]) Load() map[K]bool {
 	if s == nil {
 		return nil
 	}
@@ -70,8 +98,8 @@ func (s *repoSet) Load() map[string]bool {
 	return nil
 }
 
-func (s *repoSet) Store(m map[string]bool) {
-	c := make(map[string]bool, len(m))
+func (s *syncSet[K]) Store(m map[K]bool) {
+	c := make(map[K]bool, len(m))
 	for k, v := range m {
 		if v {
 			c[k] = true
@@ -106,7 +134,8 @@ type pollResult struct {
 	ViewerLogin string
 	RateLimit   ghclient.RateLimit
 	PollErr     error
-	RunsPolled  bool // runs.Poll ran against a repo list; Runs is authoritative
+	RunsPolled  bool  // runs.Poll ran against a repo list; Runs is authoritative
+	ProgressErr error // a rate limit hit while fetching run progress; Runs is still good
 	PRErr       error
 	NotifErr    error
 	DiscErr     error
@@ -122,6 +151,7 @@ func runWatch(client *ghclient.Client, cfg watchConfig) {
 	}
 	client.SetEtags(st.EtagCache)
 	cfg.muted = newRepoSet(st.MutedRepos)
+	cfg.dismissedRuns = newRunSet(dismissedRunSet(st))
 
 	if cfg.once {
 		runOnce(ctx, client, cfg, st)
@@ -206,7 +236,7 @@ func runWatch(client *ghclient.Client, cfg watchConfig) {
 			if err := st.Save(); err != nil {
 				fmt.Fprintf(os.Stderr, "save state: %v\n", err)
 			}
-			next := cfg.nextInterval(activeCount(st.LastView), res.RateLimit, res.PollErr)
+			next := cfg.nextInterval(activeCount(st.LastView), res.RateLimit, cmp.Or(res.PollErr, res.ProgressErr))
 			if nextTimer != nil {
 				nextTimer.Stop()
 			}
@@ -467,6 +497,10 @@ func doRefresh(ctx context.Context, client *ghclient.Client, cfg *watchConfig) p
 			return nil
 		}
 		polled, pollErr := runs.Poll(client, repos)
+		if pollErr == nil {
+			viewer, _ := client.Viewer()
+			res.ProgressErr = attachProgress(client, cfg, polled, viewer)
+		}
 		res.Runs = polled
 		res.PollErr = pollErr
 		res.RunsPolled = true
@@ -510,6 +544,103 @@ func doRefresh(ctx context.Context, client *ghclient.Client, cfg *watchConfig) p
 	return res
 }
 
+const progressConcurrency = 8
+
+func dismissedRunSet(st *state.State) map[int64]bool {
+	m := make(map[int64]bool, len(st.DismissedRuns))
+	for id := range st.DismissedRuns {
+		m[id] = true
+	}
+	return m
+}
+
+// attachProgress sets Progress on the runs the panel will show that are
+// either still active or failed: one jobs call each. Completed runs are
+// fetched once and then served from cfg.progressCache; under low quota no
+// new fetches are made and cached values are reused. A rate-limited jobs
+// request pauses further fetches until its Retry-After and is returned so
+// the caller can back off too.
+func attachProgress(client *ghclient.Client, cfg *watchConfig, rs []runs.Run, viewer string) error {
+	// Pick from the same rows the panel will show: applyResult drops
+	// dismissed runs before VisibleRows caps the list.
+	dismissed := cfg.dismissedRuns.Load()
+	shown := make([]runs.Run, 0, len(rs))
+	for _, r := range rs {
+		if !dismissed[r.ID] {
+			shown = append(shown, r)
+		}
+	}
+	want := map[int64]bool{}
+	for _, r := range ui.VisibleRows(shown, viewer) {
+		if r.IsActive() || r.IsFailure() {
+			want[r.ID] = true
+		}
+	}
+	rl := client.RateLimit()
+	skipFetch := (rl.Limit > 0 && rl.Remaining < cfg.lowQuotaLimit) || time.Now().Before(cfg.progressPausedUntil)
+
+	// Seed every cached entry before any fetch starts: workers write to
+	// next under mu, so the loop below must not touch it at all. Entries
+	// are kept for every polled run, not just the visible ones, so a run
+	// briefly pushed out of the panel doesn't need fetching again.
+	next := make(map[int64]progressEntry, len(want))
+	for _, r := range rs {
+		if cached, ok := cfg.progressCache[r.ID]; ok && cached.attempt == r.RunAttempt {
+			next[r.ID] = cached
+		}
+	}
+	var (
+		mu      sync.Mutex
+		limited *ghclient.RateLimitedError
+	)
+	g, _ := errgroup.WithContext(context.Background())
+	g.SetLimit(progressConcurrency)
+	for _, r := range rs {
+		if !want[r.ID] {
+			continue
+		}
+		cached, ok := cfg.progressCache[r.ID]
+		if (ok && cached.final && cached.attempt == r.RunAttempt) || skipFetch {
+			continue
+		}
+		g.Go(func() error {
+			mu.Lock()
+			stop := limited != nil
+			mu.Unlock()
+			if stop {
+				return nil
+			}
+			p, err := runs.FetchProgress(client, r.Repo, r.ID)
+			if err != nil {
+				if rl, ok := ghclient.AsRateLimited(err); ok {
+					mu.Lock()
+					if limited == nil {
+						limited = rl
+					}
+					mu.Unlock()
+				}
+				return nil // keep the cached value, if any
+			}
+			mu.Lock()
+			next[r.ID] = progressEntry{p: p, attempt: r.RunAttempt, final: !r.IsActive() && !p.Partial}
+			mu.Unlock()
+			return nil
+		})
+	}
+	_ = g.Wait()
+	for i := range rs {
+		if e, ok := next[rs[i].ID]; ok {
+			rs[i].Progress = e.p
+		}
+	}
+	cfg.progressCache = next
+	if limited != nil {
+		cfg.progressPausedUntil = time.Now().Add(max(limited.RetryAfter, cfg.lowQuotaFloor))
+		return limited
+	}
+	return nil
+}
+
 // applyResult updates state.Runs, fires notifications, and updates the cache
 // snapshot fields used for fast startup next time.
 func applyResult(st *state.State, cfg *watchConfig, res pollResult) {
@@ -534,7 +665,7 @@ func applyResult(st *state.State, cfg *watchConfig, res pollResult) {
 			viewer != "" && r.ActorLogin == viewer && !r.IsBot() && !st.MutedRepos[r.Repo] {
 			alerted := false
 			if st.FailedBuildAlertsEnabled() && !cfg.noNotify {
-				if err := notifyFailure(r.Repo, r.WorkflowName, r.Branch, r.URL); err != nil {
+				if err := notifyFailure(r.Repo, r.WorkflowName, r.Branch, r.Progress.FailedAt(), r.URL); err != nil {
 					fmt.Fprintf(os.Stderr, "notify: %v\n", err)
 				}
 				alerted = true
@@ -550,6 +681,9 @@ func applyResult(st *state.State, cfg *watchConfig, res pollResult) {
 	// (and keep the stale data visible) rather than blanking everything.
 	if res.RunsPolled && res.PollErr == nil {
 		st.PruneRunDismissals(seen, 60*time.Second)
+		if cfg.dismissedRuns != nil {
+			cfg.dismissedRuns.Store(dismissedRunSet(st))
+		}
 		st.PruneReadRuns(seen, 60*time.Second)
 		filtered := make([]runs.Run, 0, len(res.Runs))
 		for _, r := range res.Runs {

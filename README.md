@@ -20,7 +20,10 @@ PULL REQUESTS
 
 WORKFLOW RUNS
     STATUS         WORKFLOW   REPO                  BRANCH    AGE  LINK
-    ● in_progress  Build      acme/payments         main      2m   open ↗
+    ● in_progress  Deploy     acme/payments         main      2m   open ↗
+    └ ▰▰▱▱▱ 3/8 stg: Deploy service / Deploy to stg › Configure AWS credentials +1
+    ✗ failure      Build      acme/checkout         feat/tx   1h   open ↗
+    └ failed at test › Run unit tests
 
 polled 11:44:53 · 20 repos · 3 notifs · 2 PRs · rate limit 4823/5000 · next poll in 30s
 [↑↓] move  [↵] open  [m] read  [d] dismiss  [x] mute repo  [t] ticket  [g] terminal  [r] refresh  [?] config  [q] quit
@@ -42,7 +45,8 @@ polled 11:44:53 · 20 repos · 3 notifs · 2 PRs · rate limit 4823/5000 · next
 - **Polls in parallel** with per-call ETag conditional GETs. Most cycles
   cost a handful of rate-limit units against the 5000/hr budget.
 - **Desktop notification** when one of **your own** workflow runs fails
-  (other people's and bot runs never alert), plus optional alerts for new
+  (other people's and bot runs never alert), naming the job and step that
+  failed, plus optional alerts for new
   GitHub notifications and comments on your PRs. Delivered via OSC 9
   (Ghostty / iTerm2) or `osascript` (other macOS terminals). Toggle each
   category in the config pane (`?`). Not supported on Windows (no-op
@@ -177,10 +181,20 @@ first:
 - Active runs (queued / in_progress / waiting) regardless of who
   triggered them.
 - Completed runs only if **you** triggered them and they finished within
-  the last 48 hours. Runs from before today are dimmed.
+  the last 48 hours.
+- Active runs, and runs that finished in the last 30 minutes, are shown
+  at full brightness. Older finished runs are greyed out, keeping the
+  colour of their ✓ / ✗.
 - Bot runs are dropped entirely. Renovate, Dependabot, the Copilot coding
   agent, and Copilot review workflows are filtered by actor / branch
   prefix / workflow name.
+
+Active runs get a progress line underneath: a bar, jobs finished / total
+(skipped jobs count as finished) and the current `job › step`, with `+N`
+when more jobs are running in parallel. Failed runs get
+`failed at job › step` instead. The line uses the full terminal width and
+is only cut short when it would overflow. It costs one jobs request per active
+run on each poll; a finished run's jobs are fetched once and cached.
 
 Muted repos are hidden from all three panels.
 
@@ -236,6 +250,9 @@ Conservative by design:
   `X-RateLimit-Remaining: 0` or a rate-limit message) honour
   `Retry-After`. Other 403s, such as SAML/SSO enforcement or missing
   Actions access on one repo, only skip that repo.
+- Below the same 500 threshold, or while a rate-limited jobs request's
+  `Retry-After` runs, run progress stops fetching and shows its last
+  known value. That `Retry-After` also delays the next poll.
 - The footer always shows current `X-RateLimit-Remaining/Limit`.
 
 ## Known limitations
@@ -246,6 +263,12 @@ Conservative by design:
 - Background errors (mark-read failures, desktop alert errors, state save
   errors) are printed to stderr, which draws over the TUI instead of
   using the footer.
+- Progress reads the first 100 jobs of a run. For bigger runs the total
+  is still right, but the current or failed job may be missed, and the
+  run is refetched every poll rather than cached.
+- The progress total counts the jobs GitHub has created so far. Jobs
+  gated behind `needs:` or reusable workflows may only be counted once
+  they're queued, so the total can grow mid-run.
 - Telling a lone Esc apart from an escape sequence relies on the terminal
   sending each sequence in one write; over a very slow link an arrow key
   can occasionally be read as Esc followed by text.

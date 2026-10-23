@@ -148,7 +148,7 @@ func TestApplyResult_FailedBuildAlert_GatedByToggle(t *testing.T) {
 	origFailure := notifyFailure
 	defer func() { notifyFailure = origFailure }()
 	var calls int
-	notifyFailure = func(repo, workflow, branch, url string) error {
+	notifyFailure = func(repo, workflow, branch, failedAt, url string) error {
 		calls++
 		return nil
 	}
@@ -257,7 +257,7 @@ func TestApplyResult_NoNotify_SuppressesAllThreeAlertTypes(t *testing.T) {
 	origFailure, origComment, origGeneric := notifyFailure, notifyComment, notifyNewNotification
 	defer func() { notifyFailure, notifyComment, notifyNewNotification = origFailure, origComment, origGeneric }()
 	var failureCalls, commentCalls, genericCalls int
-	notifyFailure = func(repo, workflow, branch, url string) error { failureCalls++; return nil }
+	notifyFailure = func(repo, workflow, branch, failedAt, url string) error { failureCalls++; return nil }
 	notifyComment = func(repo string, prNumber int, prTitle, url string) error { commentCalls++; return nil }
 	notifyNewNotification = func(repo string, prNumber int, reason, title, url string) error { genericCalls++; return nil }
 
@@ -291,7 +291,7 @@ func TestApplyResult_FailedBuildAlert_OnlyViewersOwnRuns(t *testing.T) {
 	origFailure := notifyFailure
 	defer func() { notifyFailure = origFailure }()
 	var alerted []string
-	notifyFailure = func(repo, workflow, branch, url string) error {
+	notifyFailure = func(repo, workflow, branch, failedAt, url string) error {
 		alerted = append(alerted, url)
 		return nil
 	}
@@ -395,7 +395,7 @@ func TestApplyResult_MutedRepoHiddenEverywhereAndSilent(t *testing.T) {
 	origFailure, origGeneric := notifyFailure, notifyNewNotification
 	defer func() { notifyFailure, notifyNewNotification = origFailure, origGeneric }()
 	var alerts int
-	notifyFailure = func(_, _, _, _ string) error { alerts++; return nil }
+	notifyFailure = func(_, _, _, _, _ string) error { alerts++; return nil }
 	notifyNewNotification = func(_ string, _ int, _, _, _ string) error { alerts++; return nil }
 
 	st := isolateState(t)
@@ -538,7 +538,7 @@ func TestMuteThenUnmute_NoStaleFailureAlert(t *testing.T) {
 	origFailure := notifyFailure
 	defer func() { notifyFailure = origFailure }()
 	var alerts int
-	notifyFailure = func(_, _, _, _ string) error { alerts++; return nil }
+	notifyFailure = func(_, _, _, _, _ string) error { alerts++; return nil }
 
 	st := isolateState(t)
 	cfg := &watchConfig{muted: newRepoSet(nil)}
@@ -554,5 +554,290 @@ func TestMuteThenUnmute_NoStaleFailureAlert(t *testing.T) {
 	applyResult(st, cfg, pollResult{Runs: []runs.Run{done}, RunsPolled: true, ViewerLogin: "me"})
 	if alerts != 0 {
 		t.Errorf("failure that happened while muted alerted %d times on unmute", alerts)
+	}
+}
+
+// progressServer serves the jobs endpoint for every run, counting calls per
+// run ID. failing makes it 502; remaining sets X-RateLimit-Remaining.
+type progressServer struct {
+	calls     map[string]int
+	failing   atomic.Bool
+	remaining atomic.Int32
+	mu        chan struct{}
+}
+
+func newProgressServer(t *testing.T) (*progressServer, *ghclient.Client) {
+	t.Helper()
+	ps := &progressServer{calls: map[string]int{}, mu: make(chan struct{}, 1)}
+	ps.remaining.Store(5000)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-RateLimit-Limit", "5000")
+		w.Header().Set("X-RateLimit-Remaining", fmt.Sprint(ps.remaining.Load()))
+		ps.mu <- struct{}{}
+		ps.calls[r.URL.Path]++
+		<-ps.mu
+		if ps.failing.Load() {
+			w.WriteHeader(http.StatusBadGateway)
+			return
+		}
+		w.Write([]byte(`{"jobs":[{"name":"build","status":"completed","conclusion":"failure","steps":[{"name":"Compile","status":"completed","conclusion":"failure"}]},{"name":"deploy","status":"in_progress","steps":[{"name":"Push","status":"in_progress"}]}]}`))
+	}))
+	t.Cleanup(srv.Close)
+	return ps, ghclient.NewForTest(srv.Client(), srv.URL+"/")
+}
+
+func (ps *progressServer) count(id int64) int {
+	ps.mu <- struct{}{}
+	defer func() { <-ps.mu }()
+	return ps.calls[fmt.Sprintf("/repos/o/a/actions/runs/%d/jobs", id)]
+}
+
+func TestAttachProgress_ActiveRunGetsProgress(t *testing.T) {
+	ps, c := newProgressServer(t)
+	cfg := &watchConfig{lowQuotaLimit: 200}
+	rs := []runs.Run{{ID: 1, Repo: "o/a", Status: "in_progress", ActorLogin: "someone", UpdatedAt: time.Now()}}
+	attachProgress(c, cfg, rs, "me")
+	if rs[0].Progress == nil || rs[0].Progress.Job != "deploy" || rs[0].Progress.Step != "Push" {
+		t.Fatalf("progress = %+v", rs[0].Progress)
+	}
+	attachProgress(c, cfg, rs, "me")
+	if n := ps.count(1); n != 2 {
+		t.Errorf("active runs are refetched every poll: got %d calls, want 2", n)
+	}
+}
+
+func TestAttachProgress_FailedRunFetchedOnce(t *testing.T) {
+	ps, c := newProgressServer(t)
+	cfg := &watchConfig{lowQuotaLimit: 200}
+	mk := func() []runs.Run {
+		return []runs.Run{{ID: 2, Repo: "o/a", Status: "completed", Conclusion: "failure", ActorLogin: "me", UpdatedAt: time.Now()}}
+	}
+	rs := mk()
+	attachProgress(c, cfg, rs, "me")
+	rs = mk()
+	attachProgress(c, cfg, rs, "me")
+	if n := ps.count(2); n != 1 {
+		t.Errorf("completed run fetched %d times, want 1", n)
+	}
+	if rs[0].Progress == nil || rs[0].Progress.FailedStep != "Compile" {
+		t.Errorf("cached progress not attached: %+v", rs[0].Progress)
+	}
+}
+
+func TestAttachProgress_RunCompletingIsRefetched(t *testing.T) {
+	ps, c := newProgressServer(t)
+	cfg := &watchConfig{lowQuotaLimit: 200}
+	attachProgress(c, cfg, []runs.Run{{ID: 3, Repo: "o/a", Status: "in_progress", ActorLogin: "me", UpdatedAt: time.Now()}}, "me")
+	attachProgress(c, cfg, []runs.Run{{ID: 3, Repo: "o/a", Status: "completed", Conclusion: "failure", ActorLogin: "me", UpdatedAt: time.Now()}}, "me")
+	if n := ps.count(3); n != 2 {
+		t.Errorf("a run that just completed must be refetched for its final jobs: got %d calls", n)
+	}
+}
+
+func TestAttachProgress_ErrorKeepsPrevious(t *testing.T) {
+	ps, c := newProgressServer(t)
+	cfg := &watchConfig{lowQuotaLimit: 200}
+	attachProgress(c, cfg, []runs.Run{{ID: 1, Repo: "o/a", Status: "in_progress", UpdatedAt: time.Now()}}, "me")
+	ps.failing.Store(true)
+	rs := []runs.Run{{ID: 1, Repo: "o/a", Status: "in_progress", UpdatedAt: time.Now()}}
+	attachProgress(c, cfg, rs, "me")
+	if rs[0].Progress == nil || rs[0].Progress.Job != "deploy" {
+		t.Errorf("transient error must keep the last progress, got %+v", rs[0].Progress)
+	}
+}
+
+func TestAttachProgress_LowQuotaSkipsFetches(t *testing.T) {
+	ps, c := newProgressServer(t)
+	cfg := &watchConfig{lowQuotaLimit: 200}
+	ps.remaining.Store(100)
+	attachProgress(c, cfg, []runs.Run{{ID: 1, Repo: "o/a", Status: "in_progress", UpdatedAt: time.Now()}}, "me")
+	// That call recorded the low quota; the next must not fetch.
+	attachProgress(c, cfg, []runs.Run{{ID: 1, Repo: "o/a", Status: "in_progress", UpdatedAt: time.Now()}}, "me")
+	if n := ps.count(1); n != 1 {
+		t.Errorf("low quota should skip fetches: got %d calls, want 1", n)
+	}
+}
+
+func TestAttachProgress_SkipsOthersCompletedAndBots(t *testing.T) {
+	ps, c := newProgressServer(t)
+	cfg := &watchConfig{lowQuotaLimit: 200}
+	rs := []runs.Run{
+		{ID: 4, Repo: "o/a", Status: "completed", Conclusion: "failure", ActorLogin: "someone", UpdatedAt: time.Now()},
+		{ID: 5, Repo: "o/a", Status: "in_progress", ActorLogin: "renovate[bot]", UpdatedAt: time.Now()},
+		{ID: 6, Repo: "o/a", Status: "completed", Conclusion: "success", ActorLogin: "me", UpdatedAt: time.Now()},
+	}
+	attachProgress(c, cfg, rs, "me")
+	for _, id := range []int64{4, 5, 6} {
+		if n := ps.count(id); n != 0 {
+			t.Errorf("run %d fetched %d times, want 0", id, n)
+		}
+	}
+}
+
+func TestApplyResult_FailureAlertIncludesFailedStep(t *testing.T) {
+	origFailure := notifyFailure
+	defer func() { notifyFailure = origFailure }()
+	var got []string
+	notifyFailure = func(_, _, _, failedAt, _ string) error {
+		got = append(got, failedAt)
+		return nil
+	}
+	st := isolateState(t)
+	st.ViewerLogin = "me"
+	cfg := &watchConfig{}
+	applyResult(st, cfg, pollResult{Runs: []runs.Run{{ID: 1, Status: "in_progress", ActorLogin: "me"}}})
+	applyResult(st, cfg, pollResult{Runs: []runs.Run{{ID: 1, Status: "completed", Conclusion: "failure", Repo: "x/y", ActorLogin: "me",
+		Progress: &runs.Progress{FailedJob: "deploy-prod", FailedStep: "Migrate DB"}}}})
+	if len(got) != 1 || got[0] != "deploy-prod › Migrate DB" {
+		t.Errorf("failedAt passed to alert = %q", got)
+	}
+}
+
+func TestAttachProgress_ManyCachedRunsNoRace(t *testing.T) {
+	_, c := newProgressServer(t)
+	cfg := &watchConfig{lowQuotaLimit: 200}
+	var rs []runs.Run
+	for i := int64(1); i <= 10; i++ {
+		rs = append(rs, runs.Run{ID: i, Repo: "o/a", Status: "in_progress", UpdatedAt: time.Now()})
+	}
+	// More runs than progressConcurrency: once workers are in flight, later
+	// iterations must not touch the shared map while copying the cache.
+	for range 3 {
+		attachProgress(c, cfg, append([]runs.Run(nil), rs...), "me")
+	}
+}
+
+func TestAttachProgress_RerunRefetchesFinalRun(t *testing.T) {
+	ps, c := newProgressServer(t)
+	cfg := &watchConfig{lowQuotaLimit: 200}
+	failed := runs.Run{ID: 7, Repo: "o/a", Status: "completed", Conclusion: "failure", ActorLogin: "me", UpdatedAt: time.Now(), RunAttempt: 1}
+	attachProgress(c, cfg, []runs.Run{failed}, "me")
+
+	// Re-running keeps the ID and bumps the attempt; the cached failure
+	// from attempt 1 must not be reused or shown.
+	ps.failing.Store(true)
+	rerun := runs.Run{ID: 7, Repo: "o/a", Status: "in_progress", ActorLogin: "me", UpdatedAt: time.Now(), RunAttempt: 2}
+	rs := []runs.Run{rerun}
+	attachProgress(c, cfg, rs, "me")
+	if n := ps.count(7); n != 2 {
+		t.Errorf("re-run should be refetched: got %d calls, want 2", n)
+	}
+	if rs[0].Progress != nil {
+		t.Errorf("attempt 1's progress must not be shown for attempt 2: %+v", rs[0].Progress)
+	}
+}
+
+func TestAttachProgress_DismissedRunsDontTakeSlots(t *testing.T) {
+	ps, c := newProgressServer(t)
+	cfg := &watchConfig{lowQuotaLimit: 200, dismissedRuns: newRunSet(map[int64]bool{1: true})}
+	now := time.Now()
+	var rs []runs.Run
+	// 11 active runs, newest first. The panel caps at 10 after dropping the
+	// dismissed run 1, so it shows 2..11, and those are what get progress.
+	for i := int64(1); i <= 11; i++ {
+		rs = append(rs, runs.Run{ID: i, Repo: "o/a", Status: "in_progress", UpdatedAt: now.Add(-time.Duration(i) * time.Minute)})
+	}
+	attachProgress(c, cfg, rs, "me")
+	if n := ps.count(1); n != 0 {
+		t.Errorf("dismissed run fetched %d times, want 0", n)
+	}
+	if n := ps.count(11); n != 1 {
+		t.Errorf("oldest shown run fetched %d times, want 1", n)
+	}
+}
+
+func TestDismissFocusedRun_UpdatesProducerSet(t *testing.T) {
+	st := isolateState(t)
+	st.LastView = []runs.Run{{ID: 5, Repo: "o/a", Status: "in_progress", UpdatedAt: time.Now()}}
+	cfg := &watchConfig{dismissedRuns: newRunSet(nil)}
+	dismissFocusedRun(st, cfg, focusTarget{Panel: "runs", ID: "5"})
+	if !cfg.dismissedRuns.Load()[5] {
+		t.Error("dismissing a run must publish it to the producer's set")
+	}
+}
+
+func TestAttachProgress_RateLimitPausesFetches(t *testing.T) {
+	var calls atomic.Int32
+	var limited atomic.Bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		if limited.Load() {
+			w.Header().Set("Retry-After", "120")
+			w.WriteHeader(http.StatusTooManyRequests)
+			return
+		}
+		w.Write([]byte(`{"jobs":[{"name":"deploy","status":"in_progress"}]}`))
+	}))
+	defer srv.Close()
+	c := ghclient.NewForTest(srv.Client(), srv.URL+"/")
+	cfg := &watchConfig{lowQuotaLimit: 200, lowQuotaFloor: 2 * time.Minute, baseInterval: time.Minute, activeInterval: 20 * time.Second}
+	mk := func() []runs.Run { return []runs.Run{{ID: 1, Repo: "o/a", Status: "in_progress", UpdatedAt: time.Now()}} }
+
+	if err := attachProgress(c, cfg, mk(), "me"); err != nil {
+		t.Fatalf("first pass: %v", err)
+	}
+	limited.Store(true)
+	rs := mk()
+	err := attachProgress(c, cfg, rs, "me")
+	if _, ok := ghclient.AsRateLimited(err); !ok {
+		t.Fatalf("want the rate limit returned, got %v", err)
+	}
+	if rs[0].Progress == nil || rs[0].Progress.Job != "deploy" {
+		t.Errorf("rate limit must keep the cached progress, got %+v", rs[0].Progress)
+	}
+	if d := cfg.nextInterval(1, ghclient.RateLimit{}, err); d < 120*time.Second {
+		t.Errorf("next poll in %s, want at least the 120s Retry-After", d)
+	}
+
+	before := calls.Load()
+	limited.Store(false)
+	rs = mk()
+	if err := attachProgress(c, cfg, rs, "me"); err != nil {
+		t.Fatalf("paused pass: %v", err)
+	}
+	if calls.Load() != before {
+		t.Error("no progress fetches should be made during the cooldown")
+	}
+	if rs[0].Progress == nil {
+		t.Error("cached progress should still show during the cooldown")
+	}
+}
+
+func TestApplyResult_PrunedDismissalReachesProducer(t *testing.T) {
+	st := isolateState(t)
+	st.DismissedRuns[9] = time.Now().Add(-2 * time.Minute)
+	cfg := &watchConfig{dismissedRuns: newRunSet(dismissedRunSet(st))}
+	// Run 9 is gone from a successful poll, so its old dismissal is pruned.
+	applyResult(st, cfg, pollResult{RunsPolled: true, Runs: []runs.Run{{ID: 1, Status: "in_progress"}}})
+	if st.IsRunDismissed(9) {
+		t.Fatal("precondition: dismissal should have been pruned from state")
+	}
+	if cfg.dismissedRuns.Load()[9] {
+		t.Error("the producer still excludes a run whose dismissal was pruned")
+	}
+}
+
+func TestAttachProgress_KeepsCacheForRunsPushedOutOfView(t *testing.T) {
+	ps, c := newProgressServer(t)
+	cfg := &watchConfig{lowQuotaLimit: 200}
+	now := time.Now()
+	failed := runs.Run{ID: 100, Repo: "o/a", Status: "completed", Conclusion: "failure", ActorLogin: "me", UpdatedAt: now.Add(-time.Hour)}
+	attachProgress(c, cfg, []runs.Run{failed}, "me")
+
+	// Ten newer active runs push the failed run out of the visible rows.
+	busy := []runs.Run{failed}
+	for i := int64(1); i <= 10; i++ {
+		busy = append(busy, runs.Run{ID: i, Repo: "o/a", Status: "in_progress", UpdatedAt: now})
+	}
+	attachProgress(c, cfg, busy, "me")
+
+	// Back in view: served from cache, not refetched.
+	rs := []runs.Run{failed}
+	attachProgress(c, cfg, rs, "me")
+	if n := ps.count(100); n != 1 {
+		t.Errorf("failed run fetched %d times, want 1", n)
+	}
+	if rs[0].Progress == nil || rs[0].Progress.FailedStep != "Compile" {
+		t.Errorf("cached failure location lost: %+v", rs[0].Progress)
 	}
 }

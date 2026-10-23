@@ -898,20 +898,20 @@ func TestWriteTable_LinkUsesPaleBlue(t *testing.T) {
 	}
 }
 
-func TestWriteTable_DimsOldCompletedRun(t *testing.T) {
-	// A run completed 2 days ago is before startOfToday() so should be dimmed.
-	old := time.Now().AddDate(0, 0, -2)
+func TestWriteTable_DimsCompletedRun(t *testing.T) {
+	// A run that finished more than 30 minutes ago is dimmed.
+	old := time.Now().Add(-31 * time.Minute)
 	rs := []runs.Run{
 		{ID: 1, Repo: "x/y", WorkflowName: "CI", Status: "completed", Conclusion: "success", URL: "u", CreatedAt: old, UpdatedAt: old},
 	}
 	out := captureStdout(t, func() { writeTable(rs, "", true, 300, true, nil) })
 	// Row-level dim wraps the status cell: ansiDim immediately precedes the colour code.
 	if !strings.Contains(out, ansiDim+ansiGreen) {
-		t.Errorf("old completed run status cell should be wrapped in dim+colour; output:\n%q", out)
+		t.Errorf("completed run status cell should be wrapped in dim+colour; output:\n%q", out)
 	}
 	// Dimmed rows use plain hyperlink, not coloredHyperlink (no pale blue).
 	if strings.Contains(out, ansiPaleBlue) {
-		t.Errorf("old completed run link should not use pale blue (would break dim wrap); output:\n%q", out)
+		t.Errorf("completed run link should not use pale blue (would break dim wrap); output:\n%q", out)
 	}
 }
 
@@ -931,19 +931,71 @@ func TestWriteTable_DoesNotDimActiveRun(t *testing.T) {
 	}
 }
 
-func TestWriteTable_DoesNotDimRecentCompletedRun(t *testing.T) {
-	now := time.Now()
+func TestWriteTable_DoesNotDimRecentlyFinishedRun(t *testing.T) {
+	recent := time.Now().Add(-29 * time.Minute)
 	rs := []runs.Run{
-		{ID: 1, Repo: "x/y", WorkflowName: "CI", Status: "completed", Conclusion: "success", URL: "u", CreatedAt: now, UpdatedAt: now},
+		{ID: 1, Repo: "x/y", WorkflowName: "CI", Status: "completed", Conclusion: "success", URL: "u", CreatedAt: recent, UpdatedAt: recent},
 	}
 	out := captureStdout(t, func() { writeTable(rs, "", true, 300, true, nil) })
-	// Recent run: coloured link (pale blue).
-	if !strings.Contains(out, ansiPaleBlue) {
-		t.Errorf("recent completed run should have pale blue link; output:\n%q", out)
+	if strings.Contains(out, ansiDim+ansiGreen) || !strings.Contains(out, ansiPaleBlue) {
+		t.Errorf("a run finished under 30 minutes ago should stay bright; output:\n%q", out)
 	}
-	// Recent completed run status: green check closed with full reset, not dim.
-	if strings.Contains(out, ansiDim+ansiGreen) {
-		t.Errorf("recent completed run status should not be wrapped in dim; output:\n%q", out)
+}
+
+func TestWriteTable_DimsFailedRunButKeepsRed(t *testing.T) {
+	now := time.Now().Add(-time.Hour)
+	rs := []runs.Run{
+		{ID: 1, Repo: "x/y", WorkflowName: "CI", Status: "completed", Conclusion: "failure", URL: "u", CreatedAt: now, UpdatedAt: now,
+			Progress: &runs.Progress{FailedJob: "test", FailedStep: "Run"}},
+	}
+	out := captureStdout(t, func() { writeTable(rs, "", true, 300, true, nil) })
+	if !strings.Contains(out, ansiDim+ansiRed+"✗") {
+		t.Errorf("failed run should be dimmed with its red cross kept; output:\n%q", out)
+	}
+	if !strings.Contains(out, ansiDim+"    └ "+ansiRed+"failed at") {
+		t.Errorf("failed-at line should be dimmed with red label kept; output:\n%q", out)
+	}
+}
+
+func TestWriteTable_WorkflowColumnWidensWithRoom(t *testing.T) {
+	now := time.Now()
+	name := "Blue/Green - weight-change in prod (75%)" // 40 cols
+	rs := []runs.Run{{ID: 1, Repo: "trainline-private/IdentityServer", WorkflowName: name, Branch: "main", Status: "in_progress", CreatedAt: now, UpdatedAt: now}}
+
+	wide := captureStdout(t, func() { writeTable(rs, "", false, 200, false, nil) })
+	if !strings.Contains(wide, name) {
+		t.Errorf("wide terminal should show the full workflow name:\n%s", wide)
+	}
+	if !strings.Contains(wide, "trainline-private/IdentityServer") {
+		t.Errorf("repo should stay whole when there's room:\n%s", wide)
+	}
+
+	// Too narrow for the full name: the workflow shrinks first, but never
+	// below workflowMin, and the table fits.
+	narrow := captureStdout(t, func() { writeTable(rs, "", false, 100, false, nil) })
+	row := strings.Split(narrow, "\n")[1]
+	if strings.Contains(row, name) || !strings.Contains(row, "…") {
+		t.Errorf("narrow terminal should truncate the workflow name:\n%s", narrow)
+	}
+	if w := visibleWidth(row); w > 100 {
+		t.Errorf("row is %d cols, want <= 100:\n%s", w, narrow)
+	}
+	if !strings.Contains(row, "trainline-private/IdentityServer") {
+		t.Errorf("repo should stay whole while the workflow name can still shrink:\n%s", narrow)
+	}
+
+	// Narrower still: the workflow stops at workflowMin and the repo gives way.
+	narrower := captureStdout(t, func() { writeTable(rs, "", false, 95, false, nil) })
+	row = strings.Split(narrower, "\n")[1]
+	if !strings.Contains(row, truncate(name, workflowMin)+" ") || strings.Contains(row, "trainline-private/") {
+		t.Errorf("want workflow at %d cols and the repo shrunk:\n%s", workflowMin, narrower)
+	}
+
+	long := strings.Repeat("x", 70)
+	rs[0].WorkflowName = long
+	capped := captureStdout(t, func() { writeTable(rs, "", false, 0, false, nil) })
+	if !strings.Contains(capped, strings.Repeat("x", workflowMax-1)+"…") || strings.Contains(capped, strings.Repeat("x", workflowMax)) {
+		t.Errorf("workflow names cap at %d cols:\n%s", workflowMax, capped)
 	}
 }
 
@@ -1120,4 +1172,82 @@ func captureStdout(t *testing.T, fn func()) string {
 	w.Close()
 	os.Stdout = old
 	return <-done
+}
+
+func TestWriteTable_NoProgressLineWithoutProgress(t *testing.T) {
+	now := time.Now()
+	rs := []runs.Run{{ID: 1, Repo: "x/y", WorkflowName: "CI", Status: "in_progress", CreatedAt: now, UpdatedAt: now}}
+	out := captureStdout(t, func() { writeTable(rs, "", false, 0, false, nil) })
+	if strings.Contains(out, "└") || strings.Count(out, "\n") != 2 {
+		t.Errorf("want header + one row and no progress line:\n%s", out)
+	}
+}
+
+func TestWriteTable_ProgressLineUnderRun(t *testing.T) {
+	now := time.Now()
+	rs := []runs.Run{
+		{ID: 1, Repo: "x/y", WorkflowName: "Deploy", Status: "in_progress", CreatedAt: now, UpdatedAt: now,
+			Progress: &runs.Progress{JobsDone: 3, JobsTotal: 5, Job: "deploy-prod", Step: "Migrate DB"}},
+		{ID: 2, Repo: "x/y", WorkflowName: "CI", Status: "completed", Conclusion: "success", CreatedAt: now, UpdatedAt: now},
+	}
+	out := captureStdout(t, func() { writeTable(rs, "", false, 0, false, nil) })
+	lines := strings.Split(strings.TrimRight(out, "\n"), "\n")
+	if len(lines) != 4 {
+		t.Fatalf("want header, run, progress line, run; got %d lines:\n%s", len(lines), out)
+	}
+	if !strings.Contains(lines[1], "Deploy") || lines[2] != "    └ ▰▰▰▱▱ 3/5 deploy-prod › Migrate DB" || !strings.Contains(lines[3], "CI") {
+		t.Errorf("progress line not under its run:\n%s", out)
+	}
+	if strings.Contains(lines[0], "PROGRESS") {
+		t.Errorf("there is no PROGRESS column any more:\n%s", out)
+	}
+}
+
+func TestProgressLine(t *testing.T) {
+	active := func(p runs.Progress) runs.Run { return runs.Run{Status: "in_progress", Progress: &p} }
+	cases := []struct {
+		name string
+		r    runs.Run
+		want string // "" means nil
+	}{
+		{"no progress", runs.Run{Status: "in_progress"}, ""},
+		{"no jobs yet", active(runs.Progress{}), ""},
+		{"none done", active(runs.Progress{JobsTotal: 5, Job: "build"}), "▱▱▱▱▱ 0/5 build"},
+		{"partial", active(runs.Progress{JobsDone: 3, JobsTotal: 5, Job: "deploy", Step: "Push"}), "▰▰▰▱▱ 3/5 deploy › Push"},
+		{"rounds to nearest", active(runs.Progress{JobsDone: 1, JobsTotal: 3}), "▰▰▱▱▱ 1/3"},
+		{"first of many shows", active(runs.Progress{JobsDone: 1, JobsTotal: 8}), "▰▱▱▱▱ 1/8"},
+		{"never full until done", active(runs.Progress{JobsDone: 9, JobsTotal: 10}), "▰▰▰▰▱ 9/10"},
+		{"all done", active(runs.Progress{JobsDone: 4, JobsTotal: 4}), "▰▰▰▰▰ 4/4"},
+		{"parallel", active(runs.Progress{JobsTotal: 3, Job: "test (mac)", Step: "Run", ParallelJobs: 2}), "▱▱▱▱▱ 0/3 test (mac) › Run +2"},
+		{"failed", runs.Run{Status: "completed", Conclusion: "failure", Progress: &runs.Progress{FailedJob: "deploy-prod", FailedStep: "Migrate DB"}}, "failed at deploy-prod › Migrate DB"},
+		{"failed no job info", runs.Run{Status: "completed", Conclusion: "failure", Progress: &runs.Progress{}}, ""},
+		{"success", runs.Run{Status: "completed", Conclusion: "success", Progress: &runs.Progress{JobsDone: 2, JobsTotal: 2}}, ""},
+	}
+	for _, tc := range cases {
+		c := progressLine(tc.r, 0)
+		got := ""
+		if c != nil {
+			got = strings.TrimPrefix(c.Render(false, false), progressIndent)
+		}
+		if got != tc.want {
+			t.Errorf("%s: got %q, want %q", tc.name, got, tc.want)
+		}
+	}
+}
+
+func TestProgressLine_UsesFullWidthThenTruncates(t *testing.T) {
+	// Real reusable-workflow job names from a deploy pipeline.
+	r := runs.Run{Status: "in_progress", Progress: &runs.Progress{JobsDone: 1, JobsTotal: 8, ParallelJobs: 1,
+		Job: "dev: Deploy service / Deploy to dev", Step: "Configure AWS credentials"}}
+	wide := progressLine(r, 200).Render(false, false)
+	if want := progressIndent + "▰▱▱▱▱ 1/8 dev: Deploy service / Deploy to dev › Configure AWS credentials +1"; wide != want {
+		t.Errorf("wide terminal should show everything:\ngot  %q\nwant %q", wide, want)
+	}
+	narrow := progressLine(r, 60).Render(false, false)
+	if w := visibleWidth(narrow); w != 60 {
+		t.Errorf("narrow line is %d cols, want exactly 60: %q", w, narrow)
+	}
+	if !strings.HasSuffix(narrow, "… +1") {
+		t.Errorf("parallel suffix must survive truncation: %q", narrow)
+	}
 }

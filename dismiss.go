@@ -151,6 +151,7 @@ func dismissFocusedRun(st *state.State, cfg *watchConfig, f focusTarget) focusTa
 		return f
 	}
 	st.DismissRun(runID)
+	cfg.dismissedRuns.Store(dismissedRunSet(st))
 	renderFromState(st, *cfg, false, newFocus, "", "")
 	return newFocus
 }
