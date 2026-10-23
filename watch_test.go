@@ -726,3 +726,32 @@ func TestAttachProgress_RerunRefetchesFinalRun(t *testing.T) {
 		t.Errorf("attempt 1's progress must not be shown for attempt 2: %+v", rs[0].Progress)
 	}
 }
+
+func TestAttachProgress_DismissedRunsDontTakeSlots(t *testing.T) {
+	ps, c := newProgressServer(t)
+	cfg := &watchConfig{lowQuotaLimit: 200, dismissedRuns: newRunSet(map[int64]bool{1: true})}
+	now := time.Now()
+	var rs []runs.Run
+	// 11 active runs, newest first. The panel caps at 10 after dropping the
+	// dismissed run 1, so it shows 2..11, and those are what get progress.
+	for i := int64(1); i <= 11; i++ {
+		rs = append(rs, runs.Run{ID: i, Repo: "o/a", Status: "in_progress", UpdatedAt: now.Add(-time.Duration(i) * time.Minute)})
+	}
+	attachProgress(c, cfg, rs, "me")
+	if n := ps.count(1); n != 0 {
+		t.Errorf("dismissed run fetched %d times, want 0", n)
+	}
+	if n := ps.count(11); n != 1 {
+		t.Errorf("oldest shown run fetched %d times, want 1", n)
+	}
+}
+
+func TestDismissFocusedRun_UpdatesProducerSet(t *testing.T) {
+	st := isolateState(t)
+	st.LastView = []runs.Run{{ID: 5, Repo: "o/a", Status: "in_progress", UpdatedAt: time.Now()}}
+	cfg := &watchConfig{dismissedRuns: newRunSet(nil)}
+	dismissFocusedRun(st, cfg, focusTarget{Panel: "runs", ID: "5"})
+	if !cfg.dismissedRuns.Load()[5] {
+		t.Error("dismissing a run must publish it to the producer's set")
+	}
+}
