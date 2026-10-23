@@ -250,8 +250,9 @@ Conservative by design:
   `X-RateLimit-Remaining: 0` or a rate-limit message) honour
   `Retry-After`. Other 403s, such as SAML/SSO enforcement or missing
   Actions access on one repo, only skip that repo.
-- Below the same 500 threshold, run progress stops fetching and shows
-  its last known value.
+- Below the same 500 threshold, or while a rate-limited jobs request's
+  `Retry-After` runs, run progress stops fetching and shows its last
+  known value. That `Retry-After` also delays the next poll.
 - The footer always shows current `X-RateLimit-Remaining/Limit`.
 
 ## Known limitations

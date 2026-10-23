@@ -1,6 +1,7 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"os"
@@ -55,6 +56,9 @@ type watchConfig struct {
 	// discovery cache. Replaced (never mutated) on each refresh so a
 	// by-value copy of cfg can't share it.
 	progressCache map[int64]progressEntry
+	// No new progress fetches before this time: set when a jobs request
+	// is rate limited, from its Retry-After.
+	progressPausedUntil time.Time
 }
 
 type progressEntry struct {
@@ -130,7 +134,8 @@ type pollResult struct {
 	ViewerLogin string
 	RateLimit   ghclient.RateLimit
 	PollErr     error
-	RunsPolled  bool // runs.Poll ran against a repo list; Runs is authoritative
+	RunsPolled  bool  // runs.Poll ran against a repo list; Runs is authoritative
+	ProgressErr error // a rate limit hit while fetching run progress; Runs is still good
 	PRErr       error
 	NotifErr    error
 	DiscErr     error
@@ -231,7 +236,7 @@ func runWatch(client *ghclient.Client, cfg watchConfig) {
 			if err := st.Save(); err != nil {
 				fmt.Fprintf(os.Stderr, "save state: %v\n", err)
 			}
-			next := cfg.nextInterval(activeCount(st.LastView), res.RateLimit, res.PollErr)
+			next := cfg.nextInterval(activeCount(st.LastView), res.RateLimit, cmp.Or(res.PollErr, res.ProgressErr))
 			if nextTimer != nil {
 				nextTimer.Stop()
 			}
@@ -494,7 +499,7 @@ func doRefresh(ctx context.Context, client *ghclient.Client, cfg *watchConfig) p
 		polled, pollErr := runs.Poll(client, repos)
 		if pollErr == nil {
 			viewer, _ := client.Viewer()
-			attachProgress(client, cfg, polled, viewer)
+			res.ProgressErr = attachProgress(client, cfg, polled, viewer)
 		}
 		res.Runs = polled
 		res.PollErr = pollErr
@@ -552,8 +557,10 @@ func dismissedRunSet(st *state.State) map[int64]bool {
 // attachProgress sets Progress on the runs the panel will show that are
 // either still active or failed: one jobs call each. Completed runs are
 // fetched once and then served from cfg.progressCache; under low quota no
-// new fetches are made and cached values are reused.
-func attachProgress(client *ghclient.Client, cfg *watchConfig, rs []runs.Run, viewer string) {
+// new fetches are made and cached values are reused. A rate-limited jobs
+// request pauses further fetches until its Retry-After and is returned so
+// the caller can back off too.
+func attachProgress(client *ghclient.Client, cfg *watchConfig, rs []runs.Run, viewer string) error {
 	// Pick from the same rows the panel will show: applyResult drops
 	// dismissed runs before VisibleRows caps the list.
 	dismissed := cfg.dismissedRuns.Load()
@@ -570,7 +577,7 @@ func attachProgress(client *ghclient.Client, cfg *watchConfig, rs []runs.Run, vi
 		}
 	}
 	rl := client.RateLimit()
-	lowQuota := rl.Limit > 0 && rl.Remaining < cfg.lowQuotaLimit
+	skipFetch := (rl.Limit > 0 && rl.Remaining < cfg.lowQuotaLimit) || time.Now().Before(cfg.progressPausedUntil)
 
 	// Seed every cached entry before any fetch starts: workers write to
 	// next under mu, so the loop below must not touch it at all.
@@ -580,7 +587,10 @@ func attachProgress(client *ghclient.Client, cfg *watchConfig, rs []runs.Run, vi
 			next[r.ID] = cached
 		}
 	}
-	var mu sync.Mutex
+	var (
+		mu      sync.Mutex
+		limited *ghclient.RateLimitedError
+	)
 	g, _ := errgroup.WithContext(context.Background())
 	g.SetLimit(progressConcurrency)
 	for _, r := range rs {
@@ -588,12 +598,25 @@ func attachProgress(client *ghclient.Client, cfg *watchConfig, rs []runs.Run, vi
 			continue
 		}
 		cached, ok := cfg.progressCache[r.ID]
-		if (ok && cached.final && cached.attempt == r.RunAttempt) || lowQuota {
+		if (ok && cached.final && cached.attempt == r.RunAttempt) || skipFetch {
 			continue
 		}
 		g.Go(func() error {
+			mu.Lock()
+			stop := limited != nil
+			mu.Unlock()
+			if stop {
+				return nil
+			}
 			p, err := runs.FetchProgress(client, r.Repo, r.ID)
 			if err != nil {
+				if rl, ok := ghclient.AsRateLimited(err); ok {
+					mu.Lock()
+					if limited == nil {
+						limited = rl
+					}
+					mu.Unlock()
+				}
 				return nil // keep the cached value, if any
 			}
 			mu.Lock()
@@ -609,6 +632,11 @@ func attachProgress(client *ghclient.Client, cfg *watchConfig, rs []runs.Run, vi
 		}
 	}
 	cfg.progressCache = next
+	if limited != nil {
+		cfg.progressPausedUntil = time.Now().Add(max(limited.RetryAfter, cfg.lowQuotaFloor))
+		return limited
+	}
+	return nil
 }
 
 // applyResult updates state.Runs, fires notifications, and updates the cache

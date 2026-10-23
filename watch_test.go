@@ -755,3 +755,50 @@ func TestDismissFocusedRun_UpdatesProducerSet(t *testing.T) {
 		t.Error("dismissing a run must publish it to the producer's set")
 	}
 }
+
+func TestAttachProgress_RateLimitPausesFetches(t *testing.T) {
+	var calls atomic.Int32
+	var limited atomic.Bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		if limited.Load() {
+			w.Header().Set("Retry-After", "120")
+			w.WriteHeader(http.StatusTooManyRequests)
+			return
+		}
+		w.Write([]byte(`{"jobs":[{"name":"deploy","status":"in_progress"}]}`))
+	}))
+	defer srv.Close()
+	c := ghclient.NewForTest(srv.Client(), srv.URL+"/")
+	cfg := &watchConfig{lowQuotaLimit: 200, lowQuotaFloor: 2 * time.Minute, baseInterval: time.Minute, activeInterval: 20 * time.Second}
+	mk := func() []runs.Run { return []runs.Run{{ID: 1, Repo: "o/a", Status: "in_progress", UpdatedAt: time.Now()}} }
+
+	if err := attachProgress(c, cfg, mk(), "me"); err != nil {
+		t.Fatalf("first pass: %v", err)
+	}
+	limited.Store(true)
+	rs := mk()
+	err := attachProgress(c, cfg, rs, "me")
+	if _, ok := ghclient.AsRateLimited(err); !ok {
+		t.Fatalf("want the rate limit returned, got %v", err)
+	}
+	if rs[0].Progress == nil || rs[0].Progress.Job != "deploy" {
+		t.Errorf("rate limit must keep the cached progress, got %+v", rs[0].Progress)
+	}
+	if d := cfg.nextInterval(1, ghclient.RateLimit{}, err); d < 120*time.Second {
+		t.Errorf("next poll in %s, want at least the 120s Retry-After", d)
+	}
+
+	before := calls.Load()
+	limited.Store(false)
+	rs = mk()
+	if err := attachProgress(c, cfg, rs, "me"); err != nil {
+		t.Fatalf("paused pass: %v", err)
+	}
+	if calls.Load() != before {
+		t.Error("no progress fetches should be made during the cooldown")
+	}
+	if rs[0].Progress == nil {
+		t.Error("cached progress should still show during the cooldown")
+	}
+}
