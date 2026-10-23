@@ -802,3 +802,17 @@ func TestAttachProgress_RateLimitPausesFetches(t *testing.T) {
 		t.Error("cached progress should still show during the cooldown")
 	}
 }
+
+func TestApplyResult_PrunedDismissalReachesProducer(t *testing.T) {
+	st := isolateState(t)
+	st.DismissedRuns[9] = time.Now().Add(-2 * time.Minute)
+	cfg := &watchConfig{dismissedRuns: newRunSet(dismissedRunSet(st))}
+	// Run 9 is gone from a successful poll, so its old dismissal is pruned.
+	applyResult(st, cfg, pollResult{RunsPolled: true, Runs: []runs.Run{{ID: 1, Status: "in_progress"}}})
+	if st.IsRunDismissed(9) {
+		t.Fatal("precondition: dismissal should have been pruned from state")
+	}
+	if cfg.dismissedRuns.Load()[9] {
+		t.Error("the producer still excludes a run whose dismissal was pruned")
+	}
+}

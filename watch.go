@@ -679,6 +679,9 @@ func applyResult(st *state.State, cfg *watchConfig, res pollResult) {
 	// (and keep the stale data visible) rather than blanking everything.
 	if res.RunsPolled && res.PollErr == nil {
 		st.PruneRunDismissals(seen, 60*time.Second)
+		if cfg.dismissedRuns != nil {
+			cfg.dismissedRuns.Store(dismissedRunSet(st))
+		}
 		st.PruneReadRuns(seen, 60*time.Second)
 		filtered := make([]runs.Run, 0, len(res.Runs))
 		for _, r := range res.Runs {
