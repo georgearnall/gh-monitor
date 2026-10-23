@@ -55,8 +55,9 @@ type watchConfig struct {
 }
 
 type progressEntry struct {
-	p     *runs.Progress
-	final bool // fetched after the run completed, so it can't change
+	p       *runs.Progress
+	attempt int  // run attempt the jobs belong to; a re-run invalidates the entry
+	final   bool // fetched after the attempt completed, so it can't change
 }
 
 // repoSet is a copy-on-write set of repo names, safe to read from the
@@ -544,9 +545,9 @@ func attachProgress(client *ghclient.Client, cfg *watchConfig, rs []runs.Run, vi
 	// Seed every cached entry before any fetch starts: workers write to
 	// next under mu, so the loop below must not touch it at all.
 	next := make(map[int64]progressEntry, len(want))
-	for id := range want {
-		if cached, ok := cfg.progressCache[id]; ok {
-			next[id] = cached
+	for _, r := range rs {
+		if cached, ok := cfg.progressCache[r.ID]; ok && want[r.ID] && cached.attempt == r.RunAttempt {
+			next[r.ID] = cached
 		}
 	}
 	var mu sync.Mutex
@@ -556,7 +557,8 @@ func attachProgress(client *ghclient.Client, cfg *watchConfig, rs []runs.Run, vi
 		if !want[r.ID] {
 			continue
 		}
-		if cached, ok := cfg.progressCache[r.ID]; (ok && cached.final) || lowQuota {
+		cached, ok := cfg.progressCache[r.ID]
+		if (ok && cached.final && cached.attempt == r.RunAttempt) || lowQuota {
 			continue
 		}
 		g.Go(func() error {
@@ -565,7 +567,7 @@ func attachProgress(client *ghclient.Client, cfg *watchConfig, rs []runs.Run, vi
 				return nil // keep the cached value, if any
 			}
 			mu.Lock()
-			next[r.ID] = progressEntry{p: p, final: !r.IsActive()}
+			next[r.ID] = progressEntry{p: p, attempt: r.RunAttempt, final: !r.IsActive()}
 			mu.Unlock()
 			return nil
 		})

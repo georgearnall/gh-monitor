@@ -23,6 +23,7 @@ type Run struct {
 	ActorLogin   string    `json:"actor_login"`
 	CreatedAt    time.Time `json:"created_at"`
 	UpdatedAt    time.Time `json:"updated_at"`
+	RunAttempt   int       `json:"run_attempt,omitempty"` // re-runs keep the ID and bump this
 	Progress     *Progress `json:"progress,omitempty"`
 }
 
@@ -90,8 +91,9 @@ type apiResp struct {
 		Actor      struct {
 			Login string `json:"login"`
 		} `json:"actor"`
-		CreatedAt time.Time `json:"created_at"`
-		UpdatedAt time.Time `json:"updated_at"`
+		CreatedAt  time.Time `json:"created_at"`
+		UpdatedAt  time.Time `json:"updated_at"`
+		RunAttempt int       `json:"run_attempt"`
 	} `json:"workflow_runs"`
 }
 
@@ -144,6 +146,7 @@ func Poll(client *ghclient.Client, repos []discovery.Repo) ([]Run, error) {
 					ActorLogin:   wr.Actor.Login,
 					CreatedAt:    wr.CreatedAt,
 					UpdatedAt:    wr.UpdatedAt,
+					RunAttempt:   wr.RunAttempt,
 				})
 			}
 			mu.Lock()

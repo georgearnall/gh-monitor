@@ -706,3 +706,23 @@ func TestAttachProgress_ManyCachedRunsNoRace(t *testing.T) {
 		attachProgress(c, cfg, append([]runs.Run(nil), rs...), "me")
 	}
 }
+
+func TestAttachProgress_RerunRefetchesFinalRun(t *testing.T) {
+	ps, c := newProgressServer(t)
+	cfg := &watchConfig{lowQuotaLimit: 200}
+	failed := runs.Run{ID: 7, Repo: "o/a", Status: "completed", Conclusion: "failure", ActorLogin: "me", UpdatedAt: time.Now(), RunAttempt: 1}
+	attachProgress(c, cfg, []runs.Run{failed}, "me")
+
+	// Re-running keeps the ID and bumps the attempt; the cached failure
+	// from attempt 1 must not be reused or shown.
+	ps.failing.Store(true)
+	rerun := runs.Run{ID: 7, Repo: "o/a", Status: "in_progress", ActorLogin: "me", UpdatedAt: time.Now(), RunAttempt: 2}
+	rs := []runs.Run{rerun}
+	attachProgress(c, cfg, rs, "me")
+	if n := ps.count(7); n != 2 {
+		t.Errorf("re-run should be refetched: got %d calls, want 2", n)
+	}
+	if rs[0].Progress != nil {
+		t.Errorf("attempt 1's progress must not be shown for attempt 2: %+v", rs[0].Progress)
+	}
+}

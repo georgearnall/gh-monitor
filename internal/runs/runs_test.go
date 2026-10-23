@@ -76,7 +76,7 @@ func TestPoll_FansOutToEachRepo(t *testing.T) {
 		switch {
 		case strings.HasPrefix(r.URL.Path, "/repos/x/a/actions/runs"):
 			fmt.Fprint(w, `{"workflow_runs":[
-				{"id":1,"name":"CI","head_branch":"main","status":"in_progress","conclusion":"","html_url":"https://github.com/x/a/runs/1","actor":{"login":"alice"},"created_at":"2026-05-18T10:00:00Z","updated_at":"2026-05-18T10:01:00Z"}
+				{"id":1,"name":"CI","head_branch":"main","status":"in_progress","conclusion":"","html_url":"https://github.com/x/a/runs/1","actor":{"login":"alice"},"created_at":"2026-05-18T10:00:00Z","updated_at":"2026-05-18T10:01:00Z","run_attempt":2}
 			]}`)
 		case strings.HasPrefix(r.URL.Path, "/repos/x/b/actions/runs"):
 			fmt.Fprint(w, `{"workflow_runs":[
@@ -107,7 +107,7 @@ func TestPoll_FansOutToEachRepo(t *testing.T) {
 	for _, r := range got {
 		byID[r.ID] = r
 	}
-	if r := byID[1]; r.Repo != "x/a" || !r.IsActive() || r.ActorLogin != "alice" {
+	if r := byID[1]; r.Repo != "x/a" || !r.IsActive() || r.ActorLogin != "alice" || r.RunAttempt != 2 {
 		t.Errorf("run 1: %+v", r)
 	}
 	if r := byID[2]; r.Repo != "x/b" || !r.IsFailure() || r.ActorLogin != "bob" {
