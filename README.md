@@ -262,6 +262,9 @@ Conservative by design:
 - Background errors (mark-read failures, desktop alert errors, state save
   errors) are printed to stderr, which draws over the TUI instead of
   using the footer.
+- Progress reads the first 100 jobs of a run. For bigger runs the total
+  is still right, but the current or failed job may be missed, and the
+  run is refetched every poll rather than cached.
 - The progress total counts the jobs GitHub has created so far. Jobs
   gated behind `needs:` or reusable workflows may only be counted once
   they're queued, so the total can grow mid-run.

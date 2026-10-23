@@ -37,6 +37,11 @@ type Progress struct {
 	ParallelJobs int    `json:"parallel_jobs,omitempty"` // other jobs in progress alongside Job
 	FailedJob    string `json:"failed_job,omitempty"`
 	FailedStep   string `json:"failed_step,omitempty"`
+
+	// Partial is set when the run has more jobs than one page returns: the
+	// total is still right, but the current and failed job may be missed,
+	// so the result is never cached as final.
+	Partial bool `json:"-"`
 }
 
 // IsActive reports whether the run is still in-flight (not yet conclusive).
@@ -165,7 +170,8 @@ func Poll(client *ghclient.Client, repos []discovery.Repo) ([]Run, error) {
 }
 
 type jobsResp struct {
-	Jobs []job `json:"jobs"`
+	TotalCount int   `json:"total_count"`
+	Jobs       []job `json:"jobs"`
 }
 
 type job struct {
@@ -188,7 +194,12 @@ func FetchProgress(client *ghclient.Client, repo string, id int64) (*Progress, e
 	if err := client.Get(path, &resp); err != nil {
 		return nil, err
 	}
-	return summarise(resp.Jobs), nil
+	p := summarise(resp.Jobs)
+	if resp.TotalCount > len(resp.Jobs) {
+		p.JobsTotal = resp.TotalCount
+		p.Partial = true
+	}
+	return p, nil
 }
 
 // FailedAt returns "job › step" for where a failed run broke, or "".

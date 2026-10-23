@@ -567,7 +567,7 @@ func attachProgress(client *ghclient.Client, cfg *watchConfig, rs []runs.Run, vi
 				return nil // keep the cached value, if any
 			}
 			mu.Lock()
-			next[r.ID] = progressEntry{p: p, attempt: r.RunAttempt, final: !r.IsActive()}
+			next[r.ID] = progressEntry{p: p, attempt: r.RunAttempt, final: !r.IsActive() && !p.Partial}
 			mu.Unlock()
 			return nil
 		})

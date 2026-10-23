@@ -275,3 +275,18 @@ func TestStepLabel(t *testing.T) {
 		}
 	}
 }
+
+func TestFetchProgress_MoreJobsThanOnePage(t *testing.T) {
+	c := jobsServer(t, `{"total_count":150,"jobs":[
+		{"name":"shard 1","status":"completed","conclusion":"success"},
+		{"name":"shard 2","status":"in_progress","steps":[{"name":"Test","status":"in_progress"}]}
+	]}`)
+	p, err := FetchProgress(c, "o/a", 7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := Progress{JobsDone: 1, JobsTotal: 150, Job: "shard 2", Step: "Test", Partial: true}
+	if *p != want {
+		t.Errorf("got %+v, want %+v", *p, want)
+	}
+}
