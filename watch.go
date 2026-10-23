@@ -580,10 +580,12 @@ func attachProgress(client *ghclient.Client, cfg *watchConfig, rs []runs.Run, vi
 	skipFetch := (rl.Limit > 0 && rl.Remaining < cfg.lowQuotaLimit) || time.Now().Before(cfg.progressPausedUntil)
 
 	// Seed every cached entry before any fetch starts: workers write to
-	// next under mu, so the loop below must not touch it at all.
+	// next under mu, so the loop below must not touch it at all. Entries
+	// are kept for every polled run, not just the visible ones, so a run
+	// briefly pushed out of the panel doesn't need fetching again.
 	next := make(map[int64]progressEntry, len(want))
 	for _, r := range rs {
-		if cached, ok := cfg.progressCache[r.ID]; ok && want[r.ID] && cached.attempt == r.RunAttempt {
+		if cached, ok := cfg.progressCache[r.ID]; ok && cached.attempt == r.RunAttempt {
 			next[r.ID] = cached
 		}
 	}

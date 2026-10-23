@@ -816,3 +816,28 @@ func TestApplyResult_PrunedDismissalReachesProducer(t *testing.T) {
 		t.Error("the producer still excludes a run whose dismissal was pruned")
 	}
 }
+
+func TestAttachProgress_KeepsCacheForRunsPushedOutOfView(t *testing.T) {
+	ps, c := newProgressServer(t)
+	cfg := &watchConfig{lowQuotaLimit: 200}
+	now := time.Now()
+	failed := runs.Run{ID: 100, Repo: "o/a", Status: "completed", Conclusion: "failure", ActorLogin: "me", UpdatedAt: now.Add(-time.Hour)}
+	attachProgress(c, cfg, []runs.Run{failed}, "me")
+
+	// Ten newer active runs push the failed run out of the visible rows.
+	busy := []runs.Run{failed}
+	for i := int64(1); i <= 10; i++ {
+		busy = append(busy, runs.Run{ID: i, Repo: "o/a", Status: "in_progress", UpdatedAt: now})
+	}
+	attachProgress(c, cfg, busy, "me")
+
+	// Back in view: served from cache, not refetched.
+	rs := []runs.Run{failed}
+	attachProgress(c, cfg, rs, "me")
+	if n := ps.count(100); n != 1 {
+		t.Errorf("failed run fetched %d times, want 1", n)
+	}
+	if rs[0].Progress == nil || rs[0].Progress.FailedStep != "Compile" {
+		t.Errorf("cached failure location lost: %+v", rs[0].Progress)
+	}
+}
