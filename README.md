@@ -193,8 +193,11 @@ Active runs get a progress line underneath: a bar, jobs finished / total
 (skipped jobs count as finished) and the current `job › step`, with `+N`
 when more jobs are running in parallel. Failed runs get
 `failed at job › step` instead. The line uses the full terminal width and
-is only cut short when it would overflow. It costs one jobs request per active
-run on each poll; a finished run's jobs are fetched once and cached.
+is only cut short when it would overflow. Runs with a single job get no
+progress line: their current step (or the step that failed) sits next to
+the status instead, e.g. `● in_progress · Run tests`. It costs one jobs
+request per active run on each poll; a finished run's jobs are fetched once
+and cached.
 
 Muted repos are hidden from all three panels.
 
