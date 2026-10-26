@@ -1002,20 +1002,45 @@ func countByOutcome(rs []runs.Run) (active, failed int) {
 	return
 }
 
+// inlineStepMax caps the step shown next to a single-job run's status, so
+// the STATUS column can't push the table wide.
+const inlineStepMax = 24
+
 func statusCell(r runs.Run) *Cell {
 	c := NewCell()
 	if r.IsActive() {
-		return c.Colored(ansiYellow, "●").Plain(" " + r.Status)
+		return withInlineStep(c.Colored(ansiYellow, "●").Plain(" "+r.Status), r)
 	}
 	switch r.Conclusion {
 	case "success":
 		return c.Colored(ansiGreen, "✓").Plain(" success")
 	case "failure", "timed_out", "startup_failure":
-		return c.Colored(ansiRed, "✗").Plain(" " + r.Conclusion)
+		return withInlineStep(c.Colored(ansiRed, "✗").Plain(" "+r.Conclusion), r)
 	case "cancelled", "skipped":
 		return c.Colored(ansiDim, "·").Plain(" " + r.Conclusion)
 	}
 	return c.Plain(r.Conclusion)
+}
+
+// withInlineStep appends " · step" for a single-job run: its current step
+// while active, or where it broke once failed. A bar for one job says
+// nothing, so these runs get no progress line and show the step here.
+func withInlineStep(c *Cell, r runs.Run) *Cell {
+	p := r.Progress
+	if p == nil || p.JobsTotal != 1 {
+		return c
+	}
+	step, job := p.Step, p.Job
+	if !r.IsActive() {
+		step, job = p.FailedStep, p.FailedJob
+	}
+	if step == "" {
+		step = job
+	}
+	if step == "" {
+		return c
+	}
+	return c.Colored(ansiDim, " ·").Plain(" " + truncate(step, inlineStepMax))
 }
 
 const progressBarCells = 5
@@ -1029,8 +1054,8 @@ const progressIndent = "    └ "
 // there's nothing to show.
 func progressLine(r runs.Run, termWidth int) *Cell {
 	p := r.Progress
-	if p == nil {
-		return nil
+	if p == nil || p.JobsTotal == 1 {
+		return nil // single-job runs show their step in the status cell
 	}
 	fit := func(used int, s string) string {
 		if termWidth <= 0 {

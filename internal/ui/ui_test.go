@@ -103,6 +103,14 @@ func TestStatusCell_PlainWhenNotTTY(t *testing.T) {
 		{runs.Run{Status: "completed", Conclusion: "success"}, "✓ success"},
 		{runs.Run{Status: "completed", Conclusion: "failure"}, "✗ failure"},
 		{runs.Run{Status: "completed", Conclusion: "cancelled"}, "· cancelled"},
+		{runs.Run{Status: "in_progress", Progress: &runs.Progress{JobsTotal: 1, Job: "build", Step: "Run tests"}}, "● in_progress · Run tests"},
+		{runs.Run{Status: "queued", Progress: &runs.Progress{JobsTotal: 1, Job: "build"}}, "● queued · build"},
+		{runs.Run{Status: "in_progress", Progress: &runs.Progress{JobsTotal: 1}}, "● in_progress"},
+		{runs.Run{Status: "in_progress", Progress: &runs.Progress{JobsTotal: 5, Job: "deploy", Step: "Push"}}, "● in_progress"},
+		{runs.Run{Status: "in_progress", Progress: &runs.Progress{JobsTotal: 1, Step: "Install every dependency we have"}}, "● in_progress · Install every dependenc…"},
+		{runs.Run{Status: "completed", Conclusion: "failure", Progress: &runs.Progress{JobsDone: 1, JobsTotal: 1, FailedJob: "test", FailedStep: "Run tests"}}, "✗ failure · Run tests"},
+		{runs.Run{Status: "completed", Conclusion: "failure", Progress: &runs.Progress{JobsDone: 1, JobsTotal: 1, FailedJob: "test"}}, "✗ failure · test"},
+		{runs.Run{Status: "completed", Conclusion: "success", Progress: &runs.Progress{JobsDone: 1, JobsTotal: 1, Job: "build", Step: "Done"}}, "✓ success"},
 	}
 	for _, c := range cases {
 		got := statusCell(c.run).Render(false, false)
@@ -1203,6 +1211,27 @@ func TestWriteTable_ProgressLineUnderRun(t *testing.T) {
 	}
 }
 
+func TestWriteTable_SingleJobRunStepInline(t *testing.T) {
+	now := time.Now()
+	rs := []runs.Run{
+		{ID: 1, Repo: "x/y", WorkflowName: "CI", Status: "in_progress", CreatedAt: now, UpdatedAt: now,
+			Progress: &runs.Progress{JobsTotal: 1, Job: "build", Step: "Run tests"}},
+		{ID: 2, Repo: "x/y", WorkflowName: "Deploy", Status: "in_progress", CreatedAt: now, UpdatedAt: now,
+			Progress: &runs.Progress{JobsDone: 2, JobsTotal: 5, Job: "deploy-prod", Step: "Migrate DB"}},
+	}
+	out := captureStdout(t, func() { writeTable(rs, "", false, 0, false, nil) })
+	lines := strings.Split(strings.TrimRight(out, "\n"), "\n")
+	if len(lines) != 4 {
+		t.Fatalf("want header, single-job run, deploy run, its progress line; got %d lines:\n%s", len(lines), out)
+	}
+	if !strings.Contains(lines[1], "● in_progress · Run tests") {
+		t.Errorf("single-job run should show its step on its own row:\n%s", out)
+	}
+	if !strings.Contains(lines[3], "▰▰▱▱▱ 2/5 deploy-prod › Migrate DB") {
+		t.Errorf("multi-job run should keep its progress line:\n%s", out)
+	}
+}
+
 func TestProgressLine(t *testing.T) {
 	active := func(p runs.Progress) runs.Run { return runs.Run{Status: "in_progress", Progress: &p} }
 	cases := []struct {
@@ -1222,6 +1251,8 @@ func TestProgressLine(t *testing.T) {
 		{"failed", runs.Run{Status: "completed", Conclusion: "failure", Progress: &runs.Progress{FailedJob: "deploy-prod", FailedStep: "Migrate DB"}}, "failed at deploy-prod › Migrate DB"},
 		{"failed no job info", runs.Run{Status: "completed", Conclusion: "failure", Progress: &runs.Progress{}}, ""},
 		{"success", runs.Run{Status: "completed", Conclusion: "success", Progress: &runs.Progress{JobsDone: 2, JobsTotal: 2}}, ""},
+		{"single job active", active(runs.Progress{JobsTotal: 1, Job: "build", Step: "Run tests"}), ""},
+		{"single job failed", runs.Run{Status: "completed", Conclusion: "failure", Progress: &runs.Progress{JobsDone: 1, JobsTotal: 1, FailedJob: "test", FailedStep: "Run tests"}}, ""},
 	}
 	for _, tc := range cases {
 		c := progressLine(tc.r, 0)
