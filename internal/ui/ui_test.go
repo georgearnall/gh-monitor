@@ -1300,6 +1300,22 @@ func TestWriteTable_FitsNarrowTerminal(t *testing.T) {
 	}
 }
 
+func TestWriteTable_WideCharStepFits(t *testing.T) {
+	// Cutting wide characters can leave a column unused, so the step's
+	// shown width, not its limit, decides how much shrinking is left.
+	now := time.Now()
+	rs := []runs.Run{{ID: 1, Repo: "x/y", WorkflowName: "CI", Branch: strings.Repeat("b", 26), Status: "in_progress", URL: "u", CreatedAt: now, UpdatedAt: now,
+		Progress: &runs.Progress{JobsTotal: 1, Job: "build", Step: strings.Repeat("测", 15)}}}
+	for width := 60; width <= 100; width++ {
+		out := captureStdout(t, func() { writeTable(rs, "", false, width, true, nil) })
+		for _, line := range strings.Split(strings.TrimRight(out, "\n"), "\n") {
+			if w := visibleWidth(line); w > width {
+				t.Errorf("width %d: line is %d cols:\n%s", width, w, out)
+			}
+		}
+	}
+}
+
 func TestWriteTable_CompactStatusBeforeDroppingBranch(t *testing.T) {
 	now := time.Now()
 	rs := []runs.Run{{ID: 1, Repo: "x/y", WorkflowName: "CI", Branch: "main", Status: "in_progress", CreatedAt: now, UpdatedAt: now,

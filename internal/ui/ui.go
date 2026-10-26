@@ -810,11 +810,12 @@ func runCells(headers []string, rows []tableRow) [][]string {
 }
 
 // widestInlineStep is the widest inline step any run shows when steps are
-// cut to stepMax columns.
+// cut to stepMax columns. It measures the cut text, since cutting wide
+// characters can leave the step a column short of stepMax.
 func widestInlineStep(rs []runs.Run, stepMax int) int {
 	w := 0
 	for _, r := range rs {
-		w = max(w, min(uniseg.StringWidth(inlineStep(r)), stepMax))
+		w = max(w, uniseg.StringWidth(truncate(inlineStep(r), stepMax)))
 	}
 	return w
 }
