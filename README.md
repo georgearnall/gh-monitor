@@ -54,8 +54,8 @@ polled 11:44:53 · 20 repos · 3 notifs · 2 PRs · rate limit 4823/5000 · next
 - **Mute noisy repos** with `x` from any panel. A muted repo disappears
   from every panel, stops being polled, never alerts, and doesn't count
   towards `--max-repos`. Unmute from the config pane.
-- **Adaptive layout**. Narrow terminals shed the PR branch column and
-  use shorter status labels; the repo cell trims the organisation part
+- **Adaptive layout**. Narrow terminals shed the PR and run branch
+  columns and use shorter status labels; the repo cell trims the organisation part
   with a leading ellipsis and drops the org entirely when too tight,
   always preserving the repo name.
 - **Cache-first startup**. Paints the last-known table from disk in
@@ -198,6 +198,11 @@ progress line: their current step (or the step that failed) sits next to
 the status instead, e.g. `● in_progress · Run tests`. It costs one jobs
 request per active run on each poll; a finished run's jobs are fetched once
 and cached.
+
+On narrow terminals the WORKFLOW name shrinks first (to 30 columns); the
+status word ("in_progress" / "success" / "failure") drops next, leaving
+the glyph; then the inline step is cut, with BRANCH dropped first if the
+step would otherwise be cut below 8 columns; the REPO cell shrinks last.
 
 Muted repos are hidden from all three panels.
 
