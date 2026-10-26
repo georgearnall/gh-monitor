@@ -113,7 +113,7 @@ func TestStatusCell_PlainWhenNotTTY(t *testing.T) {
 		{runs.Run{Status: "completed", Conclusion: "success", Progress: &runs.Progress{JobsDone: 1, JobsTotal: 1, Job: "build", Step: "Done"}}, "✓ success"},
 	}
 	for _, c := range cases {
-		got := statusCell(c.run).Render(false, false)
+		got := statusCell(c.run, false, inlineStepMax).Render(false, false)
 		if got != c.want {
 			t.Errorf("statusCell(%+v, tty=false) = %q, want %q", c.run, got, c.want)
 		}
@@ -992,11 +992,15 @@ func TestWriteTable_WorkflowColumnWidensWithRoom(t *testing.T) {
 		t.Errorf("repo should stay whole while the workflow name can still shrink:\n%s", narrow)
 	}
 
-	// Narrower still: the workflow stops at workflowMin and the repo gives way.
+	// Narrower still: the workflow stops at workflowMin and the status
+	// word goes before the repo gives way.
 	narrower := captureStdout(t, func() { writeTable(rs, "", false, 95, false, nil) })
 	row = strings.Split(narrower, "\n")[1]
-	if !strings.Contains(row, truncate(name, workflowMin)+" ") || strings.Contains(row, "trainline-private/") {
-		t.Errorf("want workflow at %d cols and the repo shrunk:\n%s", workflowMin, narrower)
+	if !strings.Contains(row, truncate(name, workflowMin)+" ") || strings.Contains(row, "in_progress") {
+		t.Errorf("want workflow at %d cols and a compact status:\n%s", workflowMin, narrower)
+	}
+	if w := visibleWidth(row); w > 95 {
+		t.Errorf("row is %d cols, want <= 95:\n%s", w, narrower)
 	}
 
 	long := strings.Repeat("x", 70)
@@ -1229,6 +1233,83 @@ func TestWriteTable_SingleJobRunStepInline(t *testing.T) {
 	}
 	if !strings.Contains(lines[3], "▰▰▱▱▱ 2/5 deploy-prod › Migrate DB") {
 		t.Errorf("multi-job run should keep its progress line:\n%s", out)
+	}
+}
+
+func TestStatusCell_Compact(t *testing.T) {
+	single := func(status, conclusion string, p runs.Progress) runs.Run {
+		p.JobsTotal = 1
+		return runs.Run{Status: status, Conclusion: conclusion, Progress: &p}
+	}
+	cases := []struct {
+		run     runs.Run
+		stepMax int
+		want    string
+	}{
+		{runs.Run{Status: "in_progress"}, inlineStepMax, "●"},
+		{runs.Run{Status: "completed", Conclusion: "success"}, inlineStepMax, "✓"},
+		{single("in_progress", "", runs.Progress{Job: "build", Step: "Run tests"}), inlineStepMax, "● Run tests"},
+		{single("completed", "failure", runs.Progress{FailedJob: "lint", FailedStep: "Lint"}), inlineStepMax, "✗ Lint"},
+		{single("in_progress", "", runs.Progress{Step: "Run tests"}), 5, "● Run …"},
+		{single("in_progress", "", runs.Progress{Step: "Run tests"}), 0, "●"},
+	}
+	for _, c := range cases {
+		if got := statusCell(c.run, true, c.stepMax).Render(false, false); got != c.want {
+			t.Errorf("statusCell(%+v, compact, %d) = %q, want %q", c.run, c.stepMax, got, c.want)
+		}
+	}
+	// stepMax 0 hides the step in the full layout too.
+	r := single("in_progress", "", runs.Progress{Step: "Run tests"})
+	if got := statusCell(r, false, 0).Render(false, false); got != "● in_progress" {
+		t.Errorf("stepMax 0 should hide the step: got %q", got)
+	}
+}
+
+func TestWriteTable_FitsNarrowTerminal(t *testing.T) {
+	now := time.Now()
+	single := func(id int64, wf, repo, branch, step string) runs.Run {
+		return runs.Run{ID: id, Repo: repo, WorkflowName: wf, Branch: branch, Status: "in_progress", URL: "u", CreatedAt: now, UpdatedAt: now,
+			Progress: &runs.Progress{JobsTotal: 1, Job: "build", Step: step}}
+	}
+	rs := []runs.Run{
+		{ID: 1, Repo: "trainline-private/IdentityServer", WorkflowName: "Deploy", Branch: "4.26.1", Status: "in_progress", URL: "u",
+			CreatedAt: now.Add(-24 * time.Minute), UpdatedAt: now,
+			Progress: &runs.Progress{JobsDone: 3, JobsTotal: 4, Job: "stg: Deploy service / Deploy to stg", Step: "Apply Database Schema Update - stg"}},
+		single(2, "Blue/Green - weight-change in production", "trainline-private/IdentityServer", "renovate/some-very-long-branch-name", "Install every dependency we have"),
+		single(3, "CI", "trainline-private/payments-service", "main", "Run tests"),
+		{ID: 4, Repo: "trainline-private/foo", WorkflowName: "Lint", Branch: "main", Status: "completed", Conclusion: "failure", URL: "u", CreatedAt: now, UpdatedAt: now,
+			Progress: &runs.Progress{JobsDone: 1, JobsTotal: 1, FailedJob: "lint", FailedStep: "golangci-lint"}},
+	}
+	for _, width := range []int{85, 86} {
+		for _, tty := range []bool{false, true} {
+			out := captureStdout(t, func() { writeTable(rs, "", tty, width, true, nil) })
+			for _, line := range strings.Split(strings.TrimRight(out, "\n"), "\n") {
+				if w := visibleWidth(line); w > width {
+					t.Errorf("width %d tty=%v: line is %d cols:\n%s", width, tty, w, out)
+				}
+			}
+		}
+	}
+
+	// At full width nothing is shed.
+	wide := captureStdout(t, func() { writeTable(rs, "", false, 250, true, nil) })
+	for _, want := range []string{"● in_progress · Install every dependenc…", "BRANCH", "trainline-private/IdentityServer"} {
+		if !strings.Contains(wide, want) {
+			t.Errorf("wide terminal should show %q:\n%s", want, wide)
+		}
+	}
+}
+
+func TestWriteTable_CompactStatusBeforeDroppingBranch(t *testing.T) {
+	now := time.Now()
+	rs := []runs.Run{{ID: 1, Repo: "x/y", WorkflowName: "CI", Branch: "main", Status: "in_progress", CreatedAt: now, UpdatedAt: now,
+		Progress: &runs.Progress{JobsTotal: 1, Job: "build", Step: "Run tests"}}}
+	full := captureStdout(t, func() { writeTable(rs, "", false, 0, false, nil) })
+	fullWidth := visibleWidth(strings.Split(full, "\n")[1])
+	// A few columns short: the status word goes, the step and BRANCH stay.
+	out := captureStdout(t, func() { writeTable(rs, "", false, fullWidth-5, false, nil) })
+	if strings.Contains(out, "in_progress") || !strings.Contains(out, "● Run tests") || !strings.Contains(out, "BRANCH") {
+		t.Errorf("want compact status with step and BRANCH kept:\n%s", out)
 	}
 }
 

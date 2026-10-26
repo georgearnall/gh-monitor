@@ -699,12 +699,60 @@ const (
 	workflowMax     = 50
 )
 
+// runLayout is how much of each run writeTable shows; writeTable sheds
+// detail until the table fits the terminal.
+type runLayout struct {
+	compactStatus bool // glyph only, no in_progress / success / failure word
+	stepMax       int  // columns for a single-job run's inline step; 0 hides it
+	branch        bool // include the BRANCH column
+	workflowLimit int  // columns WORKFLOW names are cut to
+}
+
 func writeTable(rs []runs.Run, focusedID string, tty bool, termWidth int, links bool, readIDs map[int64]bool) {
-	headers := []string{"  ", "STATUS", "WORKFLOW", "REPO", "BRANCH", "AGE"}
+	l := runLayout{stepMax: inlineStepMax, branch: true, workflowLimit: workflowMax}
+	headers, rows := buildRunRows(rs, focusedID, tty, termWidth, links, readIDs, l)
+	if termWidth > 0 {
+		over := func() int { return runTableWidth(headers, rows) - termWidth }
+		if o := over(); o > 0 {
+			l.workflowLimit = max(workflowMin, runColumnWidth(headers, rows, runsWorkflowCol)-o)
+			headers, rows = buildRunRows(rs, focusedID, tty, termWidth, links, readIDs, l)
+		}
+		if over() > 0 {
+			l.compactStatus = true
+			headers, rows = buildRunRows(rs, focusedID, tty, termWidth, links, readIDs, l)
+		}
+		// Cut the inline step to fit. If that leaves too little of it, drop
+		// BRANCH first and give the step whatever room that frees.
+		if o := over(); o > 0 && widestInlineStep(rs, l.stepMax)-o < minInlineStep {
+			l.branch = false
+			headers, rows = buildRunRows(rs, focusedID, tty, termWidth, links, readIDs, l)
+		}
+		if o := over(); o > 0 {
+			if l.stepMax = widestInlineStep(rs, l.stepMax) - o; l.stepMax < minInlineStep {
+				l.stepMax = 0
+			}
+			headers, rows = buildRunRows(rs, focusedID, tty, termWidth, links, readIDs, l)
+		}
+	}
+	t := newPanelTable(headers, runsRepoCol, termWidth, tty)
+	t.rows = rows
+	t.render()
+}
+
+// minInlineStep is the narrowest an inline step is cut to before it is
+// hidden altogether.
+const minInlineStep = 8
+
+func buildRunRows(rs []runs.Run, focusedID string, tty bool, termWidth int, links bool, readIDs map[int64]bool, l runLayout) ([]string, []tableRow) {
+	headers := []string{"  ", "STATUS", "WORKFLOW", "REPO"}
+	if l.branch {
+		headers = append(headers, "BRANCH")
+	}
+	headers = append(headers, "AGE")
 	if links {
 		headers = append(headers, "LINK")
 	}
-	t := newPanelTable(dimRow(headers, tty), runsRepoCol, termWidth, tty)
+	rows := make([]tableRow, 0, len(rs))
 	for _, r := range rs {
 		// In-flight and just-finished runs are shown at full brightness;
 		// older ones are context. Status glyph colours survive the dim.
@@ -715,12 +763,14 @@ func writeTable(rs []runs.Run, focusedID string, tty bool, termWidth int, links 
 		}
 		row := []string{
 			cursor,
-			statusCell(r).Render(tty, dim),
-			truncate(r.WorkflowName, workflowMax),
+			statusCell(r, l.compactStatus, l.stepMax).Render(tty, dim),
+			truncate(r.WorkflowName, l.workflowLimit),
 			r.Repo,
-			truncate(r.Branch, 30),
-			ageString(r),
 		}
+		if l.branch {
+			row = append(row, truncate(r.Branch, 30))
+		}
+		row = append(row, ageString(r))
 		if links {
 			var link string
 			if dim {
@@ -737,21 +787,36 @@ func writeTable(rs []runs.Run, focusedID string, tty bool, termWidth int, links 
 				detail = ansiDim + detail + ansiReset
 			}
 		}
-		t.addRowWithDetail(row, dim && tty, detail)
+		rows = append(rows, tableRow{cells: row, dim: dim && tty, detail: detail})
 	}
-	if termWidth > 0 {
-		all := [][]string{t.headers}
-		for _, r := range t.rows {
-			all = append(all, r.cells)
-		}
-		if over := tableWidth(all) - termWidth; over > 0 {
-			limit := max(workflowMin, columnWidths(all)[runsWorkflowCol]-over)
-			for i, r := range rs {
-				t.rows[i].cells[runsWorkflowCol] = truncate(r.WorkflowName, limit)
-			}
-		}
+	return dimRow(headers, tty), rows
+}
+
+func runTableWidth(headers []string, rows []tableRow) int {
+	return tableWidth(runCells(headers, rows))
+}
+
+func runColumnWidth(headers []string, rows []tableRow, col int) int {
+	return columnWidths(runCells(headers, rows))[col]
+}
+
+func runCells(headers []string, rows []tableRow) [][]string {
+	all := make([][]string, 0, len(rows)+1)
+	all = append(all, headers)
+	for _, r := range rows {
+		all = append(all, r.cells)
 	}
-	t.render()
+	return all
+}
+
+// widestInlineStep is the widest inline step any run shows when steps are
+// cut to stepMax columns.
+func widestInlineStep(rs []runs.Run, stepMax int) int {
+	w := 0
+	for _, r := range rs {
+		w = max(w, min(uniseg.StringWidth(inlineStep(r)), stepMax))
+	}
+	return w
 }
 
 // TermWidth returns the terminal's column count via term.GetSize. Returns 0
@@ -1006,41 +1071,70 @@ func countByOutcome(rs []runs.Run) (active, failed int) {
 // the STATUS column can't push the table wide.
 const inlineStepMax = 24
 
-func statusCell(r runs.Run) *Cell {
+// statusCell renders a run's status. compact drops the status word and
+// keeps only the glyph; stepMax caps a single-job run's inline step (0
+// hides it).
+func statusCell(r runs.Run, compact bool, stepMax int) *Cell {
 	c := NewCell()
+	word := func(s string) {
+		if !compact {
+			c.Plain(" " + s)
+		}
+	}
 	if r.IsActive() {
-		return withInlineStep(c.Colored(ansiYellow, "●").Plain(" "+r.Status), r)
+		c.Colored(ansiYellow, "●")
+		word(r.Status)
+		return withInlineStep(c, r, compact, stepMax)
 	}
 	switch r.Conclusion {
 	case "success":
-		return c.Colored(ansiGreen, "✓").Plain(" success")
+		c.Colored(ansiGreen, "✓")
+		word("success")
+		return c
 	case "failure", "timed_out", "startup_failure":
-		return withInlineStep(c.Colored(ansiRed, "✗").Plain(" "+r.Conclusion), r)
+		c.Colored(ansiRed, "✗")
+		word(r.Conclusion)
+		return withInlineStep(c, r, compact, stepMax)
 	case "cancelled", "skipped":
-		return c.Colored(ansiDim, "·").Plain(" " + r.Conclusion)
+		c.Colored(ansiDim, "·")
+		word(r.Conclusion)
+		return c
 	}
 	return c.Plain(r.Conclusion)
 }
 
-// withInlineStep appends " · step" for a single-job run: its current step
-// while active, or where it broke once failed. A bar for one job says
-// nothing, so these runs get no progress line and show the step here.
-func withInlineStep(c *Cell, r runs.Run) *Cell {
+// withInlineStep appends " · step" (or just " step" when compact) for a
+// single-job run. A bar for one job says nothing, so these runs get no
+// progress line and show the step here.
+func withInlineStep(c *Cell, r runs.Run, compact bool, stepMax int) *Cell {
+	step := inlineStep(r)
+	if step == "" || stepMax <= 0 {
+		return c
+	}
+	if !compact {
+		c.Colored(ansiDim, " ·")
+	}
+	return c.Plain(" " + truncate(step, stepMax))
+}
+
+// inlineStep is a single-job run's current step while active, or where it
+// broke once failed, falling back to the job name. "" for other runs.
+func inlineStep(r runs.Run) string {
 	p := r.Progress
 	if p == nil || p.JobsTotal != 1 {
-		return c
+		return ""
 	}
 	step, job := p.Step, p.Job
 	if !r.IsActive() {
+		if !r.IsFailure() {
+			return ""
+		}
 		step, job = p.FailedStep, p.FailedJob
 	}
 	if step == "" {
 		step = job
 	}
-	if step == "" {
-		return c
-	}
-	return c.Colored(ansiDim, " ·").Plain(" " + truncate(step, inlineStepMax))
+	return step
 }
 
 const progressBarCells = 5
