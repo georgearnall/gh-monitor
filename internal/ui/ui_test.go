@@ -172,7 +172,7 @@ func TestPRReviewCell_PlainWhenNotTTY(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			got := prReviewCell(c.pr).Render(false, false)
+			got := prReviewCell(c.pr, false).Render(false, false)
 			if got != c.want {
 				t.Errorf("prReviewCell = %q, want %q", got, c.want)
 			}
@@ -681,6 +681,44 @@ func columnOrderOK(out string, order []string) bool {
 	return true
 }
 
+func TestWriteNotifsTable_FitsNarrowTerminal(t *testing.T) {
+	now := time.Now()
+	ns := []notifs.Notification{
+		{ID: "1", Repo: "trainline-private/VatCalculationService", PRNumber: 1288, Reason: "review_requested", Unread: true, URL: "u", UpdatedAt: now.Add(-3 * time.Hour),
+			Title: "[NB-1234] Ensure tests cover corporate onboarding for VAT calculation across every market"},
+		{ID: "2", Repo: "trainline-private/IdentityServer", PRNumber: 77, Reason: "comment", URL: "u", UpdatedAt: now,
+			Title: "Bump the dependencies"},
+	}
+	for width := 70; width <= 140; width++ {
+		for _, tty := range []bool{false, true} {
+			out := captureStdout(t, func() { writeNotifsTable(ns, "", tty, width, "https://jira", true) })
+			for _, line := range strings.Split(strings.TrimRight(out, "\n"), "\n") {
+				if w := visibleWidth(line); w > width {
+					t.Errorf("width %d tty=%v: line is %d cols:\n%s", width, tty, w, out)
+				}
+			}
+		}
+	}
+
+	render := func(width int) string {
+		return ansiRe.ReplaceAllString(captureStdout(t, func() { writeNotifsTable(ns, "", true, width, "", true) }), "")
+	}
+	if wide := render(200); !strings.Contains(wide, "#1288") || !strings.Contains(wide, "open ↗") {
+		t.Errorf("wide terminal should keep # and the link text:\n%s", wide)
+	}
+	narrow := render(70)
+	for _, gone := range []string{"#1288", "AGE", "open ↗"} {
+		if strings.Contains(narrow, gone) {
+			t.Errorf("width 70 should drop %q:\n%s", gone, narrow)
+		}
+	}
+	for _, want := range []string{"◐ review", "↗", "IdentityServer", "[NB-1234] Ensure"} {
+		if !strings.Contains(narrow, want) {
+			t.Errorf("width 70 should show %q:\n%s", want, narrow)
+		}
+	}
+}
+
 func TestWriteNotifsTable_FocusCursor(t *testing.T) {
 	now := time.Now()
 	ns := []notifs.Notification{
@@ -1102,18 +1140,77 @@ func TestWriteTable_DimsOrganisation(t *testing.T) {
 	}
 }
 
-func TestWritePRTable_TitleTruncatedAt55(t *testing.T) {
+func TestWritePRTable_TitleTruncatedAt80(t *testing.T) {
 	now := time.Now()
-	title := strings.Repeat("a", 80) // longer than the 55-char cap
+	title := strings.Repeat("a", 100) // longer than the 80-column cap
 	ps := []prs.PR{
 		{Repo: "x/y", Number: 1, Title: title, URL: "u", UpdatedAt: now},
 	}
 	out := captureStdout(t, func() { writePRTable(ps, "", true, 300, "", true) })
 	stripped := ansiRe.ReplaceAllString(out, "")
-	// 54 'a's + ellipsis = 55 visible runes.
-	wantTitle := strings.Repeat("a", 54) + "…"
-	if !strings.Contains(stripped, wantTitle) {
-		t.Errorf("expected title truncated to 55 runes; got:\n%s", stripped)
+	// 79 'a's + ellipsis = 80 visible columns.
+	wantTitle := strings.Repeat("a", 79) + "…"
+	if !strings.Contains(stripped, wantTitle) || strings.Contains(stripped, wantTitle[:79]+"a") {
+		t.Errorf("expected title truncated to 80 columns; got:\n%s", stripped)
+	}
+}
+
+// narrowPRs is a realistic PR list with long titles, repos and branches.
+func narrowPRs() []prs.PR {
+	now := time.Now()
+	return []prs.PR{
+		{Repo: "trainline-private/VatCalculationService", Number: 1288, Title: "[NB-1234] Ensure tests cover corporate onboarding for VAT calculation across every market",
+			HeadBranch: "test-corporateonboarding", URL: "u", UpdatedAt: now.Add(-3 * time.Hour),
+			State: "FAILURE", Failing: 2, Total: 14, ReviewDecision: "APPROVED", CommentCount: 12},
+		{Repo: "trainline-private/IdentityServer", Number: 77, Title: "Bump the dependencies",
+			HeadBranch: "renovate/some-very-long-branch-name", URL: "u", UpdatedAt: now,
+			State: "PENDING", Passing: 3, Total: 9, ReviewCount: 1},
+	}
+}
+
+func TestWritePRTable_FitsNarrowTerminal(t *testing.T) {
+	ps := narrowPRs()
+	for width := 70; width <= 140; width++ {
+		for _, tty := range []bool{false, true} {
+			out := captureStdout(t, func() { writePRTable(ps, "", tty, width, "https://jira", true) })
+			for _, line := range strings.Split(strings.TrimRight(out, "\n"), "\n") {
+				if w := visibleWidth(line); w > width {
+					t.Errorf("width %d tty=%v: line is %d cols:\n%s", width, tty, w, out)
+				}
+			}
+		}
+	}
+}
+
+func TestWritePRTable_ShedOrder(t *testing.T) {
+	ps := narrowPRs()
+	render := func(width int) string {
+		return ansiRe.ReplaceAllString(captureStdout(t, func() { writePRTable(ps, "", true, width, "", true) }), "")
+	}
+
+	// Mid width: BRANCH and the checks word go, everything else stays.
+	mid := render(130)
+	for _, want := range []string{"✓ approved", "#1288", "AGE", "open ↗"} {
+		if !strings.Contains(mid, want) {
+			t.Errorf("width 130 should still show %q:\n%s", want, mid)
+		}
+	}
+	if strings.Contains(mid, "BRANCH") {
+		t.Errorf("width 130 should drop BRANCH:\n%s", mid)
+	}
+
+	// At 70 the review word, # and AGE are gone, the link is a bare glyph,
+	// and the repo name survives.
+	narrow := render(70)
+	for _, gone := range []string{"approved", "reviewed", "#1288", "AGE", "open ↗", "LINK"} {
+		if strings.Contains(narrow, gone) {
+			t.Errorf("width 70 should drop %q:\n%s", gone, narrow)
+		}
+	}
+	for _, want := range []string{"✓ +12", "↗", "IdentityServer", "[NB-1234] Ensure"} {
+		if !strings.Contains(narrow, want) {
+			t.Errorf("width 70 should show %q:\n%s", want, narrow)
+		}
 	}
 }
 
@@ -1280,7 +1377,7 @@ func TestWriteTable_FitsNarrowTerminal(t *testing.T) {
 		{ID: 4, Repo: "trainline-private/foo", WorkflowName: "Lint", Branch: "main", Status: "completed", Conclusion: "failure", URL: "u", CreatedAt: now, UpdatedAt: now,
 			Progress: &runs.Progress{JobsDone: 1, JobsTotal: 1, FailedJob: "lint", FailedStep: "golangci-lint"}},
 	}
-	for _, width := range []int{85, 86} {
+	for width := 70; width <= 86; width++ {
 		for _, tty := range []bool{false, true} {
 			out := captureStdout(t, func() { writeTable(rs, "", tty, width, true, nil) })
 			for _, line := range strings.Split(strings.TrimRight(out, "\n"), "\n") {
