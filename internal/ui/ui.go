@@ -469,14 +469,61 @@ func unreadCount(ns []notifs.Notification) int {
 // Kept as a const so fitRepoColumn can target it directly.
 const notifsRepoCol = 3
 
+// notifsTitleCol is the column index of TITLE inside writeNotifsTable's rows.
+const notifsTitleCol = 2
+
+// notifsTitleMax is the upper bound on notification title length.
+const notifsTitleMax = 50
+
+// notifLayout is how much of each notification writeNotifsTable shows;
+// writeNotifsTable sheds detail until the table fits the terminal.
+type notifLayout struct {
+	titleLimit int  // columns titles are cut to
+	numAge     bool // include the # and AGE columns
+	shortLink  bool // link shown as a bare ↗ under a blank header
+}
+
 func writeNotifsTable(ns []notifs.Notification, focusedID string, tty bool, termWidth int, jiraURL string, links bool) {
-	headers := []string{"  ", "REASON", "TITLE", "REPO", "#", "AGE"}
-	if links {
-		headers = append(headers, "LINK")
+	l := notifLayout{titleLimit: notifsTitleMax, numAge: true}
+	raw := buildNotifRows(ns, focusedID, tty, jiraURL, links, l)
+	if termWidth > 0 {
+		// The repo's organisations count as free room: they are trimmed
+		// before anything else is shed.
+		tight := func() int { return tableWidth(raw) - termWidth - repoSlack(raw, notifsRepoCol) }
+		for _, shed := range []func(){
+			func() { l.shortLink = true },
+			func() { l.numAge = false },
+		} {
+			if tight() <= 0 {
+				break
+			}
+			shed()
+			raw = buildNotifRows(ns, focusedID, tty, jiraURL, links, l)
+		}
+		if o := tight(); o > 0 {
+			l.titleLimit = max(titleMin, columnWidths(raw)[notifsTitleCol]-o)
+			raw = buildNotifRows(ns, focusedID, tty, jiraURL, links, l)
+		}
 	}
-	t := newPanelTable(dimRow(headers, tty), notifsRepoCol, termWidth, tty)
+	t := newPanelTable(raw[0], notifsRepoCol, termWidth, tty)
+	for i, n := range ns {
+		t.addRow(raw[i+1], !n.Unread && tty)
+	}
+	t.render()
+}
+
+func buildNotifRows(ns []notifs.Notification, focusedID string, tty bool, jiraURL string, links bool, l notifLayout) [][]string {
+	headers := []string{"  ", "REASON", "TITLE", "REPO"}
+	if l.numAge {
+		headers = append(headers, "#", "AGE")
+	}
+	if links {
+		headers = append(headers, linkHeader(l.shortLink))
+	}
+	rows := make([][]string, 0, len(ns)+1)
+	rows = append(rows, dimRow(headers, tty))
 	for _, n := range ns {
-		title := truncate(n.Title, 50)
+		title := truncate(n.Title, l.titleLimit)
 		if tty && n.Unread {
 			title = styleTickets(title, jiraURL)
 		}
@@ -489,23 +536,18 @@ func writeNotifsTable(ns []notifs.Notification, focusedID string, tty bool, term
 			reasonCell(n).Render(tty, !n.Unread),
 			title,
 			n.Repo, // plain so shrinkRepo can parse the slash
-			fmt.Sprintf("#%d", n.PRNumber),
-			relativeAge(n.UpdatedAt),
+		}
+		if l.numAge {
+			row = append(row, fmt.Sprintf("#%d", n.PRNumber), relativeAge(n.UpdatedAt))
 		}
 		if links {
-			var link string
-			if n.Unread {
-				link = coloredHyperlink(n.URL, "open ↗")
-			} else {
-				// Read row: avoid inner SGR codes that would break the
-				// outer dim wrap applied by panelTable.render().
-				link = hyperlink(n.URL, "open ↗")
-			}
-			row = append(row, link)
+			// Read row: avoid inner SGR codes that would break the
+			// outer dim wrap applied by panelTable.render().
+			row = append(row, linkCell(n.URL, l.shortLink, n.Unread))
 		}
-		t.addRow(row, !n.Unread && tty)
+		rows = append(rows, row)
 	}
-	t.render()
+	return rows
 }
 
 // reasonCell builds a Cell for the notification reason column. The Render

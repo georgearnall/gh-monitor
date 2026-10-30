@@ -681,6 +681,44 @@ func columnOrderOK(out string, order []string) bool {
 	return true
 }
 
+func TestWriteNotifsTable_FitsNarrowTerminal(t *testing.T) {
+	now := time.Now()
+	ns := []notifs.Notification{
+		{ID: "1", Repo: "trainline-private/VatCalculationService", PRNumber: 1288, Reason: "review_requested", Unread: true, URL: "u", UpdatedAt: now.Add(-3 * time.Hour),
+			Title: "[NB-1234] Ensure tests cover corporate onboarding for VAT calculation across every market"},
+		{ID: "2", Repo: "trainline-private/IdentityServer", PRNumber: 77, Reason: "comment", URL: "u", UpdatedAt: now,
+			Title: "Bump the dependencies"},
+	}
+	for width := 70; width <= 140; width++ {
+		for _, tty := range []bool{false, true} {
+			out := captureStdout(t, func() { writeNotifsTable(ns, "", tty, width, "https://jira", true) })
+			for _, line := range strings.Split(strings.TrimRight(out, "\n"), "\n") {
+				if w := visibleWidth(line); w > width {
+					t.Errorf("width %d tty=%v: line is %d cols:\n%s", width, tty, w, out)
+				}
+			}
+		}
+	}
+
+	render := func(width int) string {
+		return ansiRe.ReplaceAllString(captureStdout(t, func() { writeNotifsTable(ns, "", true, width, "", true) }), "")
+	}
+	if wide := render(200); !strings.Contains(wide, "#1288") || !strings.Contains(wide, "open ↗") {
+		t.Errorf("wide terminal should keep # and the link text:\n%s", wide)
+	}
+	narrow := render(70)
+	for _, gone := range []string{"#1288", "AGE", "open ↗"} {
+		if strings.Contains(narrow, gone) {
+			t.Errorf("width 70 should drop %q:\n%s", gone, narrow)
+		}
+	}
+	for _, want := range []string{"◐ review", "↗", "IdentityServer", "[NB-1234] Ensure"} {
+		if !strings.Contains(narrow, want) {
+			t.Errorf("width 70 should show %q:\n%s", want, narrow)
+		}
+	}
+}
+
 func TestWriteNotifsTable_FocusCursor(t *testing.T) {
 	now := time.Now()
 	ns := []notifs.Notification{
