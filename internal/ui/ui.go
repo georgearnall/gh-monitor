@@ -557,21 +557,68 @@ func stateGlyph(state notifs.PRState) (icon, label, col string) {
 }
 
 // prRepoCol is the column index of REPO inside writePRTable's rows.
-// Same value with or without BRANCH (BRANCH sits after REPO).
+// Same value in every layout (the columns that drop sit after REPO).
 const prRepoCol = 4
 
-// prTitleMax is the upper bound on title length before truncation.
-const prTitleMax = 55
+// prTitleCol is the column index of TITLE inside writePRTable's rows.
+const prTitleCol = 3
+
+// PR titles get up to prTitleWide columns when the terminal has room, and
+// are cut back towards prTitleMax before any other column is shed.
+const (
+	prTitleWide = 80
+	prTitleMax  = 55
+)
+
+// titleMin is the narrowest a notification or PR title is cut to; past
+// that, fitRepoColumn shrinks the repo instead.
+const titleMin = 20
+
+// prLayout is how much of each PR writePRTable shows; writePRTable sheds
+// detail until the table fits the terminal.
+type prLayout struct {
+	titleLimit    int  // columns titles are cut to
+	branch        bool // include the BRANCH column
+	compactStatus bool // checks without the pass / fail / wait word
+	compactReview bool // review glyph without the approved / changes / ... word
+	numAge        bool // include the # and AGE columns
+	shortLink     bool // link shown as a bare ↗ under a blank header
+}
 
 func writePRTable(ps []prs.PR, focusedKey string, tty bool, termWidth int, jiraURL string, links bool) {
-	// Adaptive fit: try full layout first; if it overflows, drop BRANCH;
-	// if it still overflows, also drop the trailing "pass"/"fail"/"wait"
-	// status word. The repo column is shrunk last by panelTable.render().
-	raw := buildPRRows(ps, focusedKey, tty, true /*branch*/, false /*compact status*/, jiraURL, links)
-	if termWidth > 0 && tableWidth(raw) > termWidth {
-		raw = buildPRRows(ps, focusedKey, tty, false, false, jiraURL, links)
-		if tableWidth(raw) > termWidth {
-			raw = buildPRRows(ps, focusedKey, tty, false, true, jiraURL, links)
+	l := prLayout{titleLimit: prTitleWide, branch: true, numAge: true}
+	raw := buildPRRows(ps, focusedKey, tty, jiraURL, links, l)
+	if termWidth > 0 {
+		over := func() int { return tableWidth(raw) - termWidth }
+		if o := over(); o > 0 {
+			l.titleLimit = max(prTitleMax, columnWidths(raw)[prTitleCol]-o)
+			raw = buildPRRows(ps, focusedKey, tty, jiraURL, links, l)
+		}
+		if over() > 0 {
+			l.branch = false
+			raw = buildPRRows(ps, focusedKey, tty, jiraURL, links, l)
+		}
+		if over() > 0 {
+			l.compactStatus = true
+			raw = buildPRRows(ps, focusedKey, tty, jiraURL, links, l)
+		}
+		// From here the repo's organisations count as free room: they are
+		// trimmed before anything else is shed.
+		tight := func() int { return over() - repoSlack(raw, prRepoCol) }
+		for _, shed := range []func(){
+			func() { l.compactReview = true },
+			func() { l.numAge = false },
+			func() { l.shortLink = true },
+		} {
+			if tight() <= 0 {
+				break
+			}
+			shed()
+			raw = buildPRRows(ps, focusedKey, tty, jiraURL, links, l)
+		}
+		if o := tight(); o > 0 {
+			l.titleLimit = max(titleMin, columnWidths(raw)[prTitleCol]-o)
+			raw = buildPRRows(ps, focusedKey, tty, jiraURL, links, l)
 		}
 	}
 	t := newPanelTable(raw[0], prRepoCol, termWidth, tty)
@@ -581,20 +628,25 @@ func writePRTable(ps []prs.PR, focusedKey string, tty bool, termWidth int, jiraU
 	t.render()
 }
 
-func buildPRRows(ps []prs.PR, focusedKey string, tty, includeBranch, compactStatus bool, jiraURL string, links bool) [][]string {
-	header := []string{"  ", "CHECKS", "REVIEW", "TITLE", "REPO", "#"}
-	if includeBranch {
+func buildPRRows(ps []prs.PR, focusedKey string, tty bool, jiraURL string, links bool, l prLayout) [][]string {
+	header := []string{"  ", "CHECKS", "REVIEW", "TITLE", "REPO"}
+	if l.numAge {
+		header = append(header, "#")
+	}
+	if l.branch {
 		header = append(header, "BRANCH")
 	}
-	header = append(header, "AGE")
+	if l.numAge {
+		header = append(header, "AGE")
+	}
 	if links {
-		header = append(header, "LINK")
+		header = append(header, linkHeader(l.shortLink))
 	}
 
 	rows := make([][]string, 0, len(ps)+1)
 	rows = append(rows, dimRow(header, tty))
 	for _, p := range ps {
-		title := truncate(p.Title, prTitleMax)
+		title := truncate(p.Title, l.titleLimit)
 		if tty {
 			title = styleTickets(title, jiraURL)
 		}
@@ -604,36 +656,51 @@ func buildPRRows(ps []prs.PR, focusedKey string, tty, includeBranch, compactStat
 		}
 		row := []string{
 			cursor,
-			prStatusCell(p, compactStatus).Render(tty, false),
-			prReviewCell(p).Render(tty, false),
+			prStatusCell(p, l.compactStatus).Render(tty, false),
+			prReviewCell(p, l.compactReview).Render(tty, false),
 			title,
 			p.Repo,
-			fmt.Sprintf("#%d", p.Number),
 		}
-		if includeBranch {
+		if l.numAge {
+			row = append(row, fmt.Sprintf("#%d", p.Number))
+		}
+		if l.branch {
 			row = append(row, truncate(p.HeadBranch, 30))
 		}
-		row = append(row, relativeAge(p.UpdatedAt))
+		if l.numAge {
+			row = append(row, relativeAge(p.UpdatedAt))
+		}
 		if links {
-			row = append(row, coloredHyperlink(p.URL, "open ↗"))
+			row = append(row, linkCell(p.URL, l.shortLink, true))
 		}
 		rows = append(rows, row)
 	}
 	return rows
 }
 
-func prReviewCell(p prs.PR) *Cell {
+// prReviewCell builds the REVIEW cell. compact keeps the glyph and comment
+// count but drops the decision word.
+func prReviewCell(p prs.PR, compact bool) *Cell {
 	c := NewCell()
+	word := func(w string) {
+		if !compact {
+			c.Plain(" " + w)
+		}
+	}
 	switch p.ReviewDecision {
 	case "APPROVED":
-		c.Colored(ansiGreen, "✓").Plain(" approved")
+		c.Colored(ansiGreen, "✓")
+		word("approved")
 	case "CHANGES_REQUESTED":
-		c.Colored(ansiRed, "✗").Plain(" changes")
+		c.Colored(ansiRed, "✗")
+		word("changes")
 	case "REVIEW_REQUIRED":
-		c.Colored(ansiDim, "·").Plain(" blocked")
+		c.Colored(ansiDim, "·")
+		word("blocked")
 	default:
 		if p.ReviewCount > 0 {
-			c.Colored(ansiYellow, "◐").Plain(" reviewed")
+			c.Colored(ansiYellow, "◐")
+			word("reviewed")
 		}
 		// No decision and no reviewers yet: empty cell (no placeholder).
 	}
@@ -869,6 +936,38 @@ func tableWidth(rows [][]string) int {
 		}
 	}
 	return total
+}
+
+// repoSlack is how many columns fitRepoColumn can free at repoCol just by
+// dropping organisations, keeping every repo name whole.
+func repoSlack(rows [][]string, repoCol int) int {
+	names := visibleWidth(rows[0][repoCol])
+	for _, row := range rows[1:] {
+		repo := row[repoCol]
+		names = max(names, visibleWidth(repo[strings.IndexByte(repo, '/')+1:]))
+	}
+	return columnWidths(rows)[repoCol] - names
+}
+
+// linkHeader is the LINK column header; blank when links are a bare ↗.
+func linkHeader(short bool) string {
+	if short {
+		return ""
+	}
+	return "LINK"
+}
+
+// linkCell is the clickable LINK cell, "open ↗" or a bare "↗" when short.
+// colored=false leaves out SGR codes so the cell is safe inside a row dim.
+func linkCell(url string, short, colored bool) string {
+	text := "open ↗"
+	if short {
+		text = "↗"
+	}
+	if colored {
+		return coloredHyperlink(url, text)
+	}
+	return hyperlink(url, text)
 }
 
 // fitRepoColumn shrinks the cells at colIdx so the total natural width of
