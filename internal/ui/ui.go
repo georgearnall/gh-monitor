@@ -801,9 +801,11 @@ const recentlyFinished = 30 * time.Minute
 
 // runsWorkflowCol is the column index of WORKFLOW inside writeTable's rows.
 // Names get up to workflowMax columns when the terminal has room, and are
-// cut back towards workflowMin before the REPO column starts shrinking.
+// cut back towards workflowMin before the REPO column starts shrinking,
+// then on to workflowFloor once everything else has been shed.
 const (
 	runsWorkflowCol = 2
+	workflowFloor   = 20
 	workflowMin     = 30
 	workflowMax     = 50
 )
@@ -815,6 +817,7 @@ type runLayout struct {
 	stepMax       int  // columns for a single-job run's inline step; 0 hides it
 	branch        bool // include the BRANCH column
 	workflowLimit int  // columns WORKFLOW names are cut to
+	shortLink     bool // link shown as a bare ↗ under a blank header
 }
 
 func writeTable(rs []runs.Run, focusedID string, tty bool, termWidth int, links bool, readIDs map[int64]bool) {
@@ -842,6 +845,17 @@ func writeTable(rs []runs.Run, focusedID string, tty bool, termWidth int, links 
 			}
 			headers, rows = buildRunRows(rs, focusedID, tty, termWidth, links, readIDs, l)
 		}
+		// From here the repo's organisations count as free room: they are
+		// trimmed before the link text goes and WORKFLOW is cut further.
+		tight := func() int { return over() - repoSlack(runCells(headers, rows), runsRepoCol) }
+		if tight() > 0 {
+			l.shortLink = true
+			headers, rows = buildRunRows(rs, focusedID, tty, termWidth, links, readIDs, l)
+		}
+		if o := tight(); o > 0 {
+			l.workflowLimit = max(workflowFloor, runColumnWidth(headers, rows, runsWorkflowCol)-o)
+			headers, rows = buildRunRows(rs, focusedID, tty, termWidth, links, readIDs, l)
+		}
 	}
 	t := newPanelTable(headers, runsRepoCol, termWidth, tty)
 	t.rows = rows
@@ -859,7 +873,7 @@ func buildRunRows(rs []runs.Run, focusedID string, tty bool, termWidth int, link
 	}
 	headers = append(headers, "AGE")
 	if links {
-		headers = append(headers, "LINK")
+		headers = append(headers, linkHeader(l.shortLink))
 	}
 	rows := make([]tableRow, 0, len(rs))
 	for _, r := range rs {
@@ -881,13 +895,7 @@ func buildRunRows(rs []runs.Run, focusedID string, tty bool, termWidth int, link
 		}
 		row = append(row, ageString(r))
 		if links {
-			var link string
-			if dim {
-				link = hyperlink(r.URL, "open ↗")
-			} else {
-				link = coloredHyperlink(r.URL, "open ↗")
-			}
-			row = append(row, link)
+			row = append(row, linkCell(r.URL, l.shortLink, !dim))
 		}
 		var detail string
 		if c := progressLine(r, termWidth); c != nil {

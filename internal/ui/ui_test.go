@@ -1377,7 +1377,7 @@ func TestWriteTable_FitsNarrowTerminal(t *testing.T) {
 		{ID: 4, Repo: "trainline-private/foo", WorkflowName: "Lint", Branch: "main", Status: "completed", Conclusion: "failure", URL: "u", CreatedAt: now, UpdatedAt: now,
 			Progress: &runs.Progress{JobsDone: 1, JobsTotal: 1, FailedJob: "lint", FailedStep: "golangci-lint"}},
 	}
-	for _, width := range []int{85, 86} {
+	for width := 70; width <= 86; width++ {
 		for _, tty := range []bool{false, true} {
 			out := captureStdout(t, func() { writeTable(rs, "", tty, width, true, nil) })
 			for _, line := range strings.Split(strings.TrimRight(out, "\n"), "\n") {
