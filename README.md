@@ -54,10 +54,11 @@ polled 11:44:53 · 20 repos · 3 notifs · 2 PRs · rate limit 4823/5000 · next
 - **Mute noisy repos** with `x` from any panel. A muted repo disappears
   from every panel, stops being polled, never alerts, and doesn't count
   towards `--max-repos`. Unmute from the config pane.
-- **Adaptive layout**. Narrow terminals shed the PR and run branch
-  columns and use shorter status labels; the repo cell trims the organisation part
-  with a leading ellipsis and drops the org entirely when too tight,
-  always preserving the repo name.
+- **Adaptive layout**. Every panel fits on one line per row down to 70
+  columns. Narrow terminals shed branch, number and age columns, use
+  shorter status labels, shrink the link to `↗` and cut titles; the repo
+  cell trims the organisation part with a leading ellipsis and drops the
+  org entirely when too tight, always preserving the repo name.
 - **Cache-first startup**. Paints the last-known table from disk in
   ~100ms, then refreshes in the background. Cold launches (empty cache)
   take ~3s.
@@ -159,6 +160,10 @@ Filtered to PR threads only (issues are dropped). Sorted unread-first
 then most-recently-updated. Read items stay dimmed for 7 days then drop
 off.
 
+On narrow terminals the REPO cell drops its organisation first; then the
+link shrinks to `↗`, the `#` and AGE columns drop, and the title is cut
+(to no less than 20 columns). The repo name is trimmed last.
+
 **Pull requests panel.** Every open, non-draft pull request you authored
 across all of GitHub, updated within `--pr-since`, sorted failing-first
 then most-recently-updated. Columns:
@@ -168,12 +173,16 @@ then most-recently-updated. Columns:
 - `REVIEW` review decision (`✓ approved`, `✗ changes`, `◐ reviewed`,
   `· blocked`, or blank when no decision and no reviews yet). A `+N`
   suffix shows comment count.
-- `TITLE`, `REPO`, `#NUMBER`, `BRANCH`, `AGE`, clickable `LINK`.
+- `TITLE` (up to 80 columns when there is room), `REPO`, `#NUMBER`,
+  `BRANCH`, `AGE`, clickable `LINK`.
 
-On narrow terminals the BRANCH column drops first; the status text
-("pass" / "fail" / "wait") drops next; the REPO cell shrinks last,
-trimming the organisation before the name and finally dropping the org
-entirely when it would still overflow.
+On narrow terminals the title is cut back to 55 columns first; the
+BRANCH column drops next, then the status text ("pass" / "fail" /
+"wait"). The REPO cell then drops its organisation, and only after that
+does the review word ("approved" / "reviewed" / ...) go, then the `#` and
+AGE columns, then the link shrinks to `↗`. The title is cut last (to no
+less than 20 columns), and if it still doesn't fit the repo name is
+trimmed.
 
 **Workflow runs panel.** Capped at 10 rows, sorted most-recently-updated
 first:
@@ -202,7 +211,9 @@ and cached.
 On narrow terminals the WORKFLOW name shrinks first (to 30 columns); the
 status word ("in_progress" / "success" / "failure") drops next, leaving
 the glyph; then the inline step is cut, with BRANCH dropped first if the
-step would otherwise be cut below 8 columns; the REPO cell shrinks last.
+step would otherwise be cut below 8 columns. The REPO cell then drops its
+organisation; after that the link shrinks to `↗` and the WORKFLOW name is
+cut further (to 20 columns), and the repo name is trimmed last.
 
 Muted repos are hidden from all three panels.
 
