@@ -366,7 +366,7 @@ func runWatch(client *ghclient.Client, cfg watchConfig) {
 							if wtPath, found := resolveWorktreePath(path, focusedBranch(st, focused)); found {
 								path = wtPath
 							}
-							openRepoInTerminal(path)
+							openRepoInTerminal(path, nil)
 						}
 						if sourceDir := effectiveRepoSourceDirFor(cfg, st); sourceDir != "" {
 							openRepoAt(sourceDir)

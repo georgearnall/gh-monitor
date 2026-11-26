@@ -537,6 +537,20 @@ func TestResolveWorktreePath(t *testing.T) {
 	})
 }
 
+func TestShellCommand_QuotesEveryArg(t *testing.T) {
+	got := shellCommand("/a b/it's", []string{"claude", "-n", "steward o/r#1", "/steward https://x/y?a=1&b=$c"})
+	want := `cd '/a b/it'\''s' && 'claude' '-n' 'steward o/r#1' '/steward https://x/y?a=1&b=$c'`
+	if got != want {
+		t.Errorf("shellCommand =\n%s\nwant\n%s", got, want)
+	}
+}
+
+func TestAppleScriptString_EscapesQuotesAndBackslashes(t *testing.T) {
+	if got, want := appleScriptString(`a "b" \c`), `"a \"b\" \\c"`; got != want {
+		t.Errorf("appleScriptString = %s, want %s", got, want)
+	}
+}
+
 func mustMkdirAll(t *testing.T, path string) {
 	t.Helper()
 	if err := os.MkdirAll(path, 0o755); err != nil {

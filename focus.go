@@ -404,26 +404,44 @@ func expandHome(path string) string {
 // (opening a new tab if it's already running), falling back to iTerm and
 // then Terminal.app; prefers Windows Terminal on Windows, falling back to
 // cmd.exe; tries common Linux terminal emulators in turn. Best-effort: logs
-// to stderr rather than erroring if nothing usable is found.
-func openRepoInTerminal(path string) {
+// to stderr rather than erroring if nothing usable is found. A non-empty
+// cmd (argv) is run in the new terminal instead of a plain shell.
+func openRepoInTerminal(path string, cmd []string) {
 	switch runtime.GOOS {
 	case "darwin":
-		for _, app := range []string{"Ghostty", "iTerm", "Terminal"} {
-			if exec.Command("open", "-a", app, path).Run() == nil {
-				return
+		if len(cmd) == 0 {
+			for _, app := range []string{"Ghostty", "iTerm", "Terminal"} {
+				if exec.Command("open", "-a", app, path).Run() == nil {
+					return
+				}
+			}
+		} else {
+			line := appleScriptString(shellCommand(path, cmd))
+			for _, c := range [][]string{
+				append([]string{"open", "-na", "Ghostty", "--args", "--working-directory=" + path, "-e"}, cmd...),
+				{"osascript", "-e", `tell application "iTerm" to tell (create window with default profile) to tell current session to write text ` + line},
+				{"osascript", "-e", `tell application "Terminal" to do script ` + line, "-e", `tell application "Terminal" to activate`},
+			} {
+				if exec.Command(c[0], c[1:]...).Run() == nil {
+					return
+				}
 			}
 		}
 		fmt.Fprintf(os.Stderr, "open terminal: no known terminal app found (tried Ghostty, iTerm, Terminal)\n")
 	case "windows":
 		if _, err := exec.LookPath("wt"); err == nil {
-			if err := exec.Command("wt", "-d", path).Start(); err == nil {
+			if err := exec.Command("wt", append([]string{"-d", path}, cmd...)...).Start(); err == nil {
 				return
 			}
 		}
 		// "start" takes /D as a dedicated flag for the starting directory,
 		// so cmd never has to interpret path as part of a command string
 		// (which would break on spaces and metacharacters like &).
-		if err := exec.Command("cmd", "/c", "start", "", "/D", path, "cmd").Start(); err != nil {
+		run := cmd
+		if len(run) == 0 {
+			run = []string{"cmd"}
+		}
+		if err := exec.Command("cmd", append([]string{"/c", "start", "", "/D", path}, run...)...).Start(); err != nil {
 			fmt.Fprintf(os.Stderr, "open terminal: %v\n", err)
 		}
 	default:
@@ -438,6 +456,11 @@ func openRepoInTerminal(path string) {
 			// metacharacters in path can't break or inject into the command.
 			{"xterm", []string{"-e", "sh", "-c", `cd "$1" && exec "$SHELL"`, "sh", path}},
 		}
+		if len(cmd) > 0 {
+			terms[0].args = append(terms[0].args, append([]string{"--"}, cmd...)...)
+			terms[1].args = append(terms[1].args, append([]string{"-e"}, cmd...)...)
+			terms[2].args = append([]string{"-e", "sh", "-c", `cd "$1" && shift && exec "$@"`, "sh", path}, cmd...)
+		}
 		for _, t := range terms {
 			if _, err := exec.LookPath(t.bin); err != nil {
 				continue
@@ -448,4 +471,20 @@ func openRepoInTerminal(path string) {
 		}
 		fmt.Fprintf(os.Stderr, "open terminal: no known terminal emulator found on PATH\n")
 	}
+}
+
+// shellCommand builds a POSIX shell line that cds into dir and runs argv,
+// single-quoting every word so spaces and metacharacters stay literal.
+func shellCommand(dir string, argv []string) string {
+	q := func(s string) string { return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'" }
+	parts := make([]string, len(argv))
+	for i, a := range argv {
+		parts[i] = q(a)
+	}
+	return "cd " + q(dir) + " && " + strings.Join(parts, " ")
+}
+
+// appleScriptString renders s as a quoted AppleScript string literal.
+func appleScriptString(s string) string {
+	return `"` + strings.NewReplacer(`\`, `\\`, `"`, `\"`).Replace(s) + `"`
 }
