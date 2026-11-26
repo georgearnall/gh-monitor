@@ -20,15 +20,15 @@ func TestVisibleWidth(t *testing.T) {
 	}{
 		{"hello", 5},
 		{"", 0},
-		{"\x1b[31mhello\x1b[0m", 5},                                  // CSI red wrapping
-		{"\x1b[1;31mbold red\x1b[0m", 8},                             // multi-param CSI
-		{"\x1b]8;;https://example.com\x1b\\link\x1b]8;;\x1b\\", 4},   // OSC 8 hyperlink with ST terminator
-		{"\x1b]2;title\x07stuff", 5},                                 // OSC 2 with BEL terminator
-		{"✓ pass", 6},                                                // multibyte but single rune ✓
+		{"\x1b[31mhello\x1b[0m", 5},      // CSI red wrapping
+		{"\x1b[1;31mbold red\x1b[0m", 8}, // multi-param CSI
+		{"\x1b]8;;https://example.com\x1b\\link\x1b]8;;\x1b\\", 4}, // OSC 8 hyperlink with ST terminator
+		{"\x1b]2;title\x07stuff", 5},                               // OSC 2 with BEL terminator
+		{"✓ pass", 6},                                              // multibyte but single rune ✓
 		{"a✓b", 3},
-		{"🐛 fix bug", 10},                                           // emoji is 2 columns wide
-		{"👨‍👩‍👧 family", 9},                                         // ZWJ sequence is one 2-column cluster
-		{"\x1b[2m🐛 x\x1b[0m", 4},                                    // emoji inside ANSI wrap
+		{"🐛 fix bug", 10},        // emoji is 2 columns wide
+		{"👨‍👩‍👧 family", 9},      // ZWJ sequence is one 2-column cluster
+		{"\x1b[2m🐛 x\x1b[0m", 4}, // emoji inside ANSI wrap
 	}
 	for _, c := range cases {
 		got := visibleWidth(c.in)
@@ -454,7 +454,7 @@ func TestVisibleWidth_DefaultFgIsStripped(t *testing.T) {
 
 func TestStateGlyph(t *testing.T) {
 	cases := []struct {
-		state                        notifs.PRState
+		state                           notifs.PRState
 		wantIcon, wantLabel, wantColour string
 	}{
 		{notifs.PRStateOpen, "●", "open", ansiGreen},
