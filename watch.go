@@ -403,14 +403,19 @@ func runWatch(client *ghclient.Client, cfg watchConfig) {
 					}
 				}
 			case 's':
+				p, _ := ownPR(st, focused)
 				_, lookErr := exec.LookPath("claude")
-				launch := func(sourceDir string) {
-					dir, argv, msg := stewardLaunch(st, focused, sourceDir, cfg.stewarded.Load(), lookErr == nil)
-					if argv != nil {
-						openRepoInTerminal(dir, argv)
-						msg = "steward started: " + focused.ID
-						url := strings.TrimPrefix(argv[len(argv)-1], "/steward ")
-						go rescanStewarded(url, stewardRescanDelays, time.Sleep, scanStewarded, func(m map[string]bool) {
+				if msg := stewardRefusal(p, cfg.stewarded.Load(), lookErr == nil); msg != "" {
+					statusMsg = msg
+					render()
+					break
+				}
+				withRepoSourceDir(func(sourceDir string) {
+					dir, msg := stewardDir(sourceDir, p)
+					if msg == "" {
+						openRepoInTerminal(dir, stewardCommand(p))
+						msg = "steward started: " + prKey(p)
+						go rescanStewarded(p.URL, stewardRescanDelays, time.Sleep, scanStewarded, func(m map[string]bool) {
 							cfg.stewarded.Store(m)
 							select {
 							case rescanned <- struct{}{}:
@@ -420,13 +425,7 @@ func runWatch(client *ghclient.Client, cfg watchConfig) {
 					}
 					statusMsg = msg
 					render()
-				}
-				if msg := stewardCheck(st, focused, cfg.stewarded.Load(), lookErr == nil); msg != "" {
-					statusMsg = msg
-					render()
-				} else {
-					withRepoSourceDir(launch)
-				}
+				})
 			case '?':
 				configMode = !configMode
 				render()

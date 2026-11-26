@@ -78,52 +78,51 @@ func isClaudeProcess(fields []string) bool {
 	return false
 }
 
-// stewardLaunch decides what `s` does on the focused row. It returns the
-// directory and argv for a new /steward session, or a footer message (and
-// nil argv) explaining why nothing can be launched. stewarded is the set of
-// PR URLs that already have a running steward session.
-func stewardLaunch(st *state.State, f focusTarget, sourceDir string, stewarded map[string]bool, claudeOK bool) (string, []string, string) {
-	p, msg := stewardPR(st, f, stewarded, claudeOK)
-	if msg != "" {
-		return "", nil, msg
+// ownPR returns the focused row's PR when it is one of the user's own PRs.
+func ownPR(st *state.State, focused focusTarget) (prs.PR, bool) {
+	if focused.Panel == "prs" {
+		for _, p := range st.LastPRs {
+			if prKey(p) == focused.ID {
+				return p, true
+			}
+		}
 	}
+	return prs.PR{}, false
+}
+
+// stewardRefusal returns the footer message explaining why `s` can't launch
+// on p, or "" when only the checkout lookup remains. p is the zero PR when
+// the focused row isn't one of the user's own PRs. stewarded is the set of
+// PR URLs that already have a running steward session.
+func stewardRefusal(p prs.PR, stewarded map[string]bool, claudeInstalled bool) string {
+	switch {
+	case p.URL == "":
+		return "steward: pick one of your own PRs"
+	case !claudeInstalled:
+		return "claude not installed"
+	case stewarded[p.URL]:
+		return fmt.Sprintf("already stewarded: %s (close its claude tab to restart)", prKey(p))
+	}
+	return ""
+}
+
+// stewardDir returns the local checkout of p's head branch under
+// sourceDir, or a footer message explaining why there isn't one.
+func stewardDir(sourceDir string, p prs.PR) (dir, msg string) {
 	repoPath, ok := resolveRepoPath(sourceDir, p.Repo)
 	if !ok {
-		return "", nil, fmt.Sprintf("repo not found in %s: %s", sourceDir, p.Repo)
+		return "", fmt.Sprintf("repo not found in %s: %s", sourceDir, p.Repo)
 	}
 	// resolveWorktreePath also matches the main clone when its current
 	// branch is the head branch.
-	dir, ok := resolveWorktreePath(repoPath, p.HeadBranch)
+	dir, ok = resolveWorktreePath(repoPath, p.HeadBranch)
 	if !ok {
-		return "", nil, "branch not checked out locally: " + p.HeadBranch
+		return "", "branch not checked out locally: " + p.HeadBranch
 	}
-	return dir, []string{"claude", "--permission-mode", "auto", "-n", "steward " + f.ID, "/steward " + p.URL}, ""
+	return dir, ""
 }
 
-// stewardCheck returns the footer message explaining why `s` can't launch
-// on the focused row, or "" when only the checkout lookup remains. It needs
-// no source directory, so it runs before prompting for one.
-func stewardCheck(st *state.State, f focusTarget, stewarded map[string]bool, claudeOK bool) string {
-	_, msg := stewardPR(st, f, stewarded, claudeOK)
-	return msg
-}
-
-// stewardPR finds the focused row's own PR and checks claude is available
-// and not already stewarding it.
-func stewardPR(st *state.State, f focusTarget, stewarded map[string]bool, claudeOK bool) (prs.PR, string) {
-	if f.Panel == "prs" {
-		for _, p := range st.LastPRs {
-			if prKey(p) != f.ID {
-				continue
-			}
-			if !claudeOK {
-				return p, "claude not installed"
-			}
-			if stewarded[p.URL] {
-				return p, fmt.Sprintf("already stewarded: %s (close its claude tab to restart)", f.ID)
-			}
-			return p, ""
-		}
-	}
-	return prs.PR{}, "steward: pick one of your own PRs"
+// stewardCommand is the argv that starts a /steward session on p.
+func stewardCommand(p prs.PR) []string {
+	return []string{"claude", "--permission-mode", "auto", "-n", "steward " + prKey(p), "/steward " + p.URL}
 }
