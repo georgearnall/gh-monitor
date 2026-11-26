@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"os/signal"
 	"sort"
 	"strings"
@@ -386,6 +387,34 @@ func runWatch(client *ghclient.Client, cfg watchConfig) {
 							render()
 						}
 					}
+				}
+			case 's':
+				_, lookErr := exec.LookPath("claude")
+				launch := func(sourceDir string) {
+					dir, argv, msg := stewardLaunch(st, focused, sourceDir, nil, lookErr == nil)
+					if argv != nil {
+						openRepoInTerminal(dir, argv)
+						msg = "steward started: " + focused.ID
+					}
+					statusMsg = msg
+					render()
+				}
+				if sourceDir := effectiveRepoSourceDirFor(cfg, st); sourceDir != "" || focused.Panel != "prs" {
+					launch(sourceDir)
+				} else {
+					ps = promptState{
+						active: true,
+						label:  "Repo source directory: ",
+						onConfirm: func(input string) {
+							input = strings.TrimRight(strings.TrimSpace(input), "/")
+							st.RepoSourceDir = input
+							if err := st.Save(); err != nil {
+								fmt.Fprintf(os.Stderr, "save state: %v\n", err)
+							}
+							launch(input)
+						},
+					}
+					render()
 				}
 			case '?':
 				configMode = !configMode
