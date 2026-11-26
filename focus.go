@@ -407,6 +407,15 @@ func expandHome(path string) string {
 // to stderr rather than erroring if nothing usable is found. A non-empty
 // cmd (argv) is run in the new terminal instead of a plain shell.
 func openRepoInTerminal(path string, cmd []string) {
+	// Directly spawned terminals inherit our env, so drop Claude session
+	// vars that would confuse a claude launched inside them.
+	command := func(name string, args ...string) *exec.Cmd {
+		c := exec.Command(name, args...)
+		if len(cmd) > 0 {
+			c.Env = withoutClaudeSessionEnv(os.Environ())
+		}
+		return c
+	}
 	switch runtime.GOOS {
 	case "darwin":
 		if len(cmd) == 0 {
@@ -430,7 +439,7 @@ func openRepoInTerminal(path string, cmd []string) {
 		fmt.Fprintf(os.Stderr, "open terminal: no known terminal app found (tried Ghostty, iTerm, Terminal)\n")
 	case "windows":
 		if _, err := exec.LookPath("wt"); err == nil {
-			if err := exec.Command("wt", append([]string{"-d", path}, cmd...)...).Start(); err == nil {
+			if err := command("wt", append([]string{"-d", path}, cmd...)...).Start(); err == nil {
 				return
 			}
 		}
@@ -441,7 +450,7 @@ func openRepoInTerminal(path string, cmd []string) {
 		if len(run) == 0 {
 			run = []string{"cmd"}
 		}
-		if err := exec.Command("cmd", append([]string{"/c", "start", "", "/D", path}, run...)...).Start(); err != nil {
+		if err := command("cmd", append([]string{"/c", "start", "", "/D", path}, run...)...).Start(); err != nil {
 			fmt.Fprintf(os.Stderr, "open terminal: %v\n", err)
 		}
 	default:
@@ -465,12 +474,25 @@ func openRepoInTerminal(path string, cmd []string) {
 			if _, err := exec.LookPath(t.bin); err != nil {
 				continue
 			}
-			if err := exec.Command(t.bin, t.args...).Start(); err == nil {
+			if err := command(t.bin, t.args...).Start(); err == nil {
 				return
 			}
 		}
 		fmt.Fprintf(os.Stderr, "open terminal: no known terminal emulator found on PATH\n")
 	}
+}
+
+// withoutClaudeSessionEnv returns env minus CLAUDECODE and CLAUDE_CODE_*
+// session vars.
+func withoutClaudeSessionEnv(env []string) []string {
+	out := make([]string, 0, len(env))
+	for _, kv := range env {
+		if strings.HasPrefix(kv, "CLAUDECODE=") || strings.HasPrefix(kv, "CLAUDE_CODE_") {
+			continue
+		}
+		out = append(out, kv)
+	}
+	return out
 }
 
 // shellCommand builds a POSIX shell line that cds into dir and runs argv,

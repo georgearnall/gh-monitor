@@ -551,6 +551,14 @@ func TestAppleScriptString_EscapesQuotesAndBackslashes(t *testing.T) {
 	}
 }
 
+func TestWithoutClaudeSessionEnv(t *testing.T) {
+	got := withoutClaudeSessionEnv([]string{"PATH=/bin", "CLAUDECODE=1", "CLAUDE_CODE_ENTRYPOINT=cli", "CLAUDE_CONFIG_DIR=/x", "HOME=/h"})
+	want := []string{"PATH=/bin", "CLAUDE_CONFIG_DIR=/x", "HOME=/h"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("withoutClaudeSessionEnv = %q, want %q", got, want)
+	}
+}
+
 func mustMkdirAll(t *testing.T, path string) {
 	t.Helper()
 	if err := os.MkdirAll(path, 0o755); err != nil {
