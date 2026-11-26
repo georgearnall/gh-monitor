@@ -18,11 +18,16 @@ claude --permission-mode auto -n steward acme/repo#1 /steward https://github.com
 vim /steward https://github.com/acme/repo/pull/3
 claude /steward stop
 claude --resume https://github.com/acme/repo/pull/5
+node /opt/bin/claude -n steward acme/repo#6 /steward https://github.com/acme/repo/pull/6
+/usr/bin/node /usr/lib/node_modules/@anthropic-ai/claude-code/cli.js /steward https://github.com/acme/repo/pull/7
+node /srv/app.js /steward https://github.com/acme/repo/pull/8
 `
 	got := parseStewarded(out)
 	want := map[string]bool{
 		"https://github.com/acme/repo/pull/1": true,
 		"https://github.com/acme/repo/pull/2": true,
+		"https://github.com/acme/repo/pull/6": true,
+		"https://github.com/acme/repo/pull/7": true,
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("parseStewarded = %v, want %v", got, want)

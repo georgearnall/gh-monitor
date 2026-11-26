@@ -29,7 +29,7 @@ func parseStewarded(out string) map[string]bool {
 	set := map[string]bool{}
 	for _, line := range strings.Split(out, "\n") {
 		fields := strings.Fields(line)
-		if len(fields) == 0 || filepath.Base(fields[0]) != "claude" {
+		if !isClaudeProcess(fields) {
 			continue
 		}
 		for i := 1; i+1 < len(fields); i++ {
@@ -39,6 +39,22 @@ func parseStewarded(out string) map[string]bool {
 		}
 	}
 	return set
+}
+
+// isClaudeProcess reports whether argv is a claude run, either the claude
+// binary itself or claude's script run under node.
+func isClaudeProcess(fields []string) bool {
+	if len(fields) == 0 {
+		return false
+	}
+	switch filepath.Base(fields[0]) {
+	case "claude":
+		return true
+	case "node":
+		return len(fields) > 1 && (filepath.Base(fields[1]) == "claude" ||
+			strings.HasSuffix(fields[1], "/@anthropic-ai/claude-code/cli.js"))
+	}
+	return false
 }
 
 // stewardLaunch decides what `s` does on the focused row. It returns the
