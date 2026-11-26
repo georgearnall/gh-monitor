@@ -156,7 +156,7 @@ func runWatch(client *ghclient.Client, cfg watchConfig) {
 	client.SetEtags(st.EtagCache)
 	cfg.muted = newRepoSet(st.MutedRepos)
 	cfg.dismissedRuns = newRunSet(dismissedRunSet(st))
-	cfg.stewarded = newRepoSet(nil)
+	cfg.stewarded = &syncSet[string]{}
 
 	if cfg.once {
 		runOnce(ctx, client, cfg, st)
