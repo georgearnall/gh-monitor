@@ -400,77 +400,75 @@ func expandHome(path string) string {
 	return filepath.Join(home, path[2:])
 }
 
-// openRepoInTerminal launches a terminal in path. Prefers Ghostty on macOS
-// (opening a new tab if it's already running), falling back to iTerm and
-// then Terminal.app; prefers Windows Terminal on Windows, falling back to
-// cmd.exe; tries common Linux terminal emulators in turn. Best-effort: logs
-// to stderr rather than erroring if nothing usable is found. A non-empty
-// cmd (argv) is run in the new terminal instead of a plain shell.
-func openRepoInTerminal(path string, cmd []string) {
-	switch runtime.GOOS {
-	case "darwin":
-		if len(cmd) == 0 {
-			for _, app := range []string{"Ghostty", "iTerm", "Terminal"} {
-				if exec.Command("open", "-a", app, path).Run() == nil {
-					return
-				}
-			}
-		} else {
-			line := appleScriptString(shellCommand(path, cmd))
-			for _, c := range [][]string{
-				append([]string{"open", "-na", "Ghostty", "--args", "--working-directory=" + path, "-e"}, cmd...),
-				{"osascript", "-e", `tell application "iTerm" to tell (create window with default profile) to tell current session to write text ` + line},
-				{"osascript", "-e", `tell application "Terminal" to do script ` + line, "-e", `tell application "Terminal" to activate`},
-			} {
-				if exec.Command(c[0], c[1:]...).Run() == nil {
-					return
-				}
-			}
-		}
-		fmt.Fprintf(os.Stderr, "open terminal: no known terminal app found (tried Ghostty, iTerm, Terminal)\n")
-	case "windows":
-		if _, err := exec.LookPath("wt"); err == nil {
-			if err := exec.Command("wt", append([]string{"-d", path}, cmd...)...).Start(); err == nil {
+// openRepoInTerminal launches a terminal in path, trying each of
+// terminalCommands in turn. Best-effort: logs to stderr rather than
+// erroring if nothing usable is found. A non-empty command (argv) is run in
+// the new terminal instead of a plain shell.
+func openRepoInTerminal(path string, command []string) {
+	for _, c := range terminalCommands(runtime.GOOS, path, command) {
+		if runtime.GOOS == "darwin" {
+			// open/osascript exit non-zero when the app isn't installed.
+			if exec.Command(c[0], c[1:]...).Run() == nil {
 				return
 			}
+			continue
 		}
+		if _, err := exec.LookPath(c[0]); err != nil {
+			continue
+		}
+		if exec.Command(c[0], c[1:]...).Start() == nil {
+			return
+		}
+	}
+	if runtime.GOOS == "darwin" {
+		fmt.Fprintf(os.Stderr, "open terminal: no known terminal app found (tried Ghostty, iTerm, Terminal)\n")
+	} else {
+		fmt.Fprintf(os.Stderr, "open terminal: no known terminal emulator found on PATH\n")
+	}
+}
+
+// terminalCommands returns the candidate argv lists, in preference order,
+// for opening a terminal in path on goos. Prefers Ghostty on macOS (a new
+// tab if it's already running), then iTerm and Terminal.app; Windows
+// Terminal then cmd.exe on Windows; common emulators elsewhere. With a
+// non-empty command each terminal runs it instead of a plain shell.
+func terminalCommands(goos, path string, command []string) [][]string {
+	var forms [][2][]string // {plain shell, run command}
+	switch goos {
+	case "darwin":
+		line := appleScriptString(shellCommand(path, command))
+		forms = [][2][]string{
+			{{"open", "-a", "Ghostty", path}, append([]string{"open", "-na", "Ghostty", "--args", "--working-directory=" + path, "-e"}, command...)},
+			{{"open", "-a", "iTerm", path}, {"osascript", "-e", `tell application "iTerm" to tell (create window with default profile) to tell current session to write text ` + line}},
+			{{"open", "-a", "Terminal", path}, {"osascript", "-e", `tell application "Terminal" to do script ` + line, "-e", `tell application "Terminal" to activate`}},
+		}
+	case "windows":
 		// "start" takes /D as a dedicated flag for the starting directory,
 		// so cmd never has to interpret path as part of a command string
 		// (which would break on spaces and metacharacters like &).
-		run := cmd
-		if len(run) == 0 {
-			run = []string{"cmd"}
-		}
-		if err := exec.Command("cmd", append([]string{"/c", "start", "", "/D", path}, run...)...).Start(); err != nil {
-			fmt.Fprintf(os.Stderr, "open terminal: %v\n", err)
+		forms = [][2][]string{
+			{{"wt", "-d", path}, append([]string{"wt", "-d", path}, command...)},
+			{{"cmd", "/c", "start", "", "/D", path, "cmd"}, append([]string{"cmd", "/c", "start", "", "/D", path}, command...)},
 		}
 	default:
-		terms := []struct {
-			bin  string
-			args []string
-		}{
-			{"gnome-terminal", []string{"--working-directory=" + path}},
-			{"konsole", []string{"--workdir", path}},
-			// path is passed as a positional parameter ($1) to the sh -c
-			// script rather than interpolated into it, so spaces and shell
-			// metacharacters in path can't break or inject into the command.
-			{"xterm", []string{"-e", "sh", "-c", `cd "$1" && exec "$SHELL"`, "sh", path}},
+		// xterm gets path as a positional parameter ($1) to the sh -c
+		// script rather than interpolated into it, so spaces and shell
+		// metacharacters in path can't break or inject into the command.
+		forms = [][2][]string{
+			{{"gnome-terminal", "--working-directory=" + path}, append([]string{"gnome-terminal", "--working-directory=" + path, "--"}, command...)},
+			{{"konsole", "--workdir", path}, append([]string{"konsole", "--workdir", path, "-e"}, command...)},
+			{{"xterm", "-e", "sh", "-c", `cd "$1" && exec "$SHELL"`, "sh", path}, append([]string{"xterm", "-e", "sh", "-c", `cd "$1" && shift && exec "$@"`, "sh", path}, command...)},
 		}
-		if len(cmd) > 0 {
-			terms[0].args = append(terms[0].args, append([]string{"--"}, cmd...)...)
-			terms[1].args = append(terms[1].args, append([]string{"-e"}, cmd...)...)
-			terms[2].args = append([]string{"-e", "sh", "-c", `cd "$1" && shift && exec "$@"`, "sh", path}, cmd...)
-		}
-		for _, t := range terms {
-			if _, err := exec.LookPath(t.bin); err != nil {
-				continue
-			}
-			if err := exec.Command(t.bin, t.args...).Start(); err == nil {
-				return
-			}
-		}
-		fmt.Fprintf(os.Stderr, "open terminal: no known terminal emulator found on PATH\n")
 	}
+	i := 0
+	if len(command) > 0 {
+		i = 1
+	}
+	out := make([][]string, len(forms))
+	for j, f := range forms {
+		out[j] = f[i]
+	}
+	return out
 }
 
 // shellCommand builds a POSIX shell line that cds into dir and runs argv,
