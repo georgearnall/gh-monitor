@@ -404,14 +404,14 @@ func runWatch(client *ghclient.Client, cfg watchConfig) {
 					if argv != nil {
 						openRepoInTerminal(dir, argv)
 						msg = "steward started: " + focused.ID
-						go func() {
-							time.Sleep(2 * time.Second)
-							cfg.stewarded.Store(scanStewarded())
+						url := strings.TrimPrefix(argv[len(argv)-1], "/steward ")
+						go rescanStewarded(url, stewardRescanDelays, time.Sleep, scanStewarded, func(m map[string]bool) {
+							cfg.stewarded.Store(m)
 							select {
 							case rescanned <- struct{}{}:
 							default:
 							}
-						}()
+						})
 					}
 					statusMsg = msg
 					render()

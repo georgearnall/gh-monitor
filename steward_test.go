@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"testing"
+	"time"
 
 	"github.com/georgearnall/gh-monitor/internal/notifs"
 	"github.com/georgearnall/gh-monitor/internal/prs"
@@ -31,6 +32,38 @@ node /srv/app.js /steward https://github.com/acme/repo/pull/8
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("parseStewarded = %v, want %v", got, want)
+	}
+}
+
+func TestRescanStewarded_StopsOnceURLAppears(t *testing.T) {
+	const url = "https://github.com/acme/repo/pull/1"
+	var slept []time.Duration
+	var stored []map[string]bool
+	scans := 0
+	rescanStewarded(url, []time.Duration{2, 5, 10},
+		func(d time.Duration) { slept = append(slept, d) },
+		func() map[string]bool {
+			scans++
+			if scans == 2 {
+				return map[string]bool{url: true}
+			}
+			return map[string]bool{}
+		},
+		func(m map[string]bool) { stored = append(stored, m) })
+	if want := []time.Duration{2, 3}; !reflect.DeepEqual(slept, want) {
+		t.Errorf("slept = %v, want %v", slept, want)
+	}
+	if len(stored) != 2 || !stored[1][url] {
+		t.Errorf("stored = %v, want two scans ending with %s", stored, url)
+	}
+}
+
+func TestRescanStewarded_GivesUpAfterLastDelay(t *testing.T) {
+	scans := 0
+	rescanStewarded("u", []time.Duration{2, 5, 10}, func(time.Duration) {},
+		func() map[string]bool { scans++; return nil }, func(map[string]bool) {})
+	if scans != 3 {
+		t.Errorf("scans = %d, want 3", scans)
 	}
 }
 

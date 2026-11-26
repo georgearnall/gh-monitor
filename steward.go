@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
 
 	"github.com/georgearnall/gh-monitor/internal/state"
 )
@@ -39,6 +40,25 @@ func parseStewarded(out string) map[string]bool {
 		}
 	}
 	return set
+}
+
+// stewardRescanDelays are the cumulative waits after a launch at which the
+// process list is rescanned for the new steward session.
+var stewardRescanDelays = []time.Duration{2 * time.Second, 5 * time.Second, 10 * time.Second}
+
+// rescanStewarded waits until each cumulative delay, scans and stores the
+// stewarded set, and stops early once url shows up.
+func rescanStewarded(url string, delays []time.Duration, sleep func(time.Duration), scan func() map[string]bool, store func(map[string]bool)) {
+	var waited time.Duration
+	for _, d := range delays {
+		sleep(d - waited)
+		waited = d
+		set := scan()
+		store(set)
+		if set[url] {
+			return
+		}
+	}
 }
 
 // isClaudeProcess reports whether argv is a claude run, either the claude
