@@ -390,6 +390,30 @@ func header(_ Snapshot, tty bool) {
 	pln(tty, title)
 }
 
+var keyHints = []string{"[↑↓] move", "[↵] open", "[m] read", "[d] dismiss", "[x] mute repo", "[t] ticket", "[g] terminal", "[r] refresh", "[?] config", "[q] quit"}
+
+// wrapHints packs hints greedily into lines no wider than width, breaking
+// only between whole hints. width <= 0 means unconstrained.
+func wrapHints(hints []string, width int) []string {
+	var lines []string
+	line := ""
+	for _, h := range hints {
+		switch {
+		case line == "":
+			line = h
+		case width > 0 && visibleWidth(line)+2+visibleWidth(h) > width:
+			lines = append(lines, line)
+			line = h
+		default:
+			line += "  " + h
+		}
+	}
+	if line != "" {
+		lines = append(lines, line)
+	}
+	return lines
+}
+
 func footer(snap Snapshot, tty bool) {
 	parts := []string{polledLabel(snap)}
 	if len(snap.Notifs) > 0 {
@@ -405,7 +429,9 @@ func footer(snap Snapshot, tty bool) {
 	}
 	pln(tty)
 	if tty {
-		pln(tty, dim("[↑↓] move  [↵] open  [m] read  [d] dismiss  [x] mute repo  [t] ticket  [g] terminal  [r] refresh  [?] config  [q] quit", tty))
+		for _, line := range wrapHints(keyHints, snap.TermWidth) {
+			pln(tty, dim(line, tty))
+		}
 	}
 	pln(tty, dim(join(parts, " · "), tty))
 	if snap.BgErr != "" {

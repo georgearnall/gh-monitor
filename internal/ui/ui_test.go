@@ -1476,3 +1476,20 @@ func TestProgressLine_UsesFullWidthThenTruncates(t *testing.T) {
 		t.Errorf("parallel suffix must survive truncation: %q", narrow)
 	}
 }
+
+func TestWrapHints_BreaksBetweenWholeHints(t *testing.T) {
+	hints := []string{"[a] one", "[b] two", "[c] three"}
+	got := wrapHints(hints, 16)
+	want := []string{"[a] one  [b] two", "[c] three"}
+	if strings.Join(got, "|") != strings.Join(want, "|") {
+		t.Errorf("wrapHints = %q, want %q", got, want)
+	}
+	if got := wrapHints(hints, 0); len(got) != 1 {
+		t.Errorf("width 0 should not wrap, got %q", got)
+	}
+	for _, line := range wrapHints(keyHints, 40) {
+		if visibleWidth(line) > 40 {
+			t.Errorf("line %q wider than 40", line)
+		}
+	}
+}
