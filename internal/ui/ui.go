@@ -393,7 +393,7 @@ func header(_ Snapshot, tty bool) {
 	pln(tty, title)
 }
 
-var keyHints = []string{"[↑↓] move", "[↵] open", "[m] read", "[d] dismiss", "[x] mute repo", "[t] ticket", "[g] terminal", "[r] refresh", "[?] config", "[q] quit"}
+var keyHints = []string{"[↑↓] move", "[↵] open", "[m] read", "[d] dismiss", "[x] mute repo", "[t] ticket", "[g] terminal", "[s] steward","[r] refresh", "[?] config", "[q] quit"}
 
 // wrapHints packs hints greedily into lines no wider than width, breaking
 // only between whole hints. width <= 0 means unconstrained.

@@ -26,7 +26,7 @@ WORKFLOW RUNS
     └ failed at test › Run unit tests
 
 polled 11:44:53 · 20 repos · 3 notifs · 2 PRs · rate limit 4823/5000 · next poll in 30s
-[↑↓] move  [↵] open  [m] read  [d] dismiss  [x] mute repo  [t] ticket  [g] terminal  [r] refresh  [?] config  [q] quit
+[↑↓] move  [↵] open  [m] read  [d] dismiss  [x] mute repo  [t] ticket  [g] terminal  [s] steward  [r] refresh  [?] config  [q] quit
 ```
 
 ## What it does
@@ -130,6 +130,7 @@ the discovered repo set and exits. `help` prints the full help page.
 | `x` | Mute the focused row's repo: hidden from every panel, no longer polled, no alerts. Unmute from the config pane |
 | `t` | Open the Jira ticket referenced in the focused row's title. Prompts for the Jira base URL on first use |
 | `g` | Open the focused row's repo in a terminal (Ghostty preferred, with fallbacks). Prompts for the repo source directory on first use. Shows a footer message if the repo isn't cloned locally |
+| `s` | On one of your own PRs, open a terminal tab in the local checkout of its branch and run `claude --permission-mode auto -n "steward <repo>#<n>" "/steward <pr url>"`. PRs with a running steward session get an orange `✻`, and `s` won't start a second one. Shows a footer message if Claude Code is missing, the repo isn't cloned or the branch isn't checked out. No marker on Windows |
 | `r`, `R`, space | Trigger an immediate refresh |
 | `?` | Open / close the config pane |
 | `q`, `Q`, Ctrl-C | Quit cleanly, restore terminal, save state |

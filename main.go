@@ -137,6 +137,10 @@ KEYBINDINGS (watch mode)
                         directory is configured, prompts for it and saves
                         it. If the repo isn't cloned locally, shows a
                         footer message instead.
+  s                     Start Claude Code's /steward on the focused PR (your
+                        own PRs only) in a new terminal tab, in the local
+                        checkout of its branch. PRs with a running steward
+                        session show an orange ✻.
   r  /  R  /  space     Refresh now (don't wait for the next interval)
   ?                     Open/close the config pane
   q  /  Q  /  Ctrl-C    Quit cleanly, restore terminal, save state
