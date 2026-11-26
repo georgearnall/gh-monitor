@@ -219,6 +219,27 @@ func runWatch(client *ghclient.Client, cfg watchConfig) {
 			renderFromState(st, cfg, refreshing, focused, pl, statusMsg)
 		}
 	}
+	// withRepoSourceDir calls fn with the repo source directory, first
+	// prompting for it (and saving it) when none is configured.
+	withRepoSourceDir := func(fn func(sourceDir string)) {
+		if sourceDir := effectiveRepoSourceDirFor(cfg, st); sourceDir != "" {
+			fn(sourceDir)
+			return
+		}
+		ps = promptState{
+			active: true,
+			label:  "Repo source directory: ",
+			onConfirm: func(input string) {
+				input = strings.TrimRight(strings.TrimSpace(input), "/")
+				st.RepoSourceDir = input
+				if err := st.Save(); err != nil {
+					fmt.Fprintf(os.Stderr, "save state: %v\n", err)
+				}
+				fn(input)
+			},
+		}
+		render()
+	}
 
 	for {
 		select {
@@ -378,23 +399,7 @@ func runWatch(client *ghclient.Client, cfg watchConfig) {
 							}
 							openRepoInTerminal(path, nil)
 						}
-						if sourceDir := effectiveRepoSourceDirFor(cfg, st); sourceDir != "" {
-							openRepoAt(sourceDir)
-						} else {
-							ps = promptState{
-								active: true,
-								label:  "Repo source directory: ",
-								onConfirm: func(input string) {
-									input = strings.TrimRight(strings.TrimSpace(input), "/")
-									st.RepoSourceDir = input
-									if err := st.Save(); err != nil {
-										fmt.Fprintf(os.Stderr, "save state: %v\n", err)
-									}
-									openRepoAt(input)
-								},
-							}
-							render()
-						}
+						withRepoSourceDir(openRepoAt)
 					}
 				}
 			case 's':
@@ -416,22 +421,11 @@ func runWatch(client *ghclient.Client, cfg watchConfig) {
 					statusMsg = msg
 					render()
 				}
-				if sourceDir := effectiveRepoSourceDirFor(cfg, st); sourceDir != "" || focused.Panel != "prs" {
-					launch(sourceDir)
-				} else {
-					ps = promptState{
-						active: true,
-						label:  "Repo source directory: ",
-						onConfirm: func(input string) {
-							input = strings.TrimRight(strings.TrimSpace(input), "/")
-							st.RepoSourceDir = input
-							if err := st.Save(); err != nil {
-								fmt.Fprintf(os.Stderr, "save state: %v\n", err)
-							}
-							launch(input)
-						},
-					}
+				if msg := stewardCheck(st, focused, cfg.stewarded.Load(), lookErr == nil); msg != "" {
+					statusMsg = msg
 					render()
+				} else {
+					withRepoSourceDir(launch)
 				}
 			case '?':
 				configMode = !configMode

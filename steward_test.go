@@ -67,6 +67,32 @@ func TestRescanStewarded_GivesUpAfterLastDelay(t *testing.T) {
 	}
 }
 
+func TestStewardCheck_RunsWithoutSourceDir(t *testing.T) {
+	st := mkState(t)
+	st.LastPRs = []prs.PR{{Repo: "acme/repo", Number: 1, URL: "https://github.com/acme/repo/pull/1"}}
+	st.LastAssignedPRs = []prs.PR{{Repo: "acme/repo", Number: 9}}
+	own := focusTarget{"prs", "acme/repo#1"}
+	cases := []struct {
+		name      string
+		f         focusTarget
+		stewarded map[string]bool
+		claude    bool
+		want      string
+	}{
+		{"own pr ok", own, nil, true, ""},
+		{"assigned pr", focusTarget{"prs", "acme/repo#9"}, nil, true, "steward: pick one of your own PRs"},
+		{"claude missing", own, nil, false, "claude not installed"},
+		{"already stewarded", own, map[string]bool{"https://github.com/acme/repo/pull/1": true}, true, "already stewarded: acme/repo#1 (close its claude tab to restart)"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := stewardCheck(st, c.f, c.stewarded, c.claude); got != c.want {
+				t.Errorf("stewardCheck = %q, want %q", got, c.want)
+			}
+		})
+	}
+}
+
 func TestStewardLaunch(t *testing.T) {
 	src := t.TempDir()
 	clone := filepath.Join(src, "repo")
