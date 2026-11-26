@@ -48,6 +48,9 @@ type watchConfig struct {
 	// dismissedRuns mirrors state.DismissedRuns the same way, so progress
 	// is fetched for the runs the panel actually shows.
 	dismissedRuns *syncSet[int64]
+	// stewarded holds PR URLs with a running steward session, refreshed by
+	// a process scan each poll and right after a launch.
+	stewarded *syncSet[string]
 
 	// Discovery cache: populated by doRefresh, reused until repoRefresh elapses.
 	lastDiscovery time.Time
@@ -153,6 +156,7 @@ func runWatch(client *ghclient.Client, cfg watchConfig) {
 	client.SetEtags(st.EtagCache)
 	cfg.muted = newRepoSet(st.MutedRepos)
 	cfg.dismissedRuns = newRunSet(dismissedRunSet(st))
+	cfg.stewarded = newRepoSet(nil)
 
 	if cfg.once {
 		runOnce(ctx, client, cfg, st)
@@ -193,6 +197,8 @@ func runWatch(client *ghclient.Client, cfg watchConfig) {
 	dismissQueue := make(chan dismissReq, 128)
 	dismissOutcomes := make(chan dismissOutcome, 16)
 	go dismissWorker(ctx, client, dismissQueue, dismissOutcomes)
+	// rescanned fires once a post-launch steward process scan finishes.
+	rescanned := make(chan struct{}, 1)
 
 	var (
 		refreshing  bool
@@ -218,6 +224,9 @@ func runWatch(client *ghclient.Client, cfg watchConfig) {
 		select {
 		case <-started:
 			refreshing = true
+			render()
+
+		case <-rescanned:
 			render()
 
 		case <-winch:
@@ -391,10 +400,18 @@ func runWatch(client *ghclient.Client, cfg watchConfig) {
 			case 's':
 				_, lookErr := exec.LookPath("claude")
 				launch := func(sourceDir string) {
-					dir, argv, msg := stewardLaunch(st, focused, sourceDir, nil, lookErr == nil)
+					dir, argv, msg := stewardLaunch(st, focused, sourceDir, cfg.stewarded.Load(), lookErr == nil)
 					if argv != nil {
 						openRepoInTerminal(dir, argv)
 						msg = "steward started: " + focused.ID
+						go func() {
+							time.Sleep(2 * time.Second)
+							cfg.stewarded.Store(scanStewarded())
+							select {
+							case rescanned <- struct{}{}:
+							default:
+							}
+						}()
 					}
 					statusMsg = msg
 					render()
@@ -564,6 +581,12 @@ func doRefresh(ctx context.Context, client *ghclient.Client, cfg *watchConfig) p
 		res.NotifErr = notifErr
 		return nil
 	})
+	if cfg.stewarded != nil {
+		g.Go(func() error {
+			cfg.stewarded.Store(scanStewarded())
+			return nil
+		})
+	}
 	_ = g.Wait()
 
 	if login, err := client.Viewer(); err == nil {
@@ -862,6 +885,7 @@ func renderFromState(st *state.State, cfg watchConfig, refreshing bool, f focusT
 		StatusLine:    statusLine,
 		Links:         ui.SupportsLinks(),
 		ReadRunIDs:    readRunIDs(st),
+		Stewarded:     cfg.stewarded.Load(),
 	}
 	switch f.Panel {
 	case "notifs":

@@ -2,9 +2,44 @@ package main
 
 import (
 	"fmt"
+	"os/exec"
+	"path/filepath"
+	"runtime"
+	"strings"
 
 	"github.com/georgearnall/gh-monitor/internal/state"
 )
+
+// scanStewarded returns the PR URLs that running claude processes were
+// started to /steward. Always empty on Windows, where there's no cheap ps.
+func scanStewarded() map[string]bool {
+	if runtime.GOOS == "windows" {
+		return nil
+	}
+	out, err := exec.Command("ps", "-axo", "args").Output()
+	if err != nil {
+		return nil
+	}
+	return parseStewarded(string(out))
+}
+
+// parseStewarded extracts the URL following "/steward " from each claude
+// process line of `ps -axo args` output.
+func parseStewarded(out string) map[string]bool {
+	set := map[string]bool{}
+	for _, line := range strings.Split(out, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 0 || filepath.Base(fields[0]) != "claude" {
+			continue
+		}
+		for i := 1; i+1 < len(fields); i++ {
+			if fields[i] == "/steward" && strings.HasPrefix(fields[i+1], "https://") {
+				set[fields[i+1]] = true
+			}
+		}
+	}
+	return set
+}
 
 // stewardLaunch decides what `s` does on the focused row. It returns the
 // directory and argv for a new /steward session, or a footer message (and
