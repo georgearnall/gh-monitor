@@ -175,7 +175,7 @@ type Snapshot struct {
 	StatusLine     string          // non-empty: show a one-line status message at the footer (ignored while PromptLine is active)
 	Links          bool            // whether the terminal supports OSC 8 hyperlinks; hides LINK column when false
 	ReadRunIDs     map[int64]bool  // run IDs the user has marked read; rendered dimmed
-	Stewarded      map[string]bool // PR URLs with a running steward session; marked ✻
+	Stewarded      map[string]bool // PR URLs with a running steward session; marked ✻ on own PRs
 }
 
 // Render redraws the status table. Safe to call when stdout is not a tty;
@@ -206,7 +206,7 @@ func Render(snap Snapshot) {
 	pln(tty)
 	pln(tty, dim("PULL REQUESTS", tty))
 	if len(snap.PRs) > 0 {
-		writePRTable(snap.PRs, snap.FocusedPRKey, tty, snap.TermWidth, snap.JiraURL, snap.Links, snap.Stewarded)
+		writePRTable(snap.PRs, prTableOpts{snap.FocusedPRKey, tty, snap.TermWidth, snap.JiraURL, snap.Links, snap.Stewarded})
 	} else {
 		pln(tty, dim("no open pull requests", tty))
 	}
@@ -214,7 +214,7 @@ func Render(snap Snapshot) {
 	if len(snap.AssignedPRs) > 0 {
 		pln(tty)
 		pln(tty, dim("ASSIGNED PULL REQUESTS", tty))
-		writePRTable(snap.AssignedPRs, snap.FocusedPRKey, tty, snap.TermWidth, snap.JiraURL, snap.Links, snap.Stewarded)
+		writePRTable(snap.AssignedPRs, prTableOpts{snap.FocusedPRKey, tty, snap.TermWidth, snap.JiraURL, snap.Links, nil})
 	}
 
 	pln(tty)
@@ -656,22 +656,33 @@ type prLayout struct {
 	shortLink     bool // link shown as a bare ↗ under a blank header
 }
 
-func writePRTable(ps []prs.PR, focusedKey string, tty bool, termWidth int, jiraURL string, links bool, stewarded map[string]bool) {
+// prTableOpts is how writePRTable renders a PR table.
+type prTableOpts struct {
+	focusedKey string
+	tty        bool
+	termWidth  int
+	jiraURL    string
+	links      bool
+	stewarded  map[string]bool // PR URLs to mark with ✻; nil for assigned PRs
+}
+
+func writePRTable(ps []prs.PR, opts prTableOpts) {
+	termWidth := opts.termWidth
 	l := prLayout{titleLimit: prTitleWide, branch: true, numAge: true}
-	raw := buildPRRows(ps, focusedKey, tty, jiraURL, links, stewarded, l)
+	raw := buildPRRows(ps, opts, l)
 	if termWidth > 0 {
 		over := func() int { return tableWidth(raw) - termWidth }
 		if o := over(); o > 0 {
 			l.titleLimit = max(prTitleMax, columnWidths(raw)[prTitleCol]-o)
-			raw = buildPRRows(ps, focusedKey, tty, jiraURL, links, stewarded, l)
+			raw = buildPRRows(ps, opts, l)
 		}
 		if over() > 0 {
 			l.branch = false
-			raw = buildPRRows(ps, focusedKey, tty, jiraURL, links, stewarded, l)
+			raw = buildPRRows(ps, opts, l)
 		}
 		if over() > 0 {
 			l.compactStatus = true
-			raw = buildPRRows(ps, focusedKey, tty, jiraURL, links, stewarded, l)
+			raw = buildPRRows(ps, opts, l)
 		}
 		// From here the repo's organisations count as free room: they are
 		// trimmed before anything else is shed.
@@ -685,21 +696,22 @@ func writePRTable(ps []prs.PR, focusedKey string, tty bool, termWidth int, jiraU
 				break
 			}
 			shed()
-			raw = buildPRRows(ps, focusedKey, tty, jiraURL, links, stewarded, l)
+			raw = buildPRRows(ps, opts, l)
 		}
 		if o := tight(); o > 0 {
 			l.titleLimit = max(titleMin, columnWidths(raw)[prTitleCol]-o)
-			raw = buildPRRows(ps, focusedKey, tty, jiraURL, links, stewarded, l)
+			raw = buildPRRows(ps, opts, l)
 		}
 	}
-	t := newPanelTable(raw[0], prRepoCol, termWidth, tty)
+	t := newPanelTable(raw[0], prRepoCol, termWidth, opts.tty)
 	for _, r := range raw[1:] {
 		t.addRow(r, false)
 	}
 	t.render()
 }
 
-func buildPRRows(ps []prs.PR, focusedKey string, tty bool, jiraURL string, links bool, stewarded map[string]bool, l prLayout) [][]string {
+func buildPRRows(ps []prs.PR, opts prTableOpts, l prLayout) [][]string {
+	focusedKey, tty, jiraURL, links, stewarded := opts.focusedKey, opts.tty, opts.jiraURL, opts.links, opts.stewarded
 	header := []string{"  ", "CHECKS", "REVIEW", "TITLE", "REPO"}
 	if l.numAge {
 		header = append(header, "#")
