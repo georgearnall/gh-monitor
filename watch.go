@@ -52,6 +52,7 @@ type watchConfig struct {
 	// after a launch) and stewardPending the PR URLs launched since. Both
 	// are owned by the main loop; see mergeStewarded.
 	stewardScan    map[string]bool
+	stewardScanAt  time.Time // when stewardScan started
 	stewardPending map[string]time.Time
 
 	// Discovery cache: populated by doRefresh, reused until repoRefresh elapses.
@@ -146,6 +147,7 @@ type pollResult struct {
 	NotifErr    error
 	DiscErr     error
 	Stewarded   map[string]bool // PR URLs from the steward process scan
+	StewardedAt time.Time       // when that scan started
 }
 
 // stewarded is the set of PR URLs to treat as having a steward session.
@@ -154,10 +156,14 @@ func (c watchConfig) stewarded(now time.Time) map[string]bool {
 	return set
 }
 
-// applyStewardScan stores a fresh steward process scan and drops the
-// pending launches it settles.
-func (c *watchConfig) applyStewardScan(scan map[string]bool, now time.Time) {
-	c.stewardScan = scan
+// applyStewardScan stores a steward process scan that started at scannedAt
+// and drops the pending launches it settles. A scan older than the stored
+// one (a slow poll overtaken by a post-launch rescan) is ignored.
+func (c *watchConfig) applyStewardScan(scan map[string]bool, scannedAt, now time.Time) {
+	if scannedAt.Before(c.stewardScanAt) {
+		return
+	}
+	c.stewardScan, c.stewardScanAt = scan, scannedAt
 	_, c.stewardPending = mergeStewarded(scan, c.stewardPending, now)
 }
 
@@ -213,7 +219,7 @@ func runWatch(client *ghclient.Client, cfg watchConfig) {
 	dismissOutcomes := make(chan dismissOutcome, 16)
 	go dismissWorker(ctx, client, dismissQueue, dismissOutcomes)
 	// stewardScans carries post-launch steward process scans to the loop.
-	stewardScans := make(chan map[string]bool, 4)
+	stewardScans := make(chan stewardScanResult, 4)
 
 	var (
 		refreshing  bool
@@ -263,7 +269,7 @@ func runWatch(client *ghclient.Client, cfg watchConfig) {
 			render()
 
 		case scan := <-stewardScans:
-			cfg.applyStewardScan(scan, time.Now())
+			cfg.applyStewardScan(scan.urls, scan.at, time.Now())
 			render()
 
 		case <-winch:
@@ -435,9 +441,9 @@ func runWatch(client *ghclient.Client, cfg watchConfig) {
 							cfg.stewardPending = map[string]time.Time{}
 						}
 						cfg.stewardPending[p.URL] = time.Now()
-						go rescanStewarded(p.URL, stewardRescanDelays, time.Sleep, scanStewarded, func(m map[string]bool) {
+						go rescanStewarded(p.URL, stewardRescanDelays, time.Sleep, scanStewarded, func(m map[string]bool, at time.Time) {
 							select {
-							case stewardScans <- m:
+							case stewardScans <- stewardScanResult{m, at}:
 							case <-ctx.Done():
 							}
 						})
@@ -594,6 +600,7 @@ func doRefresh(ctx context.Context, client *ghclient.Client, cfg *watchConfig) p
 		return nil
 	})
 	g.Go(func() error {
+		res.StewardedAt = time.Now()
 		res.Stewarded = scanStewarded()
 		return nil
 	})
@@ -706,7 +713,7 @@ func attachProgress(client *ghclient.Client, cfg *watchConfig, rs []runs.Run, vi
 // applyResult updates state.Runs, fires notifications, and updates the cache
 // snapshot fields used for fast startup next time.
 func applyResult(st *state.State, cfg *watchConfig, res pollResult) {
-	cfg.applyStewardScan(res.Stewarded, time.Now())
+	cfg.applyStewardScan(res.Stewarded, res.StewardedAt, time.Now())
 	if res.DiscErr != nil || res.PollErr != nil || res.PRErr != nil || res.NotifErr != nil {
 		// Still update RateLimit so the footer reflects reality.
 		st.LastRateLimit = res.RateLimit

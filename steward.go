@@ -47,15 +47,22 @@ func parseStewarded(out string) map[string]bool {
 // process list is rescanned for the new steward session.
 var stewardRescanDelays = []time.Duration{2 * time.Second, 5 * time.Second, 10 * time.Second}
 
+// stewardScanResult is a steward process scan and when it started.
+type stewardScanResult struct {
+	urls map[string]bool
+	at   time.Time
+}
+
 // rescanStewarded waits until each cumulative delay, scans and stores the
-// stewarded set, and stops early once url shows up.
-func rescanStewarded(url string, delays []time.Duration, sleep func(time.Duration), scan func() map[string]bool, store func(map[string]bool)) {
+// stewarded set with the scan's start time, and stops early once url shows up.
+func rescanStewarded(url string, delays []time.Duration, sleep func(time.Duration), scan func() map[string]bool, store func(map[string]bool, time.Time)) {
 	var waited time.Duration
 	for _, d := range delays {
 		sleep(d - waited)
 		waited = d
+		at := time.Now()
 		set := scan()
-		store(set)
+		store(set, at)
 		if set[url] {
 			return
 		}

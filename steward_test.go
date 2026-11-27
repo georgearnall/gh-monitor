@@ -49,7 +49,7 @@ func TestRescanStewarded_StopsOnceURLAppears(t *testing.T) {
 			}
 			return map[string]bool{}
 		},
-		func(m map[string]bool) { stored = append(stored, m) })
+		func(m map[string]bool, _ time.Time) { stored = append(stored, m) })
 	if want := []time.Duration{2, 3}; !reflect.DeepEqual(slept, want) {
 		t.Errorf("slept = %v, want %v", slept, want)
 	}
@@ -61,7 +61,7 @@ func TestRescanStewarded_StopsOnceURLAppears(t *testing.T) {
 func TestRescanStewarded_GivesUpAfterLastDelay(t *testing.T) {
 	scans := 0
 	rescanStewarded("u", []time.Duration{2, 5, 10}, func(time.Duration) {},
-		func() map[string]bool { scans++; return nil }, func(map[string]bool) {})
+		func() map[string]bool { scans++; return nil }, func(map[string]bool, time.Time) {})
 	if scans != 3 {
 		t.Errorf("scans = %d, want 3", scans)
 	}
@@ -187,5 +187,17 @@ func TestStewardCommand(t *testing.T) {
 	want := []string{"claude", "--permission-mode", "auto", "-n", "steward acme/repo#1", "/steward https://github.com/acme/repo/pull/1"}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("stewardCommand = %q, want %q", got, want)
+	}
+}
+
+func TestApplyStewardScan_IgnoresOlderScan(t *testing.T) {
+	const url = "https://github.com/acme/repo/pull/1"
+	t0 := time.Unix(1000, 0)
+	var c watchConfig
+	c.applyStewardScan(map[string]bool{url: true}, t0.Add(2*time.Second), t0.Add(2*time.Second))
+	// A poll scan that started before the rescan finishes after it.
+	c.applyStewardScan(map[string]bool{}, t0, t0.Add(3*time.Second))
+	if !c.stewarded(t0.Add(3 * time.Second))[url] {
+		t.Errorf("older scan replaced newer one: %v", c.stewardScan)
 	}
 }
