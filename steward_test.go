@@ -67,6 +67,33 @@ func TestRescanStewarded_GivesUpAfterLastDelay(t *testing.T) {
 	}
 }
 
+func TestMergeStewarded(t *testing.T) {
+	now := time.Unix(1000, 0)
+	scan := map[string]bool{"running": true, "found": true}
+	pending := map[string]time.Time{
+		"found":   now.Add(-time.Second),      // the scan now shows it
+		"fresh":   now.Add(-14 * time.Second), // not in the scan yet: kept
+		"expired": now.Add(-15 * time.Second), // never showed up: dropped
+	}
+	set, left := mergeStewarded(scan, pending, now)
+	if want := map[string]bool{"running": true, "found": true, "fresh": true}; !reflect.DeepEqual(set, want) {
+		t.Errorf("set = %v, want %v", set, want)
+	}
+	if want := map[string]time.Time{"fresh": pending["fresh"]}; !reflect.DeepEqual(left, want) {
+		t.Errorf("pending = %v, want %v", left, want)
+	}
+	if len(pending) != 3 {
+		t.Errorf("input pending was mutated: %v", pending)
+	}
+
+	// A scan without a just-launched URL (stale, or taken before the
+	// session started) keeps it marked.
+	set, left = mergeStewarded(nil, map[string]time.Time{"u": now}, now)
+	if !set["u"] || left["u"] != now {
+		t.Errorf("stale scan dropped pending marker: set=%v pending=%v", set, left)
+	}
+}
+
 func TestOwnPR_OnlyMatchesOwnPRs(t *testing.T) {
 	st := mkState(t)
 	own := prs.PR{Repo: "acme/repo", Number: 1, URL: "https://github.com/acme/repo/pull/1"}

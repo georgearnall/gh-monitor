@@ -48,9 +48,11 @@ type watchConfig struct {
 	// dismissedRuns mirrors state.DismissedRuns the same way, so progress
 	// is fetched for the runs the panel actually shows.
 	dismissedRuns *syncSet[int64]
-	// stewarded holds PR URLs with a running steward session, refreshed by
-	// a process scan each poll and right after a launch.
-	stewarded *syncSet[string]
+	// stewardScan is the latest steward process scan (each poll and right
+	// after a launch) and stewardPending the PR URLs launched since. Both
+	// are owned by the main loop; see mergeStewarded.
+	stewardScan    map[string]bool
+	stewardPending map[string]time.Time
 
 	// Discovery cache: populated by doRefresh, reused until repoRefresh elapses.
 	lastDiscovery time.Time
@@ -143,6 +145,20 @@ type pollResult struct {
 	PRErr       error
 	NotifErr    error
 	DiscErr     error
+	Stewarded   map[string]bool // PR URLs from the steward process scan
+}
+
+// stewarded is the set of PR URLs to treat as having a steward session.
+func (c watchConfig) stewarded(now time.Time) map[string]bool {
+	set, _ := mergeStewarded(c.stewardScan, c.stewardPending, now)
+	return set
+}
+
+// applyStewardScan stores a fresh steward process scan and drops the
+// pending launches it settles.
+func (c *watchConfig) applyStewardScan(scan map[string]bool, now time.Time) {
+	c.stewardScan = scan
+	_, c.stewardPending = mergeStewarded(scan, c.stewardPending, now)
 }
 
 func runWatch(client *ghclient.Client, cfg watchConfig) {
@@ -156,7 +172,6 @@ func runWatch(client *ghclient.Client, cfg watchConfig) {
 	client.SetEtags(st.EtagCache)
 	cfg.muted = newRepoSet(st.MutedRepos)
 	cfg.dismissedRuns = newRunSet(dismissedRunSet(st))
-	cfg.stewarded = &syncSet[string]{}
 
 	if cfg.once {
 		runOnce(ctx, client, cfg, st)
@@ -197,8 +212,8 @@ func runWatch(client *ghclient.Client, cfg watchConfig) {
 	dismissQueue := make(chan dismissReq, 128)
 	dismissOutcomes := make(chan dismissOutcome, 16)
 	go dismissWorker(ctx, client, dismissQueue, dismissOutcomes)
-	// rescanned fires once a post-launch steward process scan finishes.
-	rescanned := make(chan struct{}, 1)
+	// stewardScans carries post-launch steward process scans to the loop.
+	stewardScans := make(chan map[string]bool, 4)
 
 	var (
 		refreshing  bool
@@ -247,7 +262,8 @@ func runWatch(client *ghclient.Client, cfg watchConfig) {
 			refreshing = true
 			render()
 
-		case <-rescanned:
+		case scan := <-stewardScans:
+			cfg.applyStewardScan(scan, time.Now())
 			render()
 
 		case <-winch:
@@ -405,7 +421,7 @@ func runWatch(client *ghclient.Client, cfg watchConfig) {
 			case 's':
 				p, _ := ownPR(st, focused)
 				_, lookErr := exec.LookPath("claude")
-				if msg := stewardRefusal(p, cfg.stewarded.Load(), lookErr == nil); msg != "" {
+				if msg := stewardRefusal(p, cfg.stewarded(time.Now()), lookErr == nil); msg != "" {
 					statusMsg = msg
 					render()
 					break
@@ -415,11 +431,14 @@ func runWatch(client *ghclient.Client, cfg watchConfig) {
 					if msg == "" {
 						openRepoInTerminal(dir, stewardCommand(p))
 						msg = "steward started: " + prKey(p)
+						if cfg.stewardPending == nil {
+							cfg.stewardPending = map[string]time.Time{}
+						}
+						cfg.stewardPending[p.URL] = time.Now()
 						go rescanStewarded(p.URL, stewardRescanDelays, time.Sleep, scanStewarded, func(m map[string]bool) {
-							cfg.stewarded.Store(m)
 							select {
-							case rescanned <- struct{}{}:
-							default:
+							case stewardScans <- m:
+							case <-ctx.Done():
 							}
 						})
 					}
@@ -574,12 +593,10 @@ func doRefresh(ctx context.Context, client *ghclient.Client, cfg *watchConfig) p
 		res.NotifErr = notifErr
 		return nil
 	})
-	if cfg.stewarded != nil {
-		g.Go(func() error {
-			cfg.stewarded.Store(scanStewarded())
-			return nil
-		})
-	}
+	g.Go(func() error {
+		res.Stewarded = scanStewarded()
+		return nil
+	})
 	_ = g.Wait()
 
 	if login, err := client.Viewer(); err == nil {
@@ -689,6 +706,7 @@ func attachProgress(client *ghclient.Client, cfg *watchConfig, rs []runs.Run, vi
 // applyResult updates state.Runs, fires notifications, and updates the cache
 // snapshot fields used for fast startup next time.
 func applyResult(st *state.State, cfg *watchConfig, res pollResult) {
+	cfg.applyStewardScan(res.Stewarded, time.Now())
 	if res.DiscErr != nil || res.PollErr != nil || res.PRErr != nil || res.NotifErr != nil {
 		// Still update RateLimit so the footer reflects reality.
 		st.LastRateLimit = res.RateLimit
@@ -878,7 +896,7 @@ func renderFromState(st *state.State, cfg watchConfig, refreshing bool, f focusT
 		StatusLine:    statusLine,
 		Links:         ui.SupportsLinks(),
 		ReadRunIDs:    readRunIDs(st),
-		Stewarded:     cfg.stewarded.Load(),
+		Stewarded:     cfg.stewarded(time.Now()),
 	}
 	switch f.Panel {
 	case "notifs":

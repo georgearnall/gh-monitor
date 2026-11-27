@@ -78,6 +78,28 @@ func isClaudeProcess(fields []string) bool {
 	return false
 }
 
+// stewardPendingTTL is how long a launched PR stays marked as stewarded
+// without a process scan confirming its session.
+const stewardPendingTTL = 15 * time.Second
+
+// mergeStewarded returns the stewarded set (scan plus pending launches) and
+// the launches still pending: those the scan doesn't show yet and that are
+// younger than stewardPendingTTL. pending is not modified.
+func mergeStewarded(scan map[string]bool, pending map[string]time.Time, now time.Time) (map[string]bool, map[string]time.Time) {
+	set := make(map[string]bool, len(scan)+len(pending))
+	for url := range scan {
+		set[url] = true
+	}
+	left := map[string]time.Time{}
+	for url, at := range pending {
+		if !scan[url] && now.Sub(at) < stewardPendingTTL {
+			left[url] = at
+			set[url] = true
+		}
+	}
+	return set, left
+}
+
 // ownPR returns the focused row's PR when it is one of the user's own PRs.
 func ownPR(st *state.State, focused focusTarget) (prs.PR, bool) {
 	if focused.Panel == "prs" {
