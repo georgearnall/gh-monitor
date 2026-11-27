@@ -20,15 +20,15 @@ func TestVisibleWidth(t *testing.T) {
 	}{
 		{"hello", 5},
 		{"", 0},
-		{"\x1b[31mhello\x1b[0m", 5},                                  // CSI red wrapping
-		{"\x1b[1;31mbold red\x1b[0m", 8},                             // multi-param CSI
-		{"\x1b]8;;https://example.com\x1b\\link\x1b]8;;\x1b\\", 4},   // OSC 8 hyperlink with ST terminator
-		{"\x1b]2;title\x07stuff", 5},                                 // OSC 2 with BEL terminator
-		{"✓ pass", 6},                                                // multibyte but single rune ✓
+		{"\x1b[31mhello\x1b[0m", 5},      // CSI red wrapping
+		{"\x1b[1;31mbold red\x1b[0m", 8}, // multi-param CSI
+		{"\x1b]8;;https://example.com\x1b\\link\x1b]8;;\x1b\\", 4}, // OSC 8 hyperlink with ST terminator
+		{"\x1b]2;title\x07stuff", 5},                               // OSC 2 with BEL terminator
+		{"✓ pass", 6},                                              // multibyte but single rune ✓
 		{"a✓b", 3},
-		{"🐛 fix bug", 10},                                           // emoji is 2 columns wide
-		{"👨‍👩‍👧 family", 9},                                         // ZWJ sequence is one 2-column cluster
-		{"\x1b[2m🐛 x\x1b[0m", 4},                                    // emoji inside ANSI wrap
+		{"🐛 fix bug", 10},        // emoji is 2 columns wide
+		{"👨‍👩‍👧 family", 9},      // ZWJ sequence is one 2-column cluster
+		{"\x1b[2m🐛 x\x1b[0m", 4}, // emoji inside ANSI wrap
 	}
 	for _, c := range cases {
 		got := visibleWidth(c.in)
@@ -454,7 +454,7 @@ func TestVisibleWidth_DefaultFgIsStripped(t *testing.T) {
 
 func TestStateGlyph(t *testing.T) {
 	cases := []struct {
-		state                        notifs.PRState
+		state                           notifs.PRState
 		wantIcon, wantLabel, wantColour string
 	}{
 		{notifs.PRStateOpen, "●", "open", ansiGreen},
@@ -652,7 +652,7 @@ func TestColumnOrdering(t *testing.T) {
 	prOut := captureStdout(t, func() {
 		writePRTable([]prs.PR{
 			{Repo: "a/b", Number: 1, Title: "test", URL: "u", UpdatedAt: now},
-		}, "", true, 0, "", true)
+		}, prTableOpts{"", true, 0, "", true, nil})
 	})
 	if !columnOrderOK(prOut, []string{"TITLE", "REPO"}) {
 		t.Errorf("prs: TITLE must come before REPO\n%s", prOut)
@@ -758,7 +758,7 @@ func TestWritePRTable_AdaptiveDropsBranchOnOverflow(t *testing.T) {
 	}
 
 	// At a generous width the natural table fits and BRANCH stays.
-	wide := captureStdout(t, func() { writePRTable(ps, "", true, 200, "", true) })
+	wide := captureStdout(t, func() { writePRTable(ps, prTableOpts{"", true, 200, "", true, nil}) })
 	if !strings.Contains(wide, "BRANCH") {
 		t.Errorf("BRANCH header should remain at width=200:\n%s", wide)
 	}
@@ -768,7 +768,7 @@ func TestWritePRTable_AdaptiveDropsBranchOnOverflow(t *testing.T) {
 
 	// At a width that would force aggressive repo truncation, BRANCH is
 	// the first column to go.
-	narrow := captureStdout(t, func() { writePRTable(ps, "", true, 110, "", true) })
+	narrow := captureStdout(t, func() { writePRTable(ps, prTableOpts{"", true, 110, "", true, nil}) })
 	if strings.Contains(narrow, "BRANCH") {
 		t.Errorf("BRANCH header should drop when too narrow:\n%s", narrow)
 	}
@@ -786,7 +786,7 @@ func TestWritePRTable_VeryNarrowAlsoCompactsStatus(t *testing.T) {
 		},
 	}
 	// Below the natural width even without BRANCH, status should compact.
-	out := captureStdout(t, func() { writePRTable(ps, "", true, 40, "", true) })
+	out := captureStdout(t, func() { writePRTable(ps, prTableOpts{"", true, 40, "", true, nil}) })
 	stripped := ansiRe.ReplaceAllString(out, "")
 	if strings.Contains(stripped, "1/1 fail") {
 		t.Errorf("status word 'fail' should drop at width=40:\n%s", stripped)
@@ -927,7 +927,7 @@ func TestWritePRTable_LinkUsesPaleBlue(t *testing.T) {
 	ps := []prs.PR{
 		{Repo: "x/y", Number: 1, Title: "t", URL: "https://x/y/pull/1", UpdatedAt: now},
 	}
-	out := captureStdout(t, func() { writePRTable(ps, "", true, 300, "", true) })
+	out := captureStdout(t, func() { writePRTable(ps, prTableOpts{"", true, 300, "", true, nil}) })
 	if !strings.Contains(out, ansiPaleBlue+"open ↗"+ansiReset) {
 		t.Errorf("expected pale blue link in PR row:\n%q", out)
 	}
@@ -1105,7 +1105,7 @@ func TestWritePRTable_DimsOrganisation(t *testing.T) {
 	ps := []prs.PR{
 		{Repo: "trainline-private/foo", Number: 1, Title: "test", URL: "u", UpdatedAt: now},
 	}
-	out := captureStdout(t, func() { writePRTable(ps, "", true, 300, "", true) })
+	out := captureStdout(t, func() { writePRTable(ps, prTableOpts{"", true, 300, "", true, nil}) })
 	if !strings.Contains(out, ansiDim+"trainline-private/"+ansiReset+"foo") {
 		t.Errorf("expected owner+slash dimmed; output:\n%q", out)
 	}
@@ -1146,7 +1146,7 @@ func TestWritePRTable_TitleTruncatedAt80(t *testing.T) {
 	ps := []prs.PR{
 		{Repo: "x/y", Number: 1, Title: title, URL: "u", UpdatedAt: now},
 	}
-	out := captureStdout(t, func() { writePRTable(ps, "", true, 300, "", true) })
+	out := captureStdout(t, func() { writePRTable(ps, prTableOpts{"", true, 300, "", true, nil}) })
 	stripped := ansiRe.ReplaceAllString(out, "")
 	// 79 'a's + ellipsis = 80 visible columns.
 	wantTitle := strings.Repeat("a", 79) + "…"
@@ -1172,7 +1172,7 @@ func TestWritePRTable_FitsNarrowTerminal(t *testing.T) {
 	ps := narrowPRs()
 	for width := 70; width <= 140; width++ {
 		for _, tty := range []bool{false, true} {
-			out := captureStdout(t, func() { writePRTable(ps, "", tty, width, "https://jira", true) })
+			out := captureStdout(t, func() { writePRTable(ps, prTableOpts{"", tty, width, "https://jira", true, nil}) })
 			for _, line := range strings.Split(strings.TrimRight(out, "\n"), "\n") {
 				if w := visibleWidth(line); w > width {
 					t.Errorf("width %d tty=%v: line is %d cols:\n%s", width, tty, w, out)
@@ -1185,7 +1185,7 @@ func TestWritePRTable_FitsNarrowTerminal(t *testing.T) {
 func TestWritePRTable_ShedOrder(t *testing.T) {
 	ps := narrowPRs()
 	render := func(width int) string {
-		return ansiRe.ReplaceAllString(captureStdout(t, func() { writePRTable(ps, "", true, width, "", true) }), "")
+		return ansiRe.ReplaceAllString(captureStdout(t, func() { writePRTable(ps, prTableOpts{"", true, width, "", true, nil}) }), "")
 	}
 
 	// Mid width: BRANCH and the checks word go, everything else stays.
@@ -1220,7 +1220,7 @@ func TestWritePRTable_FocusCursor(t *testing.T) {
 		{Repo: "acme/a", Number: 1, Title: "one", URL: "https://github.com/acme/a/pull/1", UpdatedAt: now},
 		{Repo: "acme/b", Number: 2, Title: "two", URL: "https://github.com/acme/b/pull/2", UpdatedAt: now},
 	}
-	out := captureStdout(t, func() { writePRTable(ps, "acme/b#2", true, 0, "", true) })
+	out := captureStdout(t, func() { writePRTable(ps, prTableOpts{"acme/b#2", true, 0, "", true, nil}) })
 	stripped := ansiRe.ReplaceAllString(out, "")
 	if !strings.Contains(stripped, "▶") {
 		t.Fatalf("expected cursor glyph in output:\n%s", stripped)
@@ -1231,7 +1231,7 @@ func TestWritePRTable_FocusCursor(t *testing.T) {
 		}
 	}
 
-	out = captureStdout(t, func() { writePRTable(ps, "", true, 0, "", true) })
+	out = captureStdout(t, func() { writePRTable(ps, prTableOpts{"", true, 0, "", true, nil}) })
 	if strings.Contains(ansiRe.ReplaceAllString(out, ""), "▶") {
 		t.Errorf("expected no PR cursor when focusedKey empty:\n%s", out)
 	}
@@ -1474,5 +1474,66 @@ func TestProgressLine_UsesFullWidthThenTruncates(t *testing.T) {
 	}
 	if !strings.HasSuffix(narrow, "… +1") {
 		t.Errorf("parallel suffix must survive truncation: %q", narrow)
+	}
+}
+
+func TestWritePRTable_StewardedMarker(t *testing.T) {
+	ps := []prs.PR{
+		{Repo: "acme/a", Number: 1, Title: "one", URL: "https://x/1"},
+		{Repo: "acme/a", Number: 2, Title: "two", URL: "https://x/2"},
+	}
+	stewarded := map[string]bool{"https://x/2": true}
+	for _, tty := range []bool{true, false} {
+		out := captureStdout(t, func() { writePRTable(ps, prTableOpts{"acme/a#2", tty, 120, "", false, stewarded}) })
+		lines := strings.Split(ansiRe.ReplaceAllString(out, ""), "\n")
+		if strings.Contains(lines[1], "✻") || !strings.Contains(lines[2], "✻") {
+			t.Errorf("tty=%v: marker should be on the second PR row only:\n%s", tty, strings.Join(lines, "\n"))
+		}
+		if tty && !strings.Contains(out, "\x1b[38;5;208m✻") {
+			t.Errorf("tty marker should be orange: %q", out)
+		}
+		if !tty && strings.Contains(out, "\x1b[") {
+			t.Errorf("non-tty output should be plain: %q", out)
+		}
+	}
+}
+
+func TestRender_StewardedMarkerOnlyOnOwnPRs(t *testing.T) {
+	pr := prs.PR{Repo: "acme/a", Number: 1, Title: "one", URL: "https://x/1"}
+	out := captureStdout(t, func() {
+		Render(Snapshot{
+			TermWidth:   200,
+			PRs:         []prs.PR{pr},
+			AssignedPRs: []prs.PR{pr, {Repo: "acme/a", Number: 2, Title: "two", URL: "https://x/2"}},
+			Stewarded:   map[string]bool{"https://x/1": true, "https://x/2": true},
+		})
+	})
+	out = ansiRe.ReplaceAllString(out, "")
+	own, assigned, ok := strings.Cut(out, "ASSIGNED PULL REQUESTS")
+	if !ok {
+		t.Fatalf("no assigned section:\n%s", out)
+	}
+	if !strings.Contains(own, "✻") {
+		t.Errorf("own PR should show the marker:\n%s", own)
+	}
+	if strings.Contains(assigned, "✻") {
+		t.Errorf("assigned PRs must never show the marker:\n%s", assigned)
+	}
+}
+
+func TestWrapHints_BreaksBetweenWholeHints(t *testing.T) {
+	hints := []string{"[a] one", "[b] two", "[c] three"}
+	got := wrapHints(hints, 16)
+	want := []string{"[a] one  [b] two", "[c] three"}
+	if strings.Join(got, "|") != strings.Join(want, "|") {
+		t.Errorf("wrapHints = %q, want %q", got, want)
+	}
+	if got := wrapHints(hints, 0); len(got) != 1 {
+		t.Errorf("width 0 should not wrap, got %q", got)
+	}
+	for _, line := range wrapHints(keyHints, 40) {
+		if visibleWidth(line) > 40 {
+			t.Errorf("line %q wider than 40", line)
+		}
 	}
 }

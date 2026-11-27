@@ -45,6 +45,8 @@ const (
 	// ansiPurple is a 256-colour purple chosen to match GitHub's merged-
 	// PR colour reasonably well in most terminals.
 	ansiPurple = "\x1b[38;5;141m"
+	// ansiOrange marks PRs with a running steward session.
+	ansiOrange = "\x1b[38;5;208m"
 	// ansiDefaultFg cancels the foreground colour without touching the
 	// intensity attribute. Used as a closer inside row-level dim wraps
 	// so that a colour span ends without also turning off dim.
@@ -164,15 +166,16 @@ type Snapshot struct {
 	RateLimit      int
 	PolledAt       time.Time
 	NextPollIn     time.Duration
-	TermWidth      int            // 0 = unknown / unconstrained
-	Stale          bool           // rendering from disk cache, not fresh
-	Refreshing     bool           // a background refresh is in flight
-	BgErr          string         // recent background-task error to surface in the footer
-	JiraURL        string         // base URL for clickable ticket refs (empty = no links)
-	PromptLine     string         // non-empty: show an inline input prompt at the footer
-	StatusLine     string         // non-empty: show a one-line status message at the footer (ignored while PromptLine is active)
-	Links          bool           // whether the terminal supports OSC 8 hyperlinks; hides LINK column when false
-	ReadRunIDs     map[int64]bool // run IDs the user has marked read; rendered dimmed
+	TermWidth      int             // 0 = unknown / unconstrained
+	Stale          bool            // rendering from disk cache, not fresh
+	Refreshing     bool            // a background refresh is in flight
+	BgErr          string          // recent background-task error to surface in the footer
+	JiraURL        string          // base URL for clickable ticket refs (empty = no links)
+	PromptLine     string          // non-empty: show an inline input prompt at the footer
+	StatusLine     string          // non-empty: show a one-line status message at the footer (ignored while PromptLine is active)
+	Links          bool            // whether the terminal supports OSC 8 hyperlinks; hides LINK column when false
+	ReadRunIDs     map[int64]bool  // run IDs the user has marked read; rendered dimmed
+	Stewarded      map[string]bool // PR URLs with a running steward session; marked ✻ on own PRs
 }
 
 // Render redraws the status table. Safe to call when stdout is not a tty;
@@ -203,7 +206,7 @@ func Render(snap Snapshot) {
 	pln(tty)
 	pln(tty, dim("PULL REQUESTS", tty))
 	if len(snap.PRs) > 0 {
-		writePRTable(snap.PRs, snap.FocusedPRKey, tty, snap.TermWidth, snap.JiraURL, snap.Links)
+		writePRTable(snap.PRs, prTableOpts{snap.FocusedPRKey, tty, snap.TermWidth, snap.JiraURL, snap.Links, snap.Stewarded})
 	} else {
 		pln(tty, dim("no open pull requests", tty))
 	}
@@ -211,7 +214,7 @@ func Render(snap Snapshot) {
 	if len(snap.AssignedPRs) > 0 {
 		pln(tty)
 		pln(tty, dim("ASSIGNED PULL REQUESTS", tty))
-		writePRTable(snap.AssignedPRs, snap.FocusedPRKey, tty, snap.TermWidth, snap.JiraURL, snap.Links)
+		writePRTable(snap.AssignedPRs, prTableOpts{snap.FocusedPRKey, tty, snap.TermWidth, snap.JiraURL, snap.Links, nil})
 	}
 
 	pln(tty)
@@ -390,6 +393,30 @@ func header(_ Snapshot, tty bool) {
 	pln(tty, title)
 }
 
+var keyHints = []string{"[↑↓] move", "[↵] open", "[m] read", "[d] dismiss", "[x] mute repo", "[t] ticket", "[g] terminal", "[s] steward", "[r] refresh", "[?] config", "[q] quit"}
+
+// wrapHints packs hints greedily into lines no wider than width, breaking
+// only between whole hints. width <= 0 means unconstrained.
+func wrapHints(hints []string, width int) []string {
+	var lines []string
+	line := ""
+	for _, h := range hints {
+		switch {
+		case line == "":
+			line = h
+		case width > 0 && visibleWidth(line)+2+visibleWidth(h) > width:
+			lines = append(lines, line)
+			line = h
+		default:
+			line += "  " + h
+		}
+	}
+	if line != "" {
+		lines = append(lines, line)
+	}
+	return lines
+}
+
 func footer(snap Snapshot, tty bool) {
 	parts := []string{polledLabel(snap)}
 	if len(snap.Notifs) > 0 {
@@ -405,7 +432,9 @@ func footer(snap Snapshot, tty bool) {
 	}
 	pln(tty)
 	if tty {
-		pln(tty, dim("[↑↓] move  [↵] open  [m] read  [d] dismiss  [x] mute repo  [t] ticket  [g] terminal  [r] refresh  [?] config  [q] quit", tty))
+		for _, line := range wrapHints(keyHints, snap.TermWidth) {
+			pln(tty, dim(line, tty))
+		}
 	}
 	pln(tty, dim(join(parts, " · "), tty))
 	if snap.BgErr != "" {
@@ -627,22 +656,33 @@ type prLayout struct {
 	shortLink     bool // link shown as a bare ↗ under a blank header
 }
 
-func writePRTable(ps []prs.PR, focusedKey string, tty bool, termWidth int, jiraURL string, links bool) {
+// prTableOpts is how writePRTable renders a PR table.
+type prTableOpts struct {
+	focusedKey string
+	tty        bool
+	termWidth  int
+	jiraURL    string
+	links      bool
+	stewarded  map[string]bool // PR URLs to mark with ✻; nil for assigned PRs
+}
+
+func writePRTable(ps []prs.PR, opts prTableOpts) {
+	termWidth := opts.termWidth
 	l := prLayout{titleLimit: prTitleWide, branch: true, numAge: true}
-	raw := buildPRRows(ps, focusedKey, tty, jiraURL, links, l)
+	raw := buildPRRows(ps, opts, l)
 	if termWidth > 0 {
 		over := func() int { return tableWidth(raw) - termWidth }
 		if o := over(); o > 0 {
 			l.titleLimit = max(prTitleMax, columnWidths(raw)[prTitleCol]-o)
-			raw = buildPRRows(ps, focusedKey, tty, jiraURL, links, l)
+			raw = buildPRRows(ps, opts, l)
 		}
 		if over() > 0 {
 			l.branch = false
-			raw = buildPRRows(ps, focusedKey, tty, jiraURL, links, l)
+			raw = buildPRRows(ps, opts, l)
 		}
 		if over() > 0 {
 			l.compactStatus = true
-			raw = buildPRRows(ps, focusedKey, tty, jiraURL, links, l)
+			raw = buildPRRows(ps, opts, l)
 		}
 		// From here the repo's organisations count as free room: they are
 		// trimmed before anything else is shed.
@@ -656,21 +696,22 @@ func writePRTable(ps []prs.PR, focusedKey string, tty bool, termWidth int, jiraU
 				break
 			}
 			shed()
-			raw = buildPRRows(ps, focusedKey, tty, jiraURL, links, l)
+			raw = buildPRRows(ps, opts, l)
 		}
 		if o := tight(); o > 0 {
 			l.titleLimit = max(titleMin, columnWidths(raw)[prTitleCol]-o)
-			raw = buildPRRows(ps, focusedKey, tty, jiraURL, links, l)
+			raw = buildPRRows(ps, opts, l)
 		}
 	}
-	t := newPanelTable(raw[0], prRepoCol, termWidth, tty)
+	t := newPanelTable(raw[0], prRepoCol, termWidth, opts.tty)
 	for _, r := range raw[1:] {
 		t.addRow(r, false)
 	}
 	t.render()
 }
 
-func buildPRRows(ps []prs.PR, focusedKey string, tty bool, jiraURL string, links bool, l prLayout) [][]string {
+func buildPRRows(ps []prs.PR, opts prTableOpts, l prLayout) [][]string {
+	focusedKey, tty, jiraURL, links, stewarded := opts.focusedKey, opts.tty, opts.jiraURL, opts.links, opts.stewarded
 	header := []string{"  ", "CHECKS", "REVIEW", "TITLE", "REPO"}
 	if l.numAge {
 		header = append(header, "#")
@@ -692,9 +733,14 @@ func buildPRRows(ps []prs.PR, focusedKey string, tty bool, jiraURL string, links
 		if tty {
 			title = styleTickets(title, jiraURL)
 		}
-		cursor := "  "
+		cursor := " "
 		if focusedKey != "" && fmt.Sprintf("%s#%d", p.Repo, p.Number) == focusedKey {
-			cursor = color(ansiYellow, "▶", tty) + " "
+			cursor = color(ansiYellow, "▶", tty)
+		}
+		if stewarded[p.URL] {
+			cursor += color(ansiOrange, "✻", tty)
+		} else {
+			cursor += " "
 		}
 		row := []string{
 			cursor,

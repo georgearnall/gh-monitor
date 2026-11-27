@@ -537,6 +537,66 @@ func TestResolveWorktreePath(t *testing.T) {
 	})
 }
 
+func TestShellCommand_QuotesEveryArg(t *testing.T) {
+	got := shellCommand("/a b/it's", []string{"claude", "-n", "steward o/r#1", "/steward https://x/y?a=1&b=$c"})
+	want := `cd '/a b/it'\''s' && 'claude' '-n' 'steward o/r#1' '/steward https://x/y?a=1&b=$c'`
+	if got != want {
+		t.Errorf("shellCommand =\n%s\nwant\n%s", got, want)
+	}
+}
+
+func TestAppleScriptString_EscapesQuotesAndBackslashes(t *testing.T) {
+	if got, want := appleScriptString(`a "b" \c`), `"a \"b\" \\c"`; got != want {
+		t.Errorf("appleScriptString = %s, want %s", got, want)
+	}
+}
+
+func TestTerminalCommands(t *testing.T) {
+	const p = "/a b"
+	cmd := []string{"claude", "/steward u"}
+	line := `"cd '/a b' && 'claude' '/steward u'"`
+	cases := []struct {
+		goos    string
+		command []string
+		want    [][]string
+	}{
+		{"darwin", nil, [][]string{
+			{"open", "-a", "Ghostty", p},
+			{"open", "-a", "iTerm", p},
+			{"open", "-a", "Terminal", p},
+		}},
+		{"darwin", cmd, [][]string{
+			{"open", "-na", "Ghostty", "--args", "--working-directory=" + p, "-e", "claude", "/steward u"},
+			{"osascript", "-e", `tell application "iTerm" to tell (create window with default profile) to tell current session to write text ` + line},
+			{"osascript", "-e", `tell application "Terminal" to do script ` + line, "-e", `tell application "Terminal" to activate`},
+		}},
+		{"windows", nil, [][]string{
+			{"wt", "-d", p},
+			{"cmd", "/c", "start", "", "/D", p, "cmd"},
+		}},
+		{"windows", cmd, [][]string{
+			{"wt", "-d", p, "claude", "/steward u"},
+			{"cmd", "/c", "start", "", "/D", p, "claude", "/steward u"},
+		}},
+		{"linux", nil, [][]string{
+			{"gnome-terminal", "--working-directory=" + p},
+			{"konsole", "--workdir", p},
+			{"xterm", "-e", "sh", "-c", `cd "$1" && exec "$SHELL"`, "sh", p},
+		}},
+		{"linux", cmd, [][]string{
+			{"gnome-terminal", "--working-directory=" + p, "--", "claude", "/steward u"},
+			{"konsole", "--workdir", p, "-e", "claude", "/steward u"},
+			{"xterm", "-e", "sh", "-c", `cd "$1" && shift && exec "$@"`, "sh", p, "claude", "/steward u"},
+		}},
+	}
+	for _, c := range cases {
+		got := terminalCommands(c.goos, p, c.command)
+		if !reflect.DeepEqual(got, c.want) {
+			t.Errorf("terminalCommands(%s, %q) =\n%q\nwant\n%q", c.goos, c.command, got, c.want)
+		}
+	}
+}
+
 func mustMkdirAll(t *testing.T, path string) {
 	t.Helper()
 	if err := os.MkdirAll(path, 0o755); err != nil {
